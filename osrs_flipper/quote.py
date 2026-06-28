@@ -95,11 +95,14 @@ def optimal_quote(
     if bid is None or ask is None:
         return None
 
-    mid = (bid + ask) / 2
-    band = max(2, round(0.005 * mid))
-    step = max(1, (2 * band) // 30)
-    buy_grid = range(int(bid - band), int(ask) + 1, step)
-    sell_grid = range(int(bid), int(ask + band) + 1, step)
+    # Only quote marketable prices: a buy must sit in [bid, ask) and a sell in (bid, ask].
+    # Quoting below the bid or above the ask isn't a fast fill — you'd just sit out of market.
+    spread = int(ask) - int(bid)
+    if spread < 1:
+        return None  # no spread to capture
+    step = max(1, spread // 30)
+    buy_grid = range(int(bid), int(ask), step)
+    sell_grid = range(int(bid) + 1, int(ask) + 1, step)
 
     results = []
     for b in buy_grid:
