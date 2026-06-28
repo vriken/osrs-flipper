@@ -55,3 +55,12 @@ def test_equity_marks_inventory_at_bid(j):
 def test_set_cash_persists(j):
     j.set_cash(204_000)
     assert j.cash() == 204_000
+
+
+def test_predictions_logged_and_read_back(j):
+    j.log_prediction(GOLD_BAR, "Gold bar", 2000, 97, 101, 0.9, 0.8, 0.72, 5760)
+    preds = j.recent_predictions(5)
+    assert len(preds) == 1
+    assert preds[0]["name"] == "Gold bar"
+    assert preds[0]["buy_px"] == 97 and preds[0]["sell_px"] == 101
+    assert abs(preds[0]["p_round"] - 0.72) < 1e-9

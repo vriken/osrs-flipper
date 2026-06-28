@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS ledger (
     ts BIGINT, item_id INTEGER, name TEXT, side TEXT, qty BIGINT,
     price BIGINT, tax BIGINT, cash_delta DOUBLE, realized_pnl DOUBLE
 );
+CREATE TABLE IF NOT EXISTS predictions (
+    ts BIGINT, item_id INTEGER, name TEXT, qty BIGINT,
+    buy_px BIGINT, sell_px BIGINT, p_buy DOUBLE, p_sell DOUBLE, p_round DOUBLE, ev DOUBLE
+);
 """
 
 
@@ -118,6 +122,20 @@ class Journal:
 
     def equity(self, bids: dict[int, int | None]) -> float:
         return self.cash() + self.inventory_value(bids)
+
+    def log_prediction(self, item_id: int, name: str, qty: int, buy_px: int, sell_px: int,
+                       p_buy: float, p_sell: float, p_round: float, ev: float) -> None:
+        """Record what the model predicted at decision time, to calibrate against real fills later."""
+        self.con.execute("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         [int(time.time()), item_id, name, qty, buy_px, sell_px,
+                          p_buy, p_sell, p_round, ev])
+
+    def recent_predictions(self, n: int = 10) -> list[dict[str, Any]]:
+        rows = self.con.execute(
+            "SELECT ts,name,qty,buy_px,sell_px,p_round,ev FROM predictions ORDER BY ts DESC LIMIT ?", [n]
+        ).fetchall()
+        return [{"ts": r[0], "name": r[1], "qty": r[2], "buy_px": r[3], "sell_px": r[4],
+                 "p_round": r[5], "ev": r[6]} for r in rows]
 
     def recent(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self.con.execute(
