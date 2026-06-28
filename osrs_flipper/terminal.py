@@ -291,19 +291,45 @@ class Terminal:
             self._overnight_plan(cash)
 
     def _overnight_plan(self, cash: int) -> None:
-        """Diversified overnight buys filling every free slot, with a margin cushion."""
+        """One big buy per FREE slot (you can't cycle slots while asleep), diversified,
+        cushioned, sized to fill over ~8h. Splits the whole pile across the free slots."""
+        from .quote import optimal_quote
         held = self.j.positions()
         rl = runelite.read()
         offers = runelite.active_offers(rl) if rl else []
         free = runelite.free_slots(rl, config.GE_SLOTS) if rl is not None else max(0, config.GE_SLOTS - len(held))
-        source = "runelite" if rl is not None else "assumed"
-        exclude = [h.item_id for h in held] + [o.item_id for o in offers]
-        picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=exclude, free_slots=free,
-            limit_used=self._limit_used(rl), min_margin=config.OVERNIGHT_MIN_MARGIN)
-        print(f"  OVERNIGHT plan — diversified buys, ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion. "
-              "Place these, sleep, then collect + sell at wake:")
-        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+        if free <= 0:
+            print("  no free slots — collect or cancel an offer first, then `overnight`")
+            return
+        exclude = {h.item_id for h in held} | {o.item_id for o in offers}
+        limit_used = self._limit_used(rl)
+        mapping = {r["id"]: r for r in api.mapping()}
+        df = scanner.scan(mode="offline", bankroll=cash, top=40, limit_used=limit_used)
+        rows, remaining, slots_left = [], float(cash), free
+        for _, r in df.iterrows():
+            if slots_left <= 0:
+                break
+            iid = int(r["item_id"])
+            if iid in exclude or r.get("margin_fast", 1) <= 0 or r.get("margin_pct", 0) < config.OVERNIGHT_MIN_MARGIN:
+                continue
+            meta = mapping.get(iid, {})
+            bid = api.one_hour().get(iid, {}).get("avgLowPrice") or api.latest().get(iid, {}).get("low")
+            if not bid:
+                continue
+            budget = remaining / slots_left  # fair share of the pile, with spillover
+            cap = max(0, (meta.get("limit") or 0) * 2 - limit_used.get(iid, 0))  # ~2 buy-limit windows
+            qty = min(cap or 10**9, int(budget // bid))
+            q = optimal_quote(iid, qty, name=r["name"], horizon_h=8.0) if qty > 0 else None
+            if not q:
+                continue
+            filled = int(q.qty * q.p_buy)
+            rows.append({"name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": q.qty,
+                         "deploy": q.qty * q.buy_px, "fill8h": q.p_buy, "profit": q.net_unit * filled})
+            exclude.add(iid)
+            remaining -= q.qty * q.buy_px
+            slots_left -= 1
+        print(f"  OVERNIGHT plan — ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion, sized to fill over ~8h:")
+        print(alert.format_overnight(rows, cash, free))
 
     def _overnight_single(self, name_or_id: str, cash: int) -> None:
         """One big buy of a named item over an ~8h horizon (~2 buy-limit windows)."""

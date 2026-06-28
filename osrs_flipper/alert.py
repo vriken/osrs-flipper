@@ -156,6 +156,24 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
     return "\n".join(lines)
 
 
+def format_overnight(rows: list[dict], cash: int, free: int) -> str:
+    """One big buy per free slot — what you can actually place before sleeping."""
+    if not rows:
+        return "  no safe overnight buys for your free slots right now"
+    lines = [f"  {free} free slot(s) — place these {len(rows)} buy(s) now, then sleep:",
+             f"  {'#':>2} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} {'deploy':>9} {'fill8h':>6} {'profit':>9}"]
+    tot_dep = tot_prof = 0.0
+    for i, r in enumerate(rows, 1):
+        prof = color(f"+{r['profit']:,.0f}", "green")
+        lines.append(f"  {i:>2} {str(r['name'])[:16]:16} {r['buy']:>7,} {r['sell']:>7,} "
+                     f"{r['qty']:>8,} {r['deploy']:>9,} {r['fill8h']:>5.0%} {prof:>9}")
+        tot_dep += r["deploy"]
+        tot_prof += r["profit"]
+    lines.append(f"  deploy {tot_dep:,.0f} of {cash:,} ({cash - tot_dep:,.0f} idle) · ~{tot_prof:,.0f} gp when sold")
+    lines.append("  fill8h = est. fraction that fills overnight · `brief` at wake to collect + sell")
+    return "\n".join(lines)
+
+
 def format_sell_plan(rows: list[dict]) -> str:
     """Recommended sell listings for inventory you hold (and aren't already selling)."""
     if not rows:
