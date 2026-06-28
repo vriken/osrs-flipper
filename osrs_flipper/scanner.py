@@ -166,8 +166,15 @@ def _pick_row(row, tier: str, cap_units: int) -> dict:
     }
 
 
+def _worth_gp(row, cap_units: int, tier: str) -> float:
+    """Max gp this position could net at its cap — used to drop slot-wasting trivial flips."""
+    fill = float(row["p_complete"]) if tier != "hold" else 1.0
+    return int(row["margin_abs"]) * cap_units * fill
+
+
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
-                    max_accumulate: int = 6) -> tuple[list[dict], float]:
+                    max_accumulate: int = 6, min_gp: int | None = None,
+                    min_margin: float = 0.01) -> tuple[list[dict], float]:
     """Two-tier capital deployment:
       ACTIVE  — one diversified flip per free slot (online/balanced/offline), capped by
                 fast-fill liquidity — what you work in your slots right now.
@@ -176,25 +183,30 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     Only items whose spread survives a queue-jump (fast_net > 0) qualify, so the pile
     can't pour into penny traps. Returns (allocated picks, idle cash).
     """
+    # a flip must clear this to be worth a slot + the clicks (≈0.2% of bankroll, floor 250)
+    if min_gp is None:
+        min_gp = max(250, int(bankroll * 0.002))
     roles = ["online", "balanced", "offline"][:max(0, free_slots)]
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40) for m in modes}
     taken = {int(i) for i in held_ids}
 
     def ok(row) -> bool:
-        return int(row["item_id"]) not in taken and float(row.get("margin_fast", 1)) > 0
+        return (int(row["item_id"]) not in taken
+                and float(row.get("margin_fast", 1)) > 0  # spread survives a queue-jump
+                and float(row["margin_pct"]) >= min_margin)  # return rate worth the capital/risk
 
     picks: list[dict] = []
-    for role in roles:  # active: diversified by role
+    for role in roles:  # active: best worth-it flip for the role
         for _, row in rankings[role].iterrows():
-            if ok(row):
+            if ok(row) and _worth_gp(row, int(row["liq_units"]), role) >= min_gp:
                 picks.append(_pick_row(row, role, int(row["liq_units"])))
                 taken.add(int(row["item_id"]))
                 break
     for _, row in rankings["balanced"].iterrows():  # hold: accumulate the rest into inventory
         if sum(p["tier"] == "hold" for p in picks) >= max_accumulate:
             break
-        if ok(row):
+        if ok(row) and _worth_gp(row, int(row["buy_limit"]), "hold") >= min_gp:
             picks.append(_pick_row(row, "hold", int(row["buy_limit"])))
             taken.add(int(row["item_id"]))
 

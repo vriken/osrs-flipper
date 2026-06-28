@@ -1,6 +1,6 @@
 """Composite score + shrinkage behaviour."""
 
-from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _shrink
+from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _shrink, _worth_gp
 
 
 def test_offline_ignores_fill_time():
@@ -58,6 +58,14 @@ def test_allocate_leaves_idle_when_liquidity_capped():
     out, idle = _allocate([_pick(50, 100, 5)], 20_000)  # can only absorb 5,000
     assert out[0]["deploy"] == 5_000
     assert idle == 15_000
+
+
+def test_worth_gp_flags_trivial_flips():
+    tiara = {"margin_abs": 5, "p_complete": 1.0}  # liquidity-capped at 15 units
+    assert _worth_gp(tiara, 15, "online") == 75  # below any sane floor → dropped
+    big = {"margin_abs": 13, "p_complete": 0.5}
+    assert _worth_gp(big, 1000, "online") == 6500
+    assert _worth_gp(big, 1000, "hold") == 13000  # hold ignores fill (sells over time)
 
 
 def test_allocate_fair_share_prevents_one_slot_soaking_all():
