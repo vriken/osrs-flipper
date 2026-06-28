@@ -87,8 +87,8 @@ class Terminal:
             return
         from .quote import suggested_qty
         bankroll = int(self.j.cash()) or config.BANKROLL
-        # respect the rolling 4h buy limit already used on this item
-        limit_eff = max(0, (meta.get("limit") or 0) - self.j.buy_limit_used().get(meta["id"], 0))
+        # respect the rolling 4h buy limit already used (RuneLite counter preferred)
+        limit_eff = max(0, (meta.get("limit") or 0) - self._limit_used().get(meta["id"], 0))
         qty = qty or suggested_qty(meta["id"], limit_eff, bankroll)
         if qty <= 0:
             print("  buy limit reached for this item (4h window) or no cash — nothing to quote")
