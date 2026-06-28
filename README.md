@@ -53,6 +53,7 @@ A self-contained REPL — no LLM, no token cost. State persists in DuckDB across
 
 ```
 osrs> bank 204000                  set your current cash
+osrs> port                         recommended allocation: active flips + accumulate
 osrs> scan 15                      ranked live flips
 osrs> quote Grapes                 optimal buy/sell prices + efficient frontier
 osrs> buy Grapes 2800 71           log a buy fill (item qty price)

@@ -37,6 +37,20 @@ def _cmd_trade(args: argparse.Namespace) -> None:
     run()
 
 
+def _cmd_portfolio(args: argparse.Namespace) -> None:
+    from . import alert, scanner
+    from .journal import Journal
+
+    with Journal() as j:
+        held = j.positions()
+        cash = args.bankroll or int(j.cash()) or config.BANKROLL
+    free = args.slots if args.slots else max(0, config.GE_SLOTS - len(held))
+    picks, idle = scanner.build_portfolio(
+        bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
+        members=True if args.members else None)
+    print(alert.format_portfolio(picks, cash, held, idle))
+
+
 def _cmd_quote(args: argparse.Namespace) -> None:
     from . import alert, api
     from .quote import optimal_quote, suggested_qty
@@ -88,6 +102,12 @@ def main(argv: list[str] | None = None) -> None:
 
     t = sub.add_parser("trade", help="launch the interactive trading terminal (no tokens)")
     t.set_defaults(func=_cmd_trade)
+
+    pf = sub.add_parser("portfolio", help="recommend a diversified allocation for your free slots")
+    pf.add_argument("--bankroll", type=int, default=0, help="override cash (default: journal balance)")
+    pf.add_argument("--slots", type=int, default=0, help="free slots (default: GE_SLOTS - held positions)")
+    pf.add_argument("--members", action="store_true")
+    pf.set_defaults(func=_cmd_portfolio)
 
     q = sub.add_parser("quote", help="solve for the gp/hour-optimal buy/sell prices for an item")
     q.add_argument("item", help="item name or id")

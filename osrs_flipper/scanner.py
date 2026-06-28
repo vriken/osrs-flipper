@@ -133,6 +133,78 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
     return out.sort_values(RANK_COL, ascending=False)
 
 
+def _allocate(picks: list[dict], bankroll: float) -> tuple[list[dict], float]:
+    """Split cash across picks by FAIR SHARE so no single position soaks the whole pile.
+
+    Each position's budget is its even share of the cash still unallocated, capped by its
+    own `cap_units` (fast-fill liquidity for active flips; buy limit for accumulation).
+    Underused budget spills forward. Returns (allocated picks, idle cash).
+    """
+    remaining = float(bankroll)
+    out = []
+    for i, p in enumerate(picks):
+        buy = p["buy_px"]
+        slots_left = len(picks) - i
+        if buy <= 0 or remaining <= 0 or slots_left <= 0:
+            continue
+        budget = remaining / slots_left  # fair share of what's left (spillover-aware)
+        alloc = min(budget, p["cap_units"] * buy)
+        qty = int(alloc // buy)
+        if qty <= 0:
+            continue
+        out.append({**p, "qty": qty, "deploy": qty * buy})
+        remaining -= qty * buy
+    return out, remaining
+
+
+def _pick_row(row, tier: str, cap_units: int) -> dict:
+    return {
+        "tier": tier, "item_id": int(row["item_id"]), "name": row["name"],
+        "buy_px": int(row["buy_px"]), "sell_px": int(row["sell_px"]),
+        "margin_abs": int(row["margin_abs"]), "p_complete": float(row["p_complete"]),
+        "cap_units": max(0, cap_units),
+    }
+
+
+def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
+                    max_accumulate: int = 6) -> tuple[list[dict], float]:
+    """Two-tier capital deployment:
+      ACTIVE  — one diversified flip per free slot (online/balanced/offline), capped by
+                fast-fill liquidity — what you work in your slots right now.
+      HOLD    — extra positions to absorb idle cash into inventory, capped by each item's
+                buy limit (you accumulate over 4h cycles; the 3 slots only gate offers).
+    Only items whose spread survives a queue-jump (fast_net > 0) qualify, so the pile
+    can't pour into penny traps. Returns (allocated picks, idle cash).
+    """
+    roles = ["online", "balanced", "offline"][:max(0, free_slots)]
+    modes = dict.fromkeys([*roles, "balanced"])
+    rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40) for m in modes}
+    taken = {int(i) for i in held_ids}
+
+    def ok(row) -> bool:
+        return int(row["item_id"]) not in taken and float(row.get("margin_fast", 1)) > 0
+
+    picks: list[dict] = []
+    for role in roles:  # active: diversified by role
+        for _, row in rankings[role].iterrows():
+            if ok(row):
+                picks.append(_pick_row(row, role, int(row["liq_units"])))
+                taken.add(int(row["item_id"]))
+                break
+    for _, row in rankings["balanced"].iterrows():  # hold: accumulate the rest into inventory
+        if sum(p["tier"] == "hold" for p in picks) >= max_accumulate:
+            break
+        if ok(row):
+            picks.append(_pick_row(row, "hold", int(row["buy_limit"])))
+            taken.add(int(row["item_id"]))
+
+    allocated, idle = _allocate(picks, bankroll)
+    for p in allocated:  # active gp is per-cycle; hold gp is the spread captured once sold
+        fill = p["p_complete"] if p["tier"] != "hold" else 1.0
+        p["gp"] = p["margin_abs"] * p["qty"] * fill
+    return allocated, idle
+
+
 def bond_progress(bankroll: int | None = None) -> dict[str, float | int | None]:
     """How close the bankroll is to affording a bond (the F2P → members milestone)."""
     bankroll = config.BANKROLL if bankroll is None else bankroll

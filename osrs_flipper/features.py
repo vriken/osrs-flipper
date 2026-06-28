@@ -112,6 +112,7 @@ def build_features(
             "vol_1h_binding": vol_binding,
             "capacity": cap,
             "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
+            "liq_units": min(buy_limit, int(math.floor(config.ALPHA * vol_binding))),  # cash-independent absorb cap
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,

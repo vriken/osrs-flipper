@@ -3,6 +3,7 @@
     osrs-flipper trade
 
 Commands (type `help`):
+  port [free_slots]        recommended diversified allocation for your free slots
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   buy <item> <quantity> <price>    log a buy fill
@@ -121,6 +122,15 @@ class Terminal:
             print(f"  sold {qty:,} {meta['name']} @ {price} = +{proceeds:,.0f} "
                   f"(realised {realized:+,.0f}) | cash {self.j.cash():,.0f}")
 
+    def cmd_port(self, args: list[str]) -> None:
+        cash = int(self.j.cash()) or config.BANKROLL
+        held = self.j.positions()
+        free = int(args[0]) if args and args[0].isdigit() else max(0, config.GE_SLOTS - len(held))
+        print(f"  building portfolio for {free} free slot(s)…")
+        picks, idle = scanner.build_portfolio(
+            bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free)
+        print(alert.format_portfolio(picks, cash, held, idle))
+
     def cmd_pos(self) -> None:
         pos = self.j.positions()
         if not pos:
@@ -166,6 +176,7 @@ class Terminal:
         handlers = {
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
+            "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),
