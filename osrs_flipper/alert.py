@@ -103,22 +103,27 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
     if not picks:
         lines.append("  (nothing passed the filters)")
     else:
-        lines.append(f"  {'#':>2} {'type':9} {'item':18} {'buy':>7} {'sell':>7} {'qty':>8} "
-                     f"{'deploy':>9} {'buyETA':>7} {'gp':>9}")
-        lines.append("  " + "-" * 80)
+        lines.append(f"  {'#':>2} {'type':9} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} "
+                     f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'gp':>9}")
+        lines.append("  " + "-" * 84)
         tot_dep = tot_gp = 0.0
         for i, p in enumerate(picks, 1):
             label = p["tier"] if p["tier"] != "hold" else "hold↓"
             eta = p.get("buy_eta_h", float("inf"))
+            fb = p.get("fill_by_h", float("inf"))
             eta_s = f"{eta:.1f}h" if eta < 100 else "—"
-            lines.append(f"  {i:>2} {label:9} {p['name'][:18]:18} {p['buy_px']:>7,} {p['sell_px']:>7,} "
-                         f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>7} {p['gp']:>9,.0f}")
+            fb_s = f"{fb:.1f}h" if fb < 100 else "—"
+            lines.append(f"  {i:>2} {label:9} {p['name'][:16]:16} {p['buy_px']:>7,} {p['sell_px']:>7,} "
+                         f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>5} {fb_s:>6} {p['gp']:>9,.0f}")
             tot_dep += p["deploy"]
             tot_gp += p["gp"]
-        lines.append("  " + "-" * 80)
+        lines.append("  " + "-" * 84)
+        n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
+        makespan = max((p.get("fill_by_h", 0) for p in picks), default=0)
         lines.append(f"  deploy {tot_dep:,.0f} of {bankroll:,} ({idle:,.0f} idle)  ·  ~{tot_gp:,.0f} gp potential")
-        lines.append("  place buys top-to-bottom (#): fastest-filling first frees slots to cycle the rest · "
-                     "hold↓ = accumulate into inventory")
+        lines.append(f"  place #1-#{n_now} NOW (your free slots); place each next as a slot fills · "
+                     f"~{makespan:.1f}h to deploy all")
+        lines.append("  ETA = fill time once placed · fillBy = when it's actually bought given your slot count")
     if held:
         lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
     if bankroll and idle > 0.5 * bankroll:

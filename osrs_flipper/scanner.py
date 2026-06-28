@@ -183,6 +183,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     Only items whose spread survives a queue-jump (fast_net > 0) qualify, so the pile
     can't pour into penny traps. Returns (allocated picks, idle cash).
     """
+    if free_slots <= 0:
+        return [], float(bankroll)  # no free slots → can't place any new buys
     # a flip must clear this to be worth a slot + the clicks (≈0.2% of bankroll, floor 250)
     if min_gp is None:
         min_gp = max(250, int(bankroll * 0.002))
@@ -218,7 +220,20 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
     # placement order: fastest-filling buys first, so slots clear and you can cycle the rest
     allocated.sort(key=lambda p: p["buy_eta_h"])
+    _schedule(allocated, free_slots)
     return allocated, idle
+
+
+def _schedule(picks: list[dict], slots: int) -> None:
+    """Annotate each pick with place_at_h / fill_by_h, simulating placement across `slots`
+    GE slots: you place `slots` at once; a later pick waits for the earliest slot to free."""
+    slot_free = [0.0] * max(1, slots)
+    for p in picks:
+        k = min(range(len(slot_free)), key=lambda i: slot_free[i])
+        eta = p["buy_eta_h"] if p["buy_eta_h"] < 100 else 100.0
+        p["place_at_h"] = slot_free[k]
+        p["fill_by_h"] = slot_free[k] + eta
+        slot_free[k] = p["fill_by_h"]
 
 
 def bond_progress(bankroll: int | None = None) -> dict[str, float | int | None]:
