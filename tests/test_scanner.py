@@ -1,6 +1,6 @@
 """Composite score + shrinkage behaviour."""
 
-from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _shrink, _worth_gp
+from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _schedule, _shrink, _worth_gp
 
 
 def test_offline_ignores_fill_time():
@@ -66,6 +66,15 @@ def test_worth_gp_flags_trivial_flips():
     big = {"margin_abs": 13, "p_complete": 0.5}
     assert _worth_gp(big, 1000, "online") == 6500
     assert _worth_gp(big, 1000, "hold") == 13000  # hold ignores fill (sells over time)
+
+
+def test_schedule_queues_extra_buys_until_a_slot_frees():
+    picks = [{"buy_eta_h": 1.0}, {"buy_eta_h": 2.0}, {"buy_eta_h": 1.0}]
+    _schedule(picks, slots=2)
+    assert picks[0]["place_at_h"] == 0 and picks[0]["fill_by_h"] == 1.0  # slot A now
+    assert picks[1]["place_at_h"] == 0 and picks[1]["fill_by_h"] == 2.0  # slot B now
+    # 3rd can't start until slot A frees at 1.0, then fills 1.0 later
+    assert picks[2]["place_at_h"] == 1.0 and picks[2]["fill_by_h"] == 2.0
 
 
 def test_allocate_fair_share_prevents_one_slot_soaking_all():
