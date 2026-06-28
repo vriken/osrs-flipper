@@ -49,6 +49,7 @@ def scan(
     candidates: int | None = None,
     mode: str = "balanced",
     min_gp: int = 0,
+    limit_used: dict[int, int] | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -57,7 +58,7 @@ def scan(
     gated out by the tradeable + spread-persistence checks first.
     """
     time_weight = MODE_WEIGHTS.get(mode, 0.5)
-    df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=bankroll)
+    df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=bankroll, limit_used=limit_used)
     if df.empty:
         return df
 
@@ -174,7 +175,7 @@ def _worth_gp(row, cap_units: int, tier: str) -> float:
 
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
                     max_accumulate: int = 6, min_gp: int | None = None,
-                    min_margin: float = 0.01) -> tuple[list[dict], float]:
+                    min_margin: float = 0.01, limit_used: dict[int, int] | None = None) -> tuple[list[dict], float]:
     """Two-tier capital deployment:
       ACTIVE  — one diversified flip per free slot (online/balanced/offline), capped by
                 fast-fill liquidity — what you work in your slots right now.
@@ -190,7 +191,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         min_gp = max(250, int(bankroll * 0.002))
     roles = ["online", "balanced", "offline"][:max(0, free_slots)]
     modes = dict.fromkeys([*roles, "balanced"])
-    rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40) for m in modes}
+    rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used)
+                for m in modes}
     taken = {int(i) for i in held_ids}
 
     def ok(row) -> bool:
@@ -208,8 +210,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     for _, row in rankings["balanced"].iterrows():  # hold: accumulate the rest into inventory
         if sum(p["tier"] == "hold" for p in picks) >= max_accumulate:
             break
-        if ok(row) and _worth_gp(row, int(row["buy_limit"]), "hold") >= min_gp:
-            picks.append(_pick_row(row, "hold", int(row["buy_limit"])))
+        if ok(row) and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp:
+            picks.append(_pick_row(row, "hold", int(row["buy_limit_eff"])))
             taken.add(int(row["item_id"]))
 
     allocated, idle = _allocate(picks, bankroll)

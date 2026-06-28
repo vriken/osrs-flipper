@@ -7,6 +7,16 @@ import argparse
 from . import config
 
 
+def _limit_used() -> dict[int, int]:
+    """Trailing-4h buy-limit usage from the journal; empty if the journal is busy."""
+    try:
+        from .journal import Journal
+        with Journal() as j:
+            return j.buy_limit_used()
+    except Exception:
+        return {}
+
+
 def _cmd_scan(args: argparse.Namespace) -> None:
     from . import alert, scanner
 
@@ -18,6 +28,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
         persistence=not args.no_persistence,
         mode=args.mode,
         min_gp=args.min_gp,
+        limit_used=_limit_used(),
     )
     print(alert.format_table(df, mode=args.mode))
     summary = alert.format_portfolio_summary(df, args.bankroll)
@@ -42,18 +53,20 @@ def _cmd_portfolio(args: argparse.Namespace) -> None:
 
     held: list = []
     cash = args.bankroll or config.BANKROLL
+    limit_used: dict = {}
     try:
         from .journal import Journal
         with Journal() as j:
             held = j.positions()
             cash = args.bankroll or int(j.cash()) or config.BANKROLL
+            limit_used = j.buy_limit_used()
     except Exception:
         print("(journal busy — it's open in the `trade` terminal. Using --bankroll; "
-              "run `port` inside the terminal for held-position-aware planning.)\n")
+              "run `port` inside the terminal for held-position- and buy-limit-aware planning.)\n")
     free = args.slots if args.slots else max(0, config.GE_SLOTS - len(held))
     picks, idle = scanner.build_portfolio(
         bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
-        members=True if args.members else None, min_gp=args.min_gp or None)
+        members=True if args.members else None, min_gp=args.min_gp or None, limit_used=limit_used)
     print(alert.format_portfolio(picks, cash, held, idle))
 
 
@@ -67,7 +80,8 @@ def _cmd_quote(args: argparse.Namespace) -> None:
     if not meta:
         print(f"item not found: {args.item}")
         return
-    qty = args.qty or suggested_qty(meta["id"], meta.get("limit") or 0, args.bankroll)
+    limit_eff = max(0, (meta.get("limit") or 0) - _limit_used().get(meta["id"], 0))
+    qty = args.qty or suggested_qty(meta["id"], limit_eff, args.bankroll)
     q = optimal_quote(meta["id"], qty, name=meta["name"], capture=args.capture, timestep=args.timestep)
     print(alert.format_quote(q))
 

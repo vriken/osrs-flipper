@@ -52,6 +52,13 @@ def test_equity_marks_inventory_at_bid(j):
     assert eq == 103_000 + 1000 * 98
 
 
+def test_units_bought_since(j):
+    j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
+    j.record_buy(GOLD_BAR, "Gold bar", 50, 98)
+    assert j.units_bought_since(0)[GOLD_BAR] == 150  # sums buys in window
+    assert j.units_bought_since(10**12) == {}  # far-future cutoff → nothing counts
+
+
 def test_set_cash_persists(j):
     j.set_cash(204_000)
     assert j.cash() == 204_000
