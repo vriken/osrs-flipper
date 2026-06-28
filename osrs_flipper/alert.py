@@ -14,6 +14,7 @@ _BASE_COLUMNS = [
     ("margin_abs", "net", 6, ",d"),
     ("margin_pct", "mg%", 6, ".1%"),
     ("capacity", "qty", 7, ",d"),
+    ("capital_deployed", "deploy", 9, ",d"),
     ("fill_eta_h", "eta(h)", 6, ".1f"),
     ("p_complete", "fill", 5, ".0%"),
 ]
@@ -66,6 +67,31 @@ def format_bond_line(progress: dict) -> str:
     if not price:
         return "bond: price unavailable"
     return f"bond: {price:,.0f} gp  |  bankroll {progress['bankroll']:,} = {pct:.1f}% of a bond"
+
+
+def format_portfolio_summary(df: pd.DataFrame, bankroll: int, slots: int = config.GE_SLOTS) -> str:
+    """The 'worth it' check: greedily split your cash across the top `slots` flips (each
+    capped by what it can absorb), then report realistic deployed / idle / gp-per-cycle."""
+    if df.empty or "capital_deployed" not in df.columns or not bankroll:
+        return ""
+    gp_col = "exp_gp_cycle_adj" if "exp_gp_cycle_adj" in df.columns else "exp_gp_cycle"
+    remaining, deployed, gp_total, used = float(bankroll), 0.0, 0.0, 0
+    for _, r in df.head(slots).iterrows():
+        cap_dep = float(r["capital_deployed"])
+        if cap_dep <= 0 or remaining <= 0:
+            continue
+        alloc = min(remaining, cap_dep)
+        gp_total += float(r[gp_col]) * (alloc / cap_dep)  # pro-rate gp by capital actually placed
+        deployed += alloc
+        remaining -= alloc
+        used += 1
+    idle = max(0.0, bankroll - deployed)
+    line = (f"best {used}-slot allocation deploys {deployed:,.0f} of {bankroll:,.0f} "
+            f"({deployed / bankroll * 100:.0f}%, {idle:,.0f} idle)  →  ~{gp_total:,.0f} gp/cycle")
+    if idle > 0.5 * bankroll:
+        line += ("\n⚠ over half your cash is idle — F2P flips can't absorb it. Use --mode offline, run "
+                 "more items, or grind toward a bond (members = 8 slots + a far deeper market).")
+    return line
 
 
 def format_quote(q) -> str:

@@ -62,9 +62,13 @@ class Terminal:
     def cmd_scan(self, args: list[str]) -> None:
         top = next((int(a) for a in args if a.isdigit()), 15)
         mode = next((a for a in args if a in scanner.MODE_WEIGHTS), "balanced")
+        bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
-        df = scanner.scan(top=top, bankroll=int(self.j.cash()) or config.BANKROLL, mode=mode)
+        df = scanner.scan(top=top, bankroll=bankroll, mode=mode)
         print(alert.format_table(df, mode=mode))
+        summary = alert.format_portfolio_summary(df, bankroll)
+        if summary:
+            print("\n" + summary)
 
     def cmd_quote(self, args: list[str]) -> None:
         if not args:

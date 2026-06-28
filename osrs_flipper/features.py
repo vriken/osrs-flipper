@@ -111,6 +111,7 @@ def build_features(
             "rel_spread": rel_spread,
             "vol_1h_binding": vol_binding,
             "capacity": cap,
+            "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,

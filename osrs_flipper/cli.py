@@ -17,8 +17,12 @@ def _cmd_scan(args: argparse.Namespace) -> None:
         include_suspect=args.include_suspect,
         persistence=not args.no_persistence,
         mode=args.mode,
+        min_gp=args.min_gp,
     )
     print(alert.format_table(df, mode=args.mode))
+    summary = alert.format_portfolio_summary(df, args.bankroll)
+    if summary:
+        print("\n" + summary)
     prog = scanner.bond_progress(bankroll=args.bankroll)
     print()
     print(alert.format_bond_line(prog))
@@ -77,6 +81,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--include-suspect", action="store_true", help="include manipulation-suspect items")
     s.add_argument("--mode", default="balanced", choices=["online", "balanced", "offline"],
                    help="online=fast fills, offline=fat margins, balanced=both")
+    s.add_argument("--min-gp", type=int, default=0, help="hide flips netting less than this gp/cycle")
     s.add_argument("--no-persistence", action="store_true", help="skip the spread-stability deep-check (faster)")
     s.add_argument("--discord", action="store_true", help="also post to the configured Discord webhook")
     s.set_defaults(func=_cmd_scan)
