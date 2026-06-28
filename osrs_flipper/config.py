@@ -112,6 +112,8 @@ SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 # Active hours = fast online flips; outside them = overnight/patient plan.
 AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wake
 AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sleep
+# Overnight buys need a fat margin cushion so a small overnight price drift can't go red.
+OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN", 0.04))
 
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
