@@ -53,22 +53,35 @@ def scan(
     if df.empty:
         return df
 
-    df["score"] = [_composite(c, e, time_weight) for c, e in zip(df["exp_gp_cycle"], df["fill_eta_h"], strict=False)]
+    # online = fill NOW, which means queue-jumping (buy bid+1 / sell ask-1). Score on that
+    # fast-net margin so penny spreads (which go ≤0 when jumped) correctly sink.
+    online = mode == "online"
+    base_col = "exp_gp_cycle_fast" if online else "exp_gp_cycle"
+    if online:
+        df = df.assign(
+            buy_px=df["fast_buy"], sell_px=df["fast_sell"], margin_abs=df["margin_fast"],
+            margin_pct=df["margin_fast"] / df["fast_buy"].where(df["fast_buy"] > 0, 1),
+        )
+
+    df["score"] = [_composite(c, e, time_weight) for c, e in zip(df[base_col], df["fill_eta_h"], strict=False)]
+    df = df[df["score"] > 0]
+    if df.empty:
+        return df
     df = df.sort_values(RANK_COL, ascending=False).reset_index(drop=True)
     if not persistence:
         return df.head(top)
 
-    return _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, time_weight).head(top).reset_index(drop=True)
+    return _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, time_weight, base_col).head(top).reset_index(drop=True)
 
 
-def _apply_persistence(df: pd.DataFrame, candidates: int, time_weight: float) -> pd.DataFrame:
+def _apply_persistence(df: pd.DataFrame, candidates: int, time_weight: float, base_col: str) -> pd.DataFrame:
     """Deep-check the top snapshot candidates and re-score with the spread-stability factor."""
     pool = df.head(candidates).copy()
     stats = [fetch_persistence(int(iid)) for iid in pool["item_id"]]
     pool["persist"] = [s["persist"] if s else None for s in stats]
     pool["realizable_spread"] = [s["realizable_spread"] if s else None for s in stats]
     pool["persist_factor"] = [s["persist_factor"] if s else 0.0 for s in stats]
-    pool["exp_gp_cycle_adj"] = pool["exp_gp_cycle"] * pool["persist_factor"]
+    pool["exp_gp_cycle_adj"] = pool[base_col] * pool["persist_factor"]
     pool["score"] = [_composite(c, e, time_weight)
                      for c, e in zip(pool["exp_gp_cycle_adj"], pool["fill_eta_h"], strict=False)]
 
@@ -76,6 +89,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, time_weight: float) ->
         pool["realizable_spread"].notna()
         & (pool["realizable_spread"] > 0)
         & (pool["persist"] >= config.PERSIST_MIN_FRAC)
+        & (pool["score"] > 0)
     )
     return pool[keep].sort_values(RANK_COL, ascending=False)
 

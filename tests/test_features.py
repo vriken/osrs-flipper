@@ -57,6 +57,14 @@ def test_capital_binds_quantity_for_small_bankroll():
     assert df.loc[0, "capacity"] == 200_000 // df.loc[0, "buy_px"]
 
 
+def test_fast_margin_collapses_on_thin_spread():
+    # a 2gp spread (bid 12 / ask 14) profits if you wait, but queue-jumping (13/13) doesn't
+    m = [_mapping(1, "Jug")]
+    df = build_features({1: _latest(14, 12, 60)}, {1: _hourly(14, 12, 5000, 5000)}, m, now_ts=NOW)
+    assert df.loc[0, "margin_abs"] > 0       # patient flip profits
+    assert df.loc[0, "margin_fast"] <= 0     # fast-fill (queue-jump) does not
+
+
 def test_now_default_runs():
     m = [_mapping(1, "X")]
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}, m,

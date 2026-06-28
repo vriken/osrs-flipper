@@ -75,6 +75,15 @@ def build_features(
                      (cap / sell_rate if sell_rate > 0 else math.inf)
         gp_per_hour = exp_gp_cycle / fill_eta_h if math.isfinite(fill_eta_h) and fill_eta_h > 0 else 0.0
 
+        # queue-jump (fast-fill) margin: buy at bid+1, sell at ask-1 — what you actually
+        # net if you refuse to wait. Penny spreads go ≤0 here; that's the point for online.
+        if high is not None and low is not None:
+            fast_buy, fast_sell = low + 1, high - 1
+            margin_fast = post_tax_received(fast_sell, item_id=iid) - fast_buy
+        else:
+            fast_buy, fast_sell, margin_fast = buy_px, sell_px, margin_abs
+        exp_gp_cycle_fast = margin_fast * cap * p_complete
+
         age_low = now_ts - lp["lowTime"] if lp.get("lowTime") else math.inf
         age_high = now_ts - lp["highTime"] if lp.get("highTime") else math.inf
         staleness = max(age_low, age_high)
@@ -105,6 +114,10 @@ def build_features(
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,
+            "fast_buy": fast_buy,
+            "fast_sell": fast_sell,
+            "margin_fast": margin_fast,
+            "exp_gp_cycle_fast": exp_gp_cycle_fast,
             "fill_eta_h": fill_eta_h if math.isfinite(fill_eta_h) else None,
             "gp_per_hour": gp_per_hour,
             "staleness_s": staleness if math.isfinite(staleness) else None,
