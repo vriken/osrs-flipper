@@ -26,10 +26,16 @@ def build_features(
     *,
     bankroll: int | None = None,
     now_ts: int | None = None,
+    limit_used: dict[int, int] | None = None,
 ) -> pd.DataFrame:
-    """Return a feature DataFrame (one row per item that has a /mapping entry)."""
+    """Return a feature DataFrame (one row per item that has a /mapping entry).
+
+    `limit_used` maps item_id -> units already bought in the rolling 4h window; the
+    effective buy limit is reduced accordingly so maxed-out items drop out.
+    """
     bankroll = config.BANKROLL if bankroll is None else bankroll
     now_ts = int(time.time()) if now_ts is None else now_ts
+    limit_used = limit_used or {}
     rows: list[dict[str, Any]] = []
 
     for meta in mapping:
@@ -63,7 +69,8 @@ def build_features(
         margin_abs_naive = post_tax_received(int(n_sell), item_id=iid) - int(n_buy)
 
         buy_limit = meta.get("limit") or 0
-        cap = capacity_units(buy_limit, vol_binding, bankroll, buy_px)
+        buy_limit_eff = max(0, buy_limit - limit_used.get(iid, 0))  # remaining 4h buy-limit room
+        cap = capacity_units(buy_limit_eff, vol_binding, bankroll, buy_px)
         p_complete = completion_probability(cap, low_vol, high_vol) if cap > 0 else 0.0
         exp_gp_cycle = margin_abs * cap * p_complete
 
@@ -112,7 +119,8 @@ def build_features(
             "vol_1h_binding": vol_binding,
             "capacity": cap,
             "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
-            "liq_units": min(buy_limit, int(math.floor(config.ALPHA * vol_binding))),  # cash-independent absorb cap
+            "buy_limit_eff": buy_limit_eff,  # remaining buy-limit room (4h)
+            "liq_units": min(buy_limit_eff, int(math.floor(config.ALPHA * vol_binding))),  # cash-independent absorb cap
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,

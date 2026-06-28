@@ -65,6 +65,18 @@ def test_fast_margin_collapses_on_thin_spread():
     assert df.loc[0, "margin_fast"] <= 0     # fast-fill (queue-jump) does not
 
 
+def test_buy_limit_used_reduces_capacity():
+    m = [_mapping(1, "Pricey", limit=1000)]
+    lat, h1 = {1: _latest(2000, 1900, 60)}, {1: _hourly(2000, 1900, 100_000, 100_000)}
+    # fully used 4h limit → no room → capacity 0 (item drops out of scan/port)
+    maxed = build_features(lat, h1, m, bankroll=10**9, now_ts=NOW, limit_used={1: 1000})
+    assert maxed.loc[0, "buy_limit_eff"] == 0
+    assert maxed.loc[0, "capacity"] == 0
+    # partially used → remaining room
+    partial = build_features(lat, h1, m, bankroll=10**9, now_ts=NOW, limit_used={1: 600})
+    assert partial.loc[0, "buy_limit_eff"] == 400
+
+
 def test_now_default_runs():
     m = [_mapping(1, "X")]
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}, m,

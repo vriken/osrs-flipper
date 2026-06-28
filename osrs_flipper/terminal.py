@@ -65,7 +65,7 @@ class Terminal:
         mode = next((a for a in args if a in scanner.MODE_WEIGHTS), "balanced")
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
-        df = scanner.scan(top=top, bankroll=bankroll, mode=mode)
+        df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self.j.buy_limit_used())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -84,9 +84,11 @@ class Terminal:
             return
         from .quote import suggested_qty
         bankroll = int(self.j.cash()) or config.BANKROLL
-        qty = qty or suggested_qty(meta["id"], meta.get("limit") or 0, bankroll)
+        # respect the rolling 4h buy limit already used on this item
+        limit_eff = max(0, (meta.get("limit") or 0) - self.j.buy_limit_used().get(meta["id"], 0))
+        qty = qty or suggested_qty(meta["id"], limit_eff, bankroll)
         if qty <= 0:
-            print("  no quantity (set cash with `bank <amount>` or pass a qty)")
+            print("  buy limit reached for this item (4h window) or no cash — nothing to quote")
             return
         q = optimal_quote(meta["id"], qty, name=meta["name"])
         print(alert.format_quote(q))
@@ -135,7 +137,8 @@ class Terminal:
         free = int(args[0]) if args and args[0].isdigit() else max(0, config.GE_SLOTS - len(held))
         print(f"  building portfolio for {free} free slot(s)…")
         picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free)
+            bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
+            limit_used=self.j.buy_limit_used())
         print(alert.format_portfolio(picks, cash, held, idle))
 
     def cmd_pos(self) -> None:

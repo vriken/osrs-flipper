@@ -12,7 +12,7 @@ from typing import Any
 
 import duckdb
 
-from .config import DATA_DIR, DB_PATH
+from .config import BUY_LIMIT_WINDOW_H, DATA_DIR, DB_PATH
 from .tax import ge_tax, post_tax_received
 
 _SCHEMA = """
@@ -110,6 +110,18 @@ class Journal:
         return proceeds, realized
 
     # --- reporting -----------------------------------------------------------
+    def units_bought_since(self, since_ts: int) -> dict[int, int]:
+        """Units bought per item since `since_ts` (for buy-limit tracking)."""
+        rows = self.con.execute(
+            "SELECT item_id, SUM(qty) FROM ledger WHERE side='BUY' AND ts >= ? GROUP BY item_id",
+            [since_ts],
+        ).fetchall()
+        return {int(r[0]): int(r[1]) for r in rows}
+
+    def buy_limit_used(self, window_h: float = BUY_LIMIT_WINDOW_H) -> dict[int, int]:
+        """Units bought per item within the rolling buy-limit window (default 4h)."""
+        return self.units_bought_since(int(time.time()) - int(window_h * 3600))
+
     def realized_pnl(self) -> float:
         r = self.con.execute("SELECT COALESCE(SUM(realized_pnl),0) FROM ledger").fetchone()
         return r[0]
