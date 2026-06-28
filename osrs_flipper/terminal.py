@@ -280,26 +280,37 @@ class Terminal:
             self.cmd_overnight([])
 
     def cmd_overnight(self, args: list[str]) -> None:
-        """Plan one big buy to leave overnight (~8h, ~2 buy-limit windows)."""
-        from .quote import optimal_quote
+        """Overnight plan. No arg → diversified buys across all free slots; <item> → one big buy."""
         cash = int(self.j.cash()) or config.BANKROLL
         if cash <= 0:
             print("  set your cash first:  bank <gp>")
             return
-        horizon, windows = 8.0, 2  # 8h ≈ two 4h buy-limit windows
-        limit_used = self._limit_used()
-        mapping = {r["id"]: r for r in api.mapping()}
         if args:
-            meta = self.resolve(" ".join(args))
-        else:  # auto-pick best offline candidate with a REAL spread (skip penny traps overnight)
-            df = scanner.scan(mode="offline", bankroll=cash, top=15, limit_used=limit_used)
-            meta = None
-            for _, row in df.iterrows():
-                if row.get("margin_fast", 1) > 0:  # spread survives a queue-jump
-                    meta = mapping.get(int(row["item_id"]))
-                    break
+            self._overnight_single(" ".join(args), cash)
+        else:
+            self._overnight_plan(cash)
+
+    def _overnight_plan(self, cash: int) -> None:
+        """Diversified overnight buys filling every free slot, with a margin cushion."""
+        held = self.j.positions()
+        rl = runelite.read()
+        offers = runelite.active_offers(rl) if rl else []
+        free = runelite.free_slots(rl, config.GE_SLOTS) if rl is not None else max(0, config.GE_SLOTS - len(held))
+        source = "runelite" if rl is not None else "assumed"
+        exclude = [h.item_id for h in held] + [o.item_id for o in offers]
+        picks, idle = scanner.build_portfolio(
+            bankroll=cash, held_ids=exclude, free_slots=free,
+            limit_used=self._limit_used(rl), min_margin=config.OVERNIGHT_MIN_MARGIN)
+        print(f"  OVERNIGHT plan — diversified buys, ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion. "
+              "Place these, sleep, then collect + sell at wake:")
+        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+
+    def _overnight_single(self, name_or_id: str, cash: int) -> None:
+        """One big buy of a named item over an ~8h horizon (~2 buy-limit windows)."""
+        from .quote import optimal_quote
+        meta = self.resolve(name_or_id)
         if not meta:
-            print("  item not found (try `scan offline` first, then `overnight <item>`)")
+            print("  item not found")
             return
         iid, name = meta["id"], meta.get("name", str(meta["id"]))
         h1v, latv = api.one_hour().get(iid, {}), api.latest().get(iid, {})
@@ -307,20 +318,22 @@ class Terminal:
         if not bid:
             print(f"  no live price for {name}")
             return
-        cap = max(0, (meta.get("limit") or 0) * windows - limit_used.get(iid, 0))  # ~2 windows overnight
+        cap = max(0, (meta.get("limit") or 0) * 2 - self._limit_used().get(iid, 0))  # ~2 windows overnight
         qty = min(cap or 10**9, cash // int(bid))
         if qty <= 0:
             print(f"  {name}: buy limit reached or not enough cash")
             return
-        q = optimal_quote(iid, qty, name=name, horizon_h=horizon)
+        q = optimal_quote(iid, qty, name=name, horizon_h=8.0)
         if not q:
             print(f"  {name}: no profitable overnight quote")
             return
         filled = int(q.qty * q.p_buy)
+        margin_pct = q.net_unit / q.buy_px if q.buy_px else 0
         print(f"  OVERNIGHT (~8h) — {name}")
         print(f"    BUY  {q.qty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} ≈ {filled:,} fill overnight, ties up ~{q.qty * q.buy_px:,} gp)")
-        print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{q.net_unit * filled:,} gp profit (net {q.net_unit}/unit)")
-        print("    tomorrow: run `port` — the SELL section will list it; auto-sync logs the fill")
+        print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{q.net_unit * filled:,} gp profit (net {q.net_unit}/unit, {margin_pct:.1%})")
+        if margin_pct < config.OVERNIGHT_MIN_MARGIN:
+            print(alert.color(f"    ⚠ thin margin ({margin_pct:.1%}) — risky to leave overnight; a small dip could go red", "red"))
 
     def cmd_orders(self, args: list[str]) -> None:
         rl = runelite.read()
