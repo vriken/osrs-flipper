@@ -3,6 +3,7 @@
     osrs-flipper trade
 
 Commands (type `help`):
+  sync                    import completed RuneLite fills into the journal
   orders | ge             live GE slots + active offers (from RuneLite)
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
@@ -66,7 +67,7 @@ class Terminal:
         mode = next((a for a in args if a in scanner.MODE_WEIGHTS), "balanced")
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
-        df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self.j.buy_limit_used())
+        df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -147,8 +148,26 @@ class Terminal:
         exclude = [h.item_id for h in held] + active_ids
         print(f"  building portfolio for {free} free slot(s)…")
         picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self.j.buy_limit_used())
+            bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self._limit_used(rl))
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+
+    def _limit_used(self, rl: dict | None = None) -> dict[int, int]:
+        """Prefer RuneLite's exact buy-limit counter; fall back to journal-summed buys."""
+        rl = rl if rl is not None else runelite.read()
+        return runelite.limit_used(rl) if rl else self.j.buy_limit_used()
+
+    def _autosync(self) -> int:
+        """Mirror RuneLite's completed fills into the journal. Idempotent → safe to call often."""
+        rl = runelite.read()
+        if not rl:
+            return 0
+        return sum(self.j.import_offer(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price)
+                   for f in runelite.completed_offers(rl))
+
+    def cmd_sync(self, args: list[str]) -> None:
+        n = self._autosync()
+        print(f"  synced {n} new fill(s) from RuneLite · cash {self.j.cash():,.0f} · "
+              f"realised {self.j.realized_pnl():+,.0f}")
 
     def cmd_orders(self, args: list[str]) -> None:
         rl = runelite.read()
@@ -205,11 +224,15 @@ class Terminal:
     # --- loop ----------------------------------------------------------------
     def run(self) -> None:
         print("osrs-flipper terminal — type `help`, `quit` to exit")
+        n0 = self._autosync()
+        if n0:
+            print(f"  (auto-synced {n0} fill(s) from RuneLite)")
         handlers = {
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
             "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
+            "sync": lambda a: self.cmd_sync(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),
@@ -228,6 +251,10 @@ class Terminal:
             cmd = cmd.lower()
             if cmd in ("quit", "exit", "q"):
                 break
+            if cmd != "sync":  # mirror RuneLite fills before any command (sync reports its own count)
+                synced = self._autosync()
+                if synced:
+                    print(f"  (auto-synced {synced} new fill(s) from RuneLite)")
             fn = handlers.get(cmd)
             if not fn:
                 print(f"  unknown command: {cmd} (type `help`)")

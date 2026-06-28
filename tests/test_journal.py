@@ -52,6 +52,13 @@ def test_equity_marks_inventory_at_bid(j):
     assert eq == 103_000 + 1000 * 98
 
 
+def test_import_offer_is_idempotent(j):
+    assert j.import_offer("u1", GOLD_BAR, "Gold bar", True, 100, 97) is True
+    assert j.import_offer("u1", GOLD_BAR, "Gold bar", True, 100, 97) is False  # same uuid → skipped
+    assert j.position(GOLD_BAR).qty == 100  # recorded exactly once
+    assert j.cash() == 200_000 - 100 * 97
+
+
 def test_units_bought_since(j):
     j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
     j.record_buy(GOLD_BAR, "Gold bar", 50, 98)
