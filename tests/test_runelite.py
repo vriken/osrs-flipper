@@ -55,3 +55,11 @@ def test_limit_used_from_plugin_counter():
 
 def test_limit_used_resets_past_window():
     assert runelite.limit_used(TRADES, now_ms=10**18) == {}  # past nGLR → reset
+
+
+def test_review_verdict():
+    assert runelite.review_verdict("BOUGHT", 1.0, 5, 1) == "collect"
+    assert runelite.review_verdict("BUYING", 0.0, 5.0, 1.0) == "stale"   # 5x over ETA, unfilled
+    assert runelite.review_verdict("BUYING", 0.3, 1.5, 1.0) == "slow"    # past ETA
+    assert runelite.review_verdict("BUYING", 0.2, 0.3, 1.0) == "ontrack"  # under ETA
+    assert runelite.review_verdict("BUYING", 0.0, 99, float("inf")) == "ontrack"  # no ETA → no nag

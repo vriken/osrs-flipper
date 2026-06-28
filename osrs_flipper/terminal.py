@@ -5,6 +5,7 @@
 Commands (type `help`):
   sync                    import completed RuneLite fills into the journal
   orders | ge             live GE slots + active offers (from RuneLite)
+  review | check          flag active offers to re-price / cancel / collect
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
@@ -169,6 +170,34 @@ class Terminal:
         print(f"  synced {n} new fill(s) from RuneLite · cash {self.j.cash():,.0f} · "
               f"realised {self.j.realized_pnl():+,.0f}")
 
+    def cmd_review(self, args: list[str]) -> None:
+        rl = runelite.read()
+        if not rl:
+            print("  no RuneLite data (~/.runelite/flipping/)")
+            return
+        offers = runelite.active_offers(rl)
+        if not offers:
+            print("  no active offers")
+            return
+        hourly = api.one_hour()
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        now_ms = int(time.time() * 1000)
+        verdicts = {"collect": "📦 COLLECT — frees a slot", "stale": "🔴 STALE — likely mispriced; cancel & re-quote",
+                    "slow": "🟡 SLOW — consider re-pricing", "ontrack": "🟢 on track", "done": "done"}
+        print(f"  {'slot':4} {'item':16} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
+        for o in sorted(offers, key=lambda x: x.slot):
+            v = hourly.get(o.item_id, {})
+            vol = (v.get("lowPriceVolume") if o.is_buy else v.get("highPriceVolume")) or 0
+            rate = config.ALPHA * vol
+            eta_h = o.qty / rate if rate > 0 else float("inf")
+            elapsed_h = (now_ms - o.started_ms) / 3_600_000 if o.started_ms else 0.0
+            prog = o.filled / o.qty if o.qty else 0.0
+            verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
+            eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
+            print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:16]:16} {'BUY' if o.is_buy else 'SELL':4} "
+                  f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {verdicts[verdict]}")
+        print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
+
     def cmd_orders(self, args: list[str]) -> None:
         rl = runelite.read()
         if not rl:
@@ -232,6 +261,7 @@ class Terminal:
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
             "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
+            "review": lambda a: self.cmd_review(a), "check": lambda a: self.cmd_review(a),
             "sync": lambda a: self.cmd_sync(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
