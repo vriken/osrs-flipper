@@ -29,9 +29,12 @@ One of the concurrent Grand Exchange offer slots (3 F2P / 8 members). Occupied b
 **Held** (position):
 Inventory bought and not yet fully sold. Occupies a sell-side slot while you sell it.
 
+**Active offer**:
+A buy or sell offer currently occupying a GE slot (state BUYING/BOUGHT/SELLING/SOLD until collected). Read live from RuneLite.
+
 **Free slots**:
-GE slots with no active offer. The tool CANNOT observe true occupancy (it only sees logged fills, not pending offers), so this is a **number you supply**; the default (`GE_SLOTS − held`) is an explicitly-captioned assumption that your only busy slots hold inventory.
-_Avoid_: treating the default free-slot count as ground truth
+GE slots with no active offer. Read **live from RuneLite** (Flipping Utilities plugin) when available — true occupancy. Falls back to a user-supplied count, then to an explicitly-captioned `GE_SLOTS − held` assumption.
+_Avoid_: treating the assumed fallback as ground truth when RuneLite is present
 
 ### Profit metrics
 
@@ -65,4 +68,4 @@ _Avoid_: reading SCORE as "gp"
 ## Flagged ambiguities
 
 - "investment"/"hold" implied a directional bet — resolved: a **hold** is a slow flip (spread capture), not a directional position.
-- "free slots" — the journal only knows inventory-holding slots, not pending offers, so it can't compute true occupancy — resolved: **free slots is user-supplied**, with `GE_SLOTS − held` as an explicitly-labelled default assumption.
+- "free slots" — the journal only knows inventory-holding slots, not pending offers, so it can't compute true occupancy — resolved: read **live from RuneLite** (true occupancy) when present; else user-supplied; else an explicitly-labelled `GE_SLOTS − held` assumption.

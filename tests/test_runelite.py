@@ -1,0 +1,30 @@
+"""RuneLite Flipping Utilities reader — parse offers and derive slot occupancy."""
+
+from osrs_flipper import runelite
+
+SAMPLE = {
+    "slotTimers": [
+        {"slotIndex": 0, "currentOffer": {"s": 0, "id": 1071, "b": True, "st": "BUYING", "tQIT": 17, "p": 0}},
+        {"slotIndex": 1, "currentOffer": {"s": 1, "id": 1033, "b": True, "st": "BOUGHT", "tQIT": 8, "p": 50}},
+        {"slotIndex": 2, "offerOccurredAtUnknownTime": False},  # free slot
+        {"slotIndex": 3, "offerOccurredAtUnknownTime": False},  # free slot
+    ],
+    "trades": [],
+}
+
+
+def test_active_offers_parsed():
+    offers = runelite.active_offers(SAMPLE)
+    assert len(offers) == 2  # only slots with a currentOffer
+    assert offers[0].item_id == 1071 and offers[0].is_buy and offers[0].qty == 17
+    assert offers[1].state == "BOUGHT"  # filled-but-uncollected still occupies
+
+
+def test_occupied_and_free_slots():
+    assert runelite.occupied_slots(SAMPLE) == 2
+    assert runelite.free_slots(SAMPLE, total=3) == 1  # F2P
+    assert runelite.free_slots(SAMPLE, total=8) == 6  # members
+
+
+def test_read_missing_file_returns_none(tmp_path):
+    assert runelite.read(tmp_path / "nope.json") is None
