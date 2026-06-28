@@ -55,8 +55,8 @@ A self-contained REPL — no LLM, no token cost. State persists in DuckDB across
 osrs> bank 204000                  set your current cash
 osrs> scan 15                      ranked live flips
 osrs> quote Grapes                 optimal buy/sell prices + efficient frontier
-osrs> buy 2800 71 Grapes           log a buy fill
-osrs> sell 2800 78 Grapes          log a sell fill (applies GE tax)
+osrs> buy Grapes 2800 71           log a buy fill (item qty price)
+osrs> sell Grapes 2800 78          log a sell fill (applies GE tax)
 osrs> pos                          open positions + unrealised P&L
 osrs> pnl                          cash, equity, realised P&L, bond progress
 osrs> recent                       recent trades
