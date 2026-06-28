@@ -2,7 +2,15 @@
 
 import pandas as pd
 
-from osrs_flipper.alert import format_portfolio_summary
+from osrs_flipper.alert import format_portfolio_summary, format_sell_plan
+
+
+def test_format_sell_plan():
+    rows = [{"name": "Anchovy pizza", "qty": 51, "avg_cost": 450.0, "sell_px": 470,
+             "profit": 561.0, "eta_h": 0.1}]
+    s = format_sell_plan(rows)
+    assert "Anchovy pizza" in s and "470" in s and "+561" in s
+    assert format_sell_plan([]) == ""  # nothing to sell → no section
 
 
 def _df(rows):
