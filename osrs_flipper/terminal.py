@@ -7,6 +7,8 @@ Commands (type `help`):
   orders | ge             live GE slots + active offers (from RuneLite)
   review | check          flag active offers to re-price / cancel / collect
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
+  overnight [item]         plan one big ~8h buy to leave while you sleep
+  brief | now              schedule-aware: day plan in active hours, overnight plan off-hours
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   buy <item> <quantity> <price>    log a buy fill
@@ -266,6 +268,60 @@ class Terminal:
             parts.append(alert.color(f"{n} to collect", "yellow"))
         return "  active orders: " + ", ".join(parts) + " — run `review`" if parts else ""
 
+    def cmd_brief(self, args: list[str]) -> None:
+        """Schedule-aware: active hours → day plan (port); off-hours → overnight plan."""
+        from datetime import datetime
+        hour = datetime.now().hour
+        if config.AWAKE_START <= hour < config.AWAKE_END:
+            print(f"  [{hour:02d}:00] active hours — day plan:")
+            self.cmd_port([])
+        else:
+            print(f"  [{hour:02d}:00] off-hours — overnight plan:")
+            self.cmd_overnight([])
+
+    def cmd_overnight(self, args: list[str]) -> None:
+        """Plan one big buy to leave overnight (~8h, ~2 buy-limit windows)."""
+        from .quote import optimal_quote
+        cash = int(self.j.cash()) or config.BANKROLL
+        if cash <= 0:
+            print("  set your cash first:  bank <gp>")
+            return
+        horizon, windows = 8.0, 2  # 8h ≈ two 4h buy-limit windows
+        limit_used = self._limit_used()
+        mapping = {r["id"]: r for r in api.mapping()}
+        if args:
+            meta = self.resolve(" ".join(args))
+        else:  # auto-pick best offline candidate with a REAL spread (skip penny traps overnight)
+            df = scanner.scan(mode="offline", bankroll=cash, top=15, limit_used=limit_used)
+            meta = None
+            for _, row in df.iterrows():
+                if row.get("margin_fast", 1) > 0:  # spread survives a queue-jump
+                    meta = mapping.get(int(row["item_id"]))
+                    break
+        if not meta:
+            print("  item not found (try `scan offline` first, then `overnight <item>`)")
+            return
+        iid, name = meta["id"], meta.get("name", str(meta["id"]))
+        h1v, latv = api.one_hour().get(iid, {}), api.latest().get(iid, {})
+        bid = h1v.get("avgLowPrice") or latv.get("low")
+        if not bid:
+            print(f"  no live price for {name}")
+            return
+        cap = max(0, (meta.get("limit") or 0) * windows - limit_used.get(iid, 0))  # ~2 windows overnight
+        qty = min(cap or 10**9, cash // int(bid))
+        if qty <= 0:
+            print(f"  {name}: buy limit reached or not enough cash")
+            return
+        q = optimal_quote(iid, qty, name=name, horizon_h=horizon)
+        if not q:
+            print(f"  {name}: no profitable overnight quote")
+            return
+        filled = int(q.qty * q.p_buy)
+        print(f"  OVERNIGHT (~8h) — {name}")
+        print(f"    BUY  {q.qty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} ≈ {filled:,} fill overnight, ties up ~{q.qty * q.buy_px:,} gp)")
+        print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{q.net_unit * filled:,} gp profit (net {q.net_unit}/unit)")
+        print("    tomorrow: run `port` — the SELL section will list it; auto-sync logs the fill")
+
     def cmd_orders(self, args: list[str]) -> None:
         rl = runelite.read()
         if not rl:
@@ -331,6 +387,8 @@ class Terminal:
             "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
             "review": lambda a: self.cmd_review(a), "check": lambda a: self.cmd_review(a),
             "sync": lambda a: self.cmd_sync(a),
+            "overnight": lambda a: self.cmd_overnight(a), "night": lambda a: self.cmd_overnight(a),
+            "brief": lambda a: self.cmd_brief(a), "now": lambda a: self.cmd_brief(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),

@@ -121,22 +121,29 @@ def free_slots(data: dict, total: int) -> int:
     return max(0, total - occupied_slots(data))
 
 
+_COMPLETED_STATES = {"BOUGHT", "SOLD", "CANCELLED_BUY", "CANCELLED_SELL"}
+
+
 def completed_offers(data: dict) -> list[Fill]:
-    """Completed buys/sells from trades[*].h.sO (each carries a uuid for idempotency)."""
+    """Filled buys/sells from trades[*].h.sO (each carries a uuid for idempotency).
+
+    Includes the FILLED portion of cancelled offers — `cQIT` is what actually traded, so
+    a fully-unfilled cancel (cQIT 0) is skipped while a partial cancel is captured.
+    """
     out = []
     for trade in data.get("trades", []):
         name = trade.get("name", str(trade.get("id", "")))
         for off in trade.get("h", {}).get("sO", []):
-            st = off.get("st", "")
-            if st not in ("BOUGHT", "SOLD"):
+            if off.get("st", "") not in _COMPLETED_STATES:
                 continue
-            qty = off.get("cQIT") or off.get("tQIT") or 0
+            qty = off.get("cQIT")  # actual filled quantity
+            qty = qty if qty is not None else off.get("tQIT", 0)
             if qty <= 0 or not off.get("uuid"):
                 continue
             out.append(Fill(
                 uuid=off["uuid"], item_id=off.get("id", 0), name=name,
                 is_buy=bool(off.get("b")), qty=int(qty), price=int(off.get("p", 0)),
-                state=st, t_ms=int(off.get("t", 0)),
+                state=off.get("st", ""), t_ms=int(off.get("t", 0)),
             ))
     return out
 

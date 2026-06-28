@@ -108,5 +108,10 @@ BANKROLL = int(os.environ.get("OSRS_FLIPPER_BANKROLL", 200_000))
 BACKTEST_BANKROLL = int(os.environ.get("OSRS_FLIPPER_BACKTEST_BANKROLL", 5_000_000))
 SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 
+# --- Schedule (drives the time-aware `brief`) --------------------------------
+# Active hours = fast online flips; outside them = overnight/patient plan.
+AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wake
+AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sleep
+
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
