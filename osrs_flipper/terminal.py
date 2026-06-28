@@ -3,7 +3,8 @@
     osrs-flipper trade
 
 Commands (type `help`):
-  port [free_slots]        recommended diversified allocation for your free slots
+  orders | ge             live GE slots + active offers (from RuneLite)
+  port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   buy <item> <quantity> <price>    log a buy fill
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import time
 
-from . import alert, api, config, scanner
+from . import alert, api, config, runelite, scanner
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -134,13 +135,33 @@ class Terminal:
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
-        specified = bool(args and args[0].isdigit())
-        free = int(args[0]) if specified else max(0, config.GE_SLOTS - len(held))
+        rl = runelite.read()
+        active_ids = [o.item_id for o in runelite.active_offers(rl)] if rl else []
+        if args and args[0].isdigit():
+            free, source = int(args[0]), "specified"
+        elif rl is not None:
+            free, source = runelite.free_slots(rl, config.GE_SLOTS), "runelite"
+        else:
+            free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
+        # don't recommend what you already hold OR already have an offer on
+        exclude = [h.item_id for h in held] + active_ids
         print(f"  building portfolio for {free} free slot(s)…")
         picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
-            limit_used=self.j.buy_limit_used())
-        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, assumed=not specified))
+            bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self.j.buy_limit_used())
+        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+
+    def cmd_orders(self, args: list[str]) -> None:
+        rl = runelite.read()
+        if not rl:
+            print("  no RuneLite data found (~/.runelite/flipping/) — is Flipping Utilities tracking?")
+            return
+        offers = runelite.active_offers(rl)
+        occ, free = runelite.occupied_slots(rl), runelite.free_slots(rl, config.GE_SLOTS)
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        print(f"  GE slots: {occ} occupied, {free} free (of {config.GE_SLOTS})")
+        for o in sorted(offers, key=lambda x: x.slot):
+            side = "BUY " if o.is_buy else "SELL"
+            print(f"  slot {o.slot}  {side} {str(names.get(o.item_id, o.item_id))[:18]:18} x{o.qty:<6} {o.state}")
 
     def cmd_pos(self) -> None:
         pos = self.j.positions()
@@ -188,6 +209,7 @@ class Terminal:
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
+            "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),

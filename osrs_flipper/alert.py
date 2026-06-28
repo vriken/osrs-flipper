@@ -96,19 +96,24 @@ def format_portfolio_summary(df: pd.DataFrame, bankroll: int, slots: int = confi
 
 
 def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 0.0,
-                     free_slots: int = 0, assumed: bool = True) -> str:
+                     free_slots: int = 0, slot_source: str = "assumed") -> str:
     """Render the two-tier plan: active flips (work in your slots) + hold (accumulate)."""
     held = held or []
     n_active = sum(p["tier"] != "hold" for p in picks)
     lines = [f"=== portfolio · cash {bankroll:,} · {len(held)} held · {n_active} active + "
              f"{len(picks) - n_active} accumulate ==="]
-    if assumed:
-        lines.append(f"  free slots = {free_slots} (ASSUMED: {config.GE_SLOTS} − {len(held)} holding inventory). "
-                     f"Have pending buy/sell offers? run `port <n>` with your real free count.")
-    else:
+    if slot_source == "runelite":
+        lines.append(f"  free slots = {free_slots} (LIVE from RuneLite)")
+    elif slot_source == "specified":
         lines.append(f"  free slots = {free_slots} (you specified)")
+    else:
+        lines.append(f"  free slots = {free_slots} (ASSUMED: {config.GE_SLOTS} − {len(held)} holding inventory). "
+                     f"Have pending offers? run `port <n>` or let RuneLite report them.")
     if not picks:
-        lines.append("  (nothing passed the filters)")
+        if free_slots <= 0:
+            lines.append("  all GE slots are busy — collect a finished offer to free one, then run `port` again.")
+        else:
+            lines.append("  (nothing passed the filters)")
     else:
         lines.append(f"  {'#':>2} {'type':9} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} "
                      f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'gp':>9}")
@@ -135,7 +140,7 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
         lines.append("       ETA = fill once placed · fillBy = when actually bought given your slot count")
     if held:
         lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
-    if bankroll and idle > 0.5 * bankroll:
+    if picks and free_slots > 0 and bankroll and idle > 0.5 * bankroll:
         lines.append("  ⚠ still over half idle — even buy-limit accumulation can't absorb it; "
                      "the F2P market is the ceiling. A bond opens the members market.")
     return "\n".join(lines)
