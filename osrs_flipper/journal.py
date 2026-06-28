@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE TABLE IF NOT EXISTS predictions (
     ts BIGINT, item_id INTEGER, name TEXT, qty BIGINT,
-    buy_px BIGINT, sell_px BIGINT, p_buy DOUBLE, p_sell DOUBLE, p_round DOUBLE, ev DOUBLE
+    buy_px BIGINT, sell_px BIGINT, p_buy DOUBLE, p_sell DOUBLE, p_round DOUBLE, ev DOUBLE,
+    source TEXT DEFAULT 'quote'
 );
 """
 
@@ -44,6 +45,8 @@ class Journal:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(str(path or DB_PATH))
         self.con.execute(_SCHEMA)
+        # migrate older journals that created `predictions` before `source` existed
+        self.con.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'quote'")
 
     def __enter__(self) -> Journal:
         return self
@@ -124,18 +127,23 @@ class Journal:
         return self.cash() + self.inventory_value(bids)
 
     def log_prediction(self, item_id: int, name: str, qty: int, buy_px: int, sell_px: int,
-                       p_buy: float, p_sell: float, p_round: float, ev: float) -> None:
-        """Record what the model predicted at decision time, to calibrate against real fills later."""
-        self.con.execute("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       p_buy: float, p_sell: float, p_round: float, ev: float,
+                       source: str = "quote") -> None:
+        """Record what the model predicted at decision time, to calibrate against real fills later.
+
+        source="buy" pairs a prediction with an actual entry (the gold calibration signal);
+        source="quote" is a deliberate lookup you may or may not act on.
+        """
+        self.con.execute("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                          [int(time.time()), item_id, name, qty, buy_px, sell_px,
-                          p_buy, p_sell, p_round, ev])
+                          p_buy, p_sell, p_round, ev, source])
 
     def recent_predictions(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self.con.execute(
-            "SELECT ts,name,qty,buy_px,sell_px,p_round,ev FROM predictions ORDER BY ts DESC LIMIT ?", [n]
+            "SELECT ts,name,qty,buy_px,sell_px,p_round,ev,source FROM predictions ORDER BY ts DESC LIMIT ?", [n]
         ).fetchall()
         return [{"ts": r[0], "name": r[1], "qty": r[2], "buy_px": r[3], "sell_px": r[4],
-                 "p_round": r[5], "ev": r[6]} for r in rows]
+                 "p_round": r[5], "ev": r[6], "source": r[7]} for r in rows]
 
     def recent(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self.con.execute(

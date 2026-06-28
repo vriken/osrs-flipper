@@ -39,11 +39,17 @@ def _cmd_trade(args: argparse.Namespace) -> None:
 
 def _cmd_portfolio(args: argparse.Namespace) -> None:
     from . import alert, scanner
-    from .journal import Journal
 
-    with Journal() as j:
-        held = j.positions()
-        cash = args.bankroll or int(j.cash()) or config.BANKROLL
+    held: list = []
+    cash = args.bankroll or config.BANKROLL
+    try:
+        from .journal import Journal
+        with Journal() as j:
+            held = j.positions()
+            cash = args.bankroll or int(j.cash()) or config.BANKROLL
+    except Exception:
+        print("(journal busy — it's open in the `trade` terminal. Using --bankroll; "
+              "run `port` inside the terminal for held-position-aware planning.)\n")
     free = args.slots if args.slots else max(0, config.GE_SLOTS - len(held))
     picks, idle = scanner.build_portfolio(
         bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
