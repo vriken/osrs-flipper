@@ -94,6 +94,35 @@ def format_portfolio_summary(df: pd.DataFrame, bankroll: int, slots: int = confi
     return line
 
 
+def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 0.0) -> str:
+    """Render the two-tier plan: active flips (work in your slots) + hold (accumulate)."""
+    held = held or []
+    n_active = sum(p["tier"] != "hold" for p in picks)
+    lines = [f"=== portfolio · cash {bankroll:,} · {len(held)} held · {n_active} active + "
+             f"{len(picks) - n_active} accumulate ==="]
+    if not picks:
+        lines.append("  (nothing passed the filters)")
+    else:
+        lines.append(f"  {'type':9} {'item':18} {'buy':>8} {'sell':>8} {'qty':>8} {'deploy':>9} {'gp':>9}")
+        lines.append("  " + "-" * 72)
+        tot_dep = tot_gp = 0.0
+        for p in picks:
+            label = p["tier"] if p["tier"] != "hold" else "hold↓"
+            lines.append(f"  {label:9} {p['name'][:18]:18} {p['buy_px']:>8,} {p['sell_px']:>8,} "
+                         f"{p['qty']:>8,} {p['deploy']:>9,} {p['gp']:>9,.0f}")
+            tot_dep += p["deploy"]
+            tot_gp += p["gp"]
+        lines.append("  " + "-" * 72)
+        lines.append(f"  deploy {tot_dep:,.0f} of {bankroll:,} ({idle:,.0f} idle)  ·  ~{tot_gp:,.0f} gp potential")
+        lines.append("  active = work in your slots now · hold↓ = accumulate into inventory over buy-limit cycles")
+    if held:
+        lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
+    if bankroll and idle > 0.5 * bankroll:
+        lines.append("  ⚠ still over half idle — even buy-limit accumulation can't absorb it; "
+                     "the F2P market is the ceiling. A bond opens the members market.")
+    return "\n".join(lines)
+
+
 def format_quote(q) -> str:
     """Render an optimal-quote result with per-leg fill probabilities and the frontier."""
     if q is None:
