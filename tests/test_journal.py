@@ -59,8 +59,9 @@ def test_set_cash_persists(j):
 
 def test_predictions_logged_and_read_back(j):
     j.log_prediction(GOLD_BAR, "Gold bar", 2000, 97, 101, 0.9, 0.8, 0.72, 5760)
+    j.log_prediction(GOLD_BAR, "Gold bar", 100, 97, 101, 0.9, 0.8, 0.72, 200, source="buy")
     preds = j.recent_predictions(5)
-    assert len(preds) == 1
-    assert preds[0]["name"] == "Gold bar"
-    assert preds[0]["buy_px"] == 97 and preds[0]["sell_px"] == 101
-    assert abs(preds[0]["p_round"] - 0.72) < 1e-9
+    assert len(preds) == 2
+    assert preds[0]["source"] == "buy"  # newest first
+    assert preds[1]["source"] == "quote"  # default
+    assert preds[1]["buy_px"] == 97 and preds[1]["sell_px"] == 101

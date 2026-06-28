@@ -101,8 +101,8 @@ class Terminal:
             print("  (no predictions yet — they're logged each time you `quote` an item)")
             return
         for p in rows:
-            print(f"  {p['name'][:18]:18} qty {p['qty']:>7,}  buy {p['buy_px']:>7,}  sell {p['sell_px']:>7,}  "
-                  f"round {p['p_round']:>4.0%}  EV {p['ev']:>8,.0f}")
+            print(f"  [{p['source']:5}] {p['name'][:16]:16} qty {p['qty']:>7,}  buy {p['buy_px']:>7,}  "
+                  f"sell {p['sell_px']:>7,}  round {p['p_round']:>4.0%}  EV {p['ev']:>8,.0f}")
 
     def _trade(self, args: list[str], side: str) -> None:
         # item name comes first (may contain spaces) → qty and price are the last two tokens
@@ -117,6 +117,13 @@ class Terminal:
         if side == "buy":
             cost = self.j.record_buy(meta["id"], meta["name"], qty, price)
             print(f"  bought {qty:,} {meta['name']} @ {price} = -{cost:,.0f} | cash {self.j.cash():,.0f}")
+            try:  # pair this entry with the model's prediction for later calibration
+                q = optimal_quote(meta["id"], qty, name=meta["name"])
+                if q:
+                    self.j.log_prediction(meta["id"], meta["name"], q.qty, q.buy_px, q.sell_px,
+                                          q.p_buy, q.p_sell, q.p_round, q.ev, source="buy")
+            except Exception:
+                pass
         else:
             proceeds, realized = self.j.record_sell(meta["id"], meta["name"], qty, price)
             print(f"  sold {qty:,} {meta['name']} @ {price} = +{proceeds:,.0f} "

@@ -116,6 +116,7 @@ def build_features(
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,
+            "buy_rate": buy_rate,  # units/hr you can passively buy (for buy-leg ETA ordering)
             "fast_buy": fast_buy,
             "fast_sell": fast_sell,
             "margin_fast": margin_fast,

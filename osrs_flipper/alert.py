@@ -103,18 +103,22 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
     if not picks:
         lines.append("  (nothing passed the filters)")
     else:
-        lines.append(f"  {'type':9} {'item':18} {'buy':>8} {'sell':>8} {'qty':>8} {'deploy':>9} {'gp':>9}")
-        lines.append("  " + "-" * 72)
+        lines.append(f"  {'#':>2} {'type':9} {'item':18} {'buy':>7} {'sell':>7} {'qty':>8} "
+                     f"{'deploy':>9} {'buyETA':>7} {'gp':>9}")
+        lines.append("  " + "-" * 80)
         tot_dep = tot_gp = 0.0
-        for p in picks:
+        for i, p in enumerate(picks, 1):
             label = p["tier"] if p["tier"] != "hold" else "hold↓"
-            lines.append(f"  {label:9} {p['name'][:18]:18} {p['buy_px']:>8,} {p['sell_px']:>8,} "
-                         f"{p['qty']:>8,} {p['deploy']:>9,} {p['gp']:>9,.0f}")
+            eta = p.get("buy_eta_h", float("inf"))
+            eta_s = f"{eta:.1f}h" if eta < 100 else "—"
+            lines.append(f"  {i:>2} {label:9} {p['name'][:18]:18} {p['buy_px']:>7,} {p['sell_px']:>7,} "
+                         f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>7} {p['gp']:>9,.0f}")
             tot_dep += p["deploy"]
             tot_gp += p["gp"]
-        lines.append("  " + "-" * 72)
+        lines.append("  " + "-" * 80)
         lines.append(f"  deploy {tot_dep:,.0f} of {bankroll:,} ({idle:,.0f} idle)  ·  ~{tot_gp:,.0f} gp potential")
-        lines.append("  active = work in your slots now · hold↓ = accumulate into inventory over buy-limit cycles")
+        lines.append("  place buys top-to-bottom (#): fastest-filling first frees slots to cycle the rest · "
+                     "hold↓ = accumulate into inventory")
     if held:
         lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
     if bankroll and idle > 0.5 * bankroll:

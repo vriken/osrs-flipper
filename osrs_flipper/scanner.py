@@ -162,7 +162,7 @@ def _pick_row(row, tier: str, cap_units: int) -> dict:
         "tier": tier, "item_id": int(row["item_id"]), "name": row["name"],
         "buy_px": int(row["buy_px"]), "sell_px": int(row["sell_px"]),
         "margin_abs": int(row["margin_abs"]), "p_complete": float(row["p_complete"]),
-        "cap_units": max(0, cap_units),
+        "cap_units": max(0, cap_units), "buy_rate": float(row.get("buy_rate", 0.0)),
     }
 
 
@@ -202,6 +202,10 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     for p in allocated:  # active gp is per-cycle; hold gp is the spread captured once sold
         fill = p["p_complete"] if p["tier"] != "hold" else 1.0
         p["gp"] = p["margin_abs"] * p["qty"] * fill
+        br = p.get("buy_rate", 0.0)
+        p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
+    # placement order: fastest-filling buys first, so slots clear and you can cycle the rest
+    allocated.sort(key=lambda p: p["buy_eta_h"])
     return allocated, idle
 
 
