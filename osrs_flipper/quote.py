@@ -90,8 +90,15 @@ def optimal_quote(
     window_h = len(bars) * _BAR_HOURS.get(timestep, 1.0)
     rate_buy, rate_sell = _rates(bars, window_h)
 
+    # Price off the 1h average (stable, matches the scanner's build_features), falling back
+    # to the live latest. Using live-only made quote return None whenever a side was momentarily
+    # null/collapsed while the scanner (on 1h averages) still showed the item.
     cur = api.latest().get(item_id, {})
-    bid, ask = cur.get("low"), cur.get("high")
+    hr = api.one_hour().get(item_id, {})
+    bid = hr.get("avgLowPrice")
+    bid = int(round(bid)) if bid is not None else cur.get("low")
+    ask = hr.get("avgHighPrice")
+    ask = int(round(ask)) if ask is not None else cur.get("high")
     if bid is None or ask is None:
         return None
 
