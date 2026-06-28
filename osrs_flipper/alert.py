@@ -55,10 +55,11 @@ def format_table(df: pd.DataFrame, mode: str = "balanced") -> str:
                 cells.append(f"{val:>{w}{fmt}}")
         lines.append(" ".join(cells))
     lines.append("")
-    lines.append(f"[{mode}] " + _MODE_NOTE.get(mode, _MODE_NOTE["balanced"]) + "  ·  eta = hrs to fill both legs")
+    lines.append("KEY  net = gp/unit after tax · qty = units you can afford · fill = P(both legs fill) · "
+                 "gp/cyc = net×qty×fill (one buy→sell)")
+    lines.append(f"     SCORE = ranking key only, NOT gp  ·  [{mode}] " + _MODE_NOTE.get(mode, _MODE_NOTE["balanced"]))
     if "exp_gp_cycle_adj" in df.columns:
-        lines.append(f"scores shrunk for the optimizer's curse · spread capital across your top "
-                     f"{config.GE_SLOTS} — don't all-in #1")
+        lines.append(f"     scores shrunk for the optimizer's curse · spread across your top {config.GE_SLOTS} — don't all-in #1")
     return "\n".join(lines)
 
 
@@ -106,7 +107,7 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
         lines.append(f"  {'#':>2} {'type':9} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} "
                      f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'gp':>9}")
         lines.append("  " + "-" * 84)
-        tot_dep = tot_gp = 0.0
+        tot_dep = 0.0
         for i, p in enumerate(picks, 1):
             label = p["tier"] if p["tier"] != "hold" else "hold↓"
             eta = p.get("buy_eta_h", float("inf"))
@@ -116,14 +117,16 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
             lines.append(f"  {i:>2} {label:9} {p['name'][:16]:16} {p['buy_px']:>7,} {p['sell_px']:>7,} "
                          f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>5} {fb_s:>6} {p['gp']:>9,.0f}")
             tot_dep += p["deploy"]
-            tot_gp += p["gp"]
         lines.append("  " + "-" * 84)
+        active_gp = sum(p["gp"] for p in picks if p["tier"] != "hold")
+        hold_gp = sum(p["gp"] for p in picks if p["tier"] == "hold")
         n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
         makespan = max((p.get("fill_by_h", 0) for p in picks), default=0)
-        lines.append(f"  deploy {tot_dep:,.0f} of {bankroll:,} ({idle:,.0f} idle)  ·  ~{tot_gp:,.0f} gp potential")
-        lines.append(f"  place #1-#{n_now} NOW (your free slots); place each next as a slot fills · "
-                     f"~{makespan:.1f}h to deploy all")
-        lines.append("  ETA = fill time once placed · fillBy = when it's actually bought given your slot count")
+        lines.append(f"  deploy {tot_dep:,.0f} of {bankroll:,} ({idle:,.0f} idle)")
+        lines.append(f"  est. profit: ~{active_gp:,.0f} gp/CYCLE (active flips) + ~{hold_gp:,.0f} gp WHEN-SOLD (holds)")
+        lines.append(f"  place #1-#{n_now} NOW (your free slots); each next as a slot fills · ~{makespan:.1f}h to place all")
+        lines.append("  KEY  gp = active: per buy→sell cycle · hold↓: total once sold (different time bases — not added)")
+        lines.append("       ETA = fill once placed · fillBy = when actually bought given your slot count")
     if held:
         lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
     if bankroll and idle > 0.5 * bankroll:
@@ -152,7 +155,9 @@ def format_quote(q) -> str:
             f"{r['p_sell']:>6.0%} {r['p_round']:>7.0%} {r['ev']:>10,.0f}"
         )
     lines.append("")
-    lines.append(f"fill% = expected fraction of {q.qty:,} filled within {q.horizon_h:g}h at that price")
+    lines.append(f"KEY  net = gp/unit after tax · buy%/sell% = fraction of {q.qty:,} filled within {q.horizon_h:g}h "
+                 f"· round% = both legs")
+    lines.append(f"     EV = net × qty × round% = expected gp realised within {q.horizon_h:g}h")
     return "\n".join(lines)
 
 
