@@ -31,6 +31,8 @@ class Offer:
     state: str
     qty: int
     price: int
+    started_ms: int = 0
+    filled: int = 0
 
 
 @dataclass
@@ -82,8 +84,24 @@ def active_offers(data: dict) -> list[Offer]:
             state=off.get("st", ""),
             qty=off.get("tQIT", 0),
             price=off.get("p", 0),
+            started_ms=off.get("tradeStartedAt", 0),
+            filled=off.get("cQIT", 0),
         ))
     return out
+
+
+def review_verdict(state: str, progress: float, elapsed_h: float, eta_h: float) -> str:
+    """Advise on an active offer from time/progress alone (we don't get the offer price).
+    Returns: collect | stale | slow | ontrack | done."""
+    if state in ("BOUGHT", "SOLD"):
+        return "collect"
+    if progress >= 1:
+        return "done"
+    if eta_h and eta_h < float("inf") and elapsed_h > 2 * eta_h and progress < 0.5:
+        return "stale"
+    if eta_h and eta_h < float("inf") and elapsed_h > eta_h:
+        return "slow"
+    return "ontrack"
 
 
 def occupied_slots(data: dict) -> int:
