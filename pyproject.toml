@@ -1,0 +1,38 @@
+[project]
+name = "osrs-flipper"
+version = "0.1.0"
+description = "OSRS Grand Exchange flip-finder & strategy backtester (manual execution; not a game bot)"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31,<3",
+    "pandas>=2.1,<3",
+    "duckdb>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+osrs-flipper = "osrs_flipper.cli:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM102", "SIM105"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["osrs_flipper*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
