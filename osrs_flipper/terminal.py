@@ -146,7 +146,8 @@ class Terminal:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
         rl = runelite.read()
-        active_ids = [o.item_id for o in runelite.active_offers(rl)] if rl else []
+        offers = runelite.active_offers(rl) if rl else []
+        active_ids = [o.item_id for o in offers]
         if args and args[0].isdigit():
             free, source = int(args[0]), "specified"
         elif rl is not None:
@@ -159,6 +160,10 @@ class Terminal:
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self._limit_used(rl))
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+        active_sell_ids = {o.item_id for o in offers if not o.is_buy}
+        sell = alert.format_sell_plan(self._sell_plan(held, active_sell_ids))
+        if sell:
+            print(sell)
         nudge = self._attention_nudge()
         if nudge:
             print(nudge)
@@ -213,6 +218,26 @@ class Terminal:
             print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:16]:16} {'BUY' if o.is_buy else 'SELL':4} "
                   f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {alert.color(text, c) if c else text}")
         print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
+
+    def _sell_plan(self, held: list, active_sell_ids: set) -> list[dict]:
+        """Recommended sell price + expected profit for each held item not already listed."""
+        from .tax import post_tax_received
+        hourly, latest = api.one_hour(), api.latest()
+        rows = []
+        for p in held:
+            if p.item_id in active_sell_ids:
+                continue
+            h = hourly.get(p.item_id, {})
+            ask = h.get("avgHighPrice") or (latest.get(p.item_id, {}) or {}).get("high")
+            if not ask:
+                continue
+            sell_px = int(round(ask))
+            net = post_tax_received(sell_px, item_id=p.item_id) - p.avg_cost
+            hv = h.get("highPriceVolume") or 0
+            eta_h = p.qty / (config.ALPHA * hv) if hv > 0 else float("inf")
+            rows.append({"name": p.name, "qty": p.qty, "avg_cost": p.avg_cost,
+                         "sell_px": sell_px, "profit": net * p.qty, "eta_h": eta_h})
+        return rows
 
     def _attention_nudge(self) -> str:
         """A coloured one-liner if any active offer needs re-pricing/collecting."""

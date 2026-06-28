@@ -156,6 +156,20 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
     return "\n".join(lines)
 
 
+def format_sell_plan(rows: list[dict]) -> str:
+    """Recommended sell listings for inventory you hold (and aren't already selling)."""
+    if not rows:
+        return ""
+    lines = ["  SELL your holdings:",
+             f"  {'item':16} {'qty':>7} {'avg':>8} {'sell@':>8} {'eta':>6} {'profit':>9}"]
+    for r in rows:
+        eta_s = f"{r['eta_h']:.1f}h" if r["eta_h"] < 100 else "—"
+        prof = color(f"{r['profit']:+,.0f}", "green" if r["profit"] >= 0 else "red")
+        lines.append(f"  {str(r['name'])[:16]:16} {r['qty']:>7,} {r['avg_cost']:>8,.0f} "
+                     f"{r['sell_px']:>8,} {eta_s:>6} {prof:>9}")
+    return "\n".join(lines)
+
+
 def format_quote(q) -> str:
     """Render an optimal-quote result with per-leg fill probabilities and the frontier."""
     if q is None:
