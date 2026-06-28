@@ -95,12 +95,18 @@ def format_portfolio_summary(df: pd.DataFrame, bankroll: int, slots: int = confi
     return line
 
 
-def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 0.0) -> str:
+def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 0.0,
+                     free_slots: int = 0, assumed: bool = True) -> str:
     """Render the two-tier plan: active flips (work in your slots) + hold (accumulate)."""
     held = held or []
     n_active = sum(p["tier"] != "hold" for p in picks)
     lines = [f"=== portfolio · cash {bankroll:,} · {len(held)} held · {n_active} active + "
              f"{len(picks) - n_active} accumulate ==="]
+    if assumed:
+        lines.append(f"  free slots = {free_slots} (ASSUMED: {config.GE_SLOTS} − {len(held)} holding inventory). "
+                     f"Have pending buy/sell offers? run `port <n>` with your real free count.")
+    else:
+        lines.append(f"  free slots = {free_slots} (you specified)")
     if not picks:
         lines.append("  (nothing passed the filters)")
     else:

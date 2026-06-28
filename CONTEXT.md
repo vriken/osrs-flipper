@@ -21,6 +21,18 @@ _Avoid_: investment, position-trade
 A predictive approach that bets on price movement (mean-reversion, momentum). Backtest/research only — NOT a flip.
 _Avoid_: calling these "flips"
 
+### Slots & capital
+
+**GE slot**:
+One of the concurrent Grand Exchange offer slots (3 F2P / 8 members). Occupied by ANY active offer — a pending buy or an in-progress sell.
+
+**Held** (position):
+Inventory bought and not yet fully sold. Occupies a sell-side slot while you sell it.
+
+**Free slots**:
+GE slots with no active offer. The tool CANNOT observe true occupancy (it only sees logged fills, not pending offers), so this is a **number you supply**; the default (`GE_SLOTS − held`) is an explicitly-captioned assumption that your only busy slots hold inventory.
+_Avoid_: treating the default free-slot count as ground truth
+
 ### Profit metrics
 
 **Margin** (shown as `net`):
@@ -53,3 +65,4 @@ _Avoid_: reading SCORE as "gp"
 ## Flagged ambiguities
 
 - "investment"/"hold" implied a directional bet — resolved: a **hold** is a slow flip (spread capture), not a directional position.
+- "free slots" — the journal only knows inventory-holding slots, not pending offers, so it can't compute true occupancy — resolved: **free slots is user-supplied**, with `GE_SLOTS − held` as an explicitly-labelled default assumption.
