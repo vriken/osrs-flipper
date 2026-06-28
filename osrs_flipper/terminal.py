@@ -1,0 +1,177 @@
+"""Interactive trading terminal — run it and drive everything without spending tokens.
+
+    osrs-flipper trade
+
+Commands (type `help`):
+  scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
+  quote <item> [qty]       solve optimal buy/sell prices for an item
+  buy <qty> <price> <item> log a buy fill
+  sell <qty> <price> <item>log a sell fill (applies GE tax)
+  pos                      open positions + unrealised P&L (vs live bid)
+  pnl                      realised P&L, cash, equity, bond progress
+  recent [n]               recent trades
+  bank <amount>            set your current cash balance
+  help | quit
+"""
+
+from __future__ import annotations
+
+import time
+
+from . import alert, api, config, scanner
+from .journal import Journal
+from .quote import optimal_quote
+
+_BOND = config.BOND_ITEM_ID
+
+
+class Terminal:
+    def __init__(self, db: str | None = None) -> None:
+        self.j = Journal(path=db)
+        self._map: dict[str, dict] | None = None
+        self._latest: dict[int, dict] = {}
+        self._latest_ts = 0.0
+
+    # --- data helpers --------------------------------------------------------
+    def mapping(self) -> dict[str, dict]:
+        if self._map is None:
+            self._map = {r["name"].lower(): r for r in api.mapping()}
+        return self._map
+
+    def latest(self, max_age: float = 30) -> dict[int, dict]:
+        if time.time() - self._latest_ts > max_age:
+            self._latest = api.latest()
+            self._latest_ts = time.time()
+        return self._latest
+
+    def resolve(self, token: str) -> dict | None:
+        m = self.mapping()
+        if token.isdigit():
+            return next((r for r in m.values() if r["id"] == int(token)), None)
+        if token.lower() in m:
+            return m[token.lower()]
+        hits = [r for k, r in m.items() if token.lower() in k]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            print("  ambiguous — matches:", ", ".join(sorted(r["name"] for r in hits[:8])))
+        return None
+
+    # --- commands ------------------------------------------------------------
+    def cmd_scan(self, args: list[str]) -> None:
+        top = next((int(a) for a in args if a.isdigit()), 15)
+        mode = next((a for a in args if a in scanner.MODE_WEIGHTS), "balanced")
+        print(f"  scanning ({mode})…")
+        df = scanner.scan(top=top, bankroll=int(self.j.cash()) or config.BANKROLL, mode=mode)
+        print(alert.format_table(df, mode=mode))
+
+    def cmd_quote(self, args: list[str]) -> None:
+        if not args:
+            print("  usage: quote <item> [qty]")
+            return
+        qty = None
+        if args[-1].isdigit() and len(args) > 1:
+            qty, args = int(args[-1]), args[:-1]
+        meta = self.resolve(" ".join(args))
+        if not meta:
+            print("  item not found")
+            return
+        from .quote import suggested_qty
+        bankroll = int(self.j.cash()) or config.BANKROLL
+        qty = qty or suggested_qty(meta["id"], meta.get("limit") or 0, bankroll)
+        if qty <= 0:
+            print("  no quantity (set cash with `bank <amount>` or pass a qty)")
+            return
+        print(alert.format_quote(optimal_quote(meta["id"], qty, name=meta["name"])))
+
+    def _trade(self, args: list[str], side: str) -> None:
+        if len(args) < 3 or not args[0].isdigit() or not args[1].isdigit():
+            print(f"  usage: {side} <qty> <price> <item>")
+            return
+        qty, price = int(args[0]), int(args[1])
+        meta = self.resolve(" ".join(args[2:]))
+        if not meta:
+            print("  item not found")
+            return
+        if side == "buy":
+            cost = self.j.record_buy(meta["id"], meta["name"], qty, price)
+            print(f"  bought {qty:,} {meta['name']} @ {price} = -{cost:,.0f} | cash {self.j.cash():,.0f}")
+        else:
+            proceeds, realized = self.j.record_sell(meta["id"], meta["name"], qty, price)
+            print(f"  sold {qty:,} {meta['name']} @ {price} = +{proceeds:,.0f} "
+                  f"(realised {realized:+,.0f}) | cash {self.j.cash():,.0f}")
+
+    def cmd_pos(self) -> None:
+        pos = self.j.positions()
+        if not pos:
+            print("  (no open positions)")
+            return
+        lat = self.latest()
+        print(f"  {'item':20} {'qty':>8} {'avg':>9} {'bid':>9} {'unreal':>11}")
+        for p in pos:
+            bid = lat.get(p.item_id, {}).get("low")
+            from .tax import post_tax_received
+            unreal = (post_tax_received(bid, item_id=p.item_id) - p.avg_cost) * p.qty if bid else 0
+            print(f"  {p.name[:20]:20} {p.qty:>8,} {p.avg_cost:>9,.1f} "
+                  f"{(bid or 0):>9,} {unreal:>+11,.0f}")
+
+    def cmd_pnl(self) -> None:
+        lat = self.latest()
+        bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
+        equity = self.j.equity(bids)
+        bond = lat.get(_BOND, {}).get("high")
+        print(f"  cash:        {self.j.cash():>14,.0f}")
+        print(f"  inventory:   {self.j.inventory_value(bids):>14,.0f}")
+        print(f"  equity:      {equity:>14,.0f}")
+        print(f"  realised P&L:{self.j.realized_pnl():>+14,.0f}")
+        if bond:
+            print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
+
+    def cmd_recent(self, args: list[str]) -> None:
+        n = int(args[0]) if args and args[0].isdigit() else 10
+        for t in self.j.recent(n):
+            tag = f"{t['pnl']:+,.0f}" if t["side"] == "SELL" else ""
+            print(f"  {t['side']:4} {t['qty']:>8,} {t['name'][:18]:18} @ {t['price']:>7,} {tag}")
+
+    def cmd_bank(self, args: list[str]) -> None:
+        if not args or not args[0].replace("_", "").isdigit():
+            print(f"  current cash: {self.j.cash():,.0f}  (set with `bank <amount>`)")
+            return
+        self.j.set_cash(float(args[0].replace("_", "")))
+        print(f"  cash set to {self.j.cash():,.0f}")
+
+    # --- loop ----------------------------------------------------------------
+    def run(self) -> None:
+        print("osrs-flipper terminal — type `help`, `quit` to exit")
+        handlers = {
+            "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
+            "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
+            "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
+            "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
+            "bank": lambda a: self.cmd_bank(a), "help": lambda a: print(__doc__),
+            "?": lambda a: print(__doc__),
+        }
+        while True:
+            try:
+                raw = input("osrs> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not raw:
+                continue
+            cmd, *args = raw.split()
+            cmd = cmd.lower()
+            if cmd in ("quit", "exit", "q"):
+                break
+            fn = handlers.get(cmd)
+            if not fn:
+                print(f"  unknown command: {cmd} (type `help`)")
+                continue
+            try:
+                fn(args)
+            except Exception as e:  # keep the REPL alive on any error
+                print(f"  error: {e}")
+
+
+def run() -> None:
+    Terminal().run()
