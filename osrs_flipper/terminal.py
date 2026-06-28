@@ -29,6 +29,14 @@ from .quote import optimal_quote
 
 _BOND = config.BOND_ITEM_ID
 
+_VERDICTS = {
+    "collect": ("📦 COLLECT — frees a slot", "yellow"),
+    "stale": ("🔴 STALE — likely mispriced; cancel & re-quote", "red"),
+    "slow": ("🟡 SLOW — consider re-pricing", "yellow"),
+    "ontrack": ("🟢 on track", "green"),
+    "done": ("done", None),
+}
+
 
 class Terminal:
     def __init__(self, db: str | None = None) -> None:
@@ -151,6 +159,9 @@ class Terminal:
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self._limit_used(rl))
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
+        nudge = self._attention_nudge()
+        if nudge:
+            print(nudge)
 
     def _limit_used(self, rl: dict | None = None) -> dict[int, int]:
         """Prefer RuneLite's exact buy-limit counter; fall back to journal-summed buys."""
@@ -170,33 +181,50 @@ class Terminal:
         print(f"  synced {n} new fill(s) from RuneLite · cash {self.j.cash():,.0f} · "
               f"realised {self.j.realized_pnl():+,.0f}")
 
-    def cmd_review(self, args: list[str]) -> None:
+    def _review_offers(self) -> list[tuple]:
+        """For each live offer: (offer, verdict, elapsed_h, eta_h, progress)."""
         rl = runelite.read()
-        if not rl:
-            print("  no RuneLite data (~/.runelite/flipping/)")
-            return
-        offers = runelite.active_offers(rl)
+        offers = runelite.active_offers(rl) if rl else []
         if not offers:
-            print("  no active offers")
-            return
+            return []
         hourly = api.one_hour()
-        names = {r["id"]: r["name"] for r in api.mapping()}
         now_ms = int(time.time() * 1000)
-        verdicts = {"collect": "📦 COLLECT — frees a slot", "stale": "🔴 STALE — likely mispriced; cancel & re-quote",
-                    "slow": "🟡 SLOW — consider re-pricing", "ontrack": "🟢 on track", "done": "done"}
-        print(f"  {'slot':4} {'item':16} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
-        for o in sorted(offers, key=lambda x: x.slot):
+        out = []
+        for o in offers:
             v = hourly.get(o.item_id, {})
             vol = (v.get("lowPriceVolume") if o.is_buy else v.get("highPriceVolume")) or 0
             rate = config.ALPHA * vol
             eta_h = o.qty / rate if rate > 0 else float("inf")
             elapsed_h = (now_ms - o.started_ms) / 3_600_000 if o.started_ms else 0.0
             prog = o.filled / o.qty if o.qty else 0.0
-            verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
+            out.append((o, runelite.review_verdict(o.state, prog, elapsed_h, eta_h), elapsed_h, eta_h, prog))
+        return out
+
+    def cmd_review(self, args: list[str]) -> None:
+        rows = self._review_offers()
+        if not rows:
+            print("  no active offers (or no RuneLite data)")
+            return
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        print(f"  {'slot':4} {'item':16} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
+        for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
+            text, c = _VERDICTS[v]
             eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
             print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:16]:16} {'BUY' if o.is_buy else 'SELL':4} "
-                  f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {verdicts[verdict]}")
+                  f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {alert.color(text, c) if c else text}")
         print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
+
+    def _attention_nudge(self) -> str:
+        """A coloured one-liner if any active offer needs re-pricing/collecting."""
+        verds = [v for (_o, v, *_rest) in self._review_offers()]
+        parts = []
+        if (n := verds.count("stale")):
+            parts.append(alert.color(f"{n} to re-price", "red"))
+        if (n := verds.count("slow")):
+            parts.append(alert.color(f"{n} slow", "yellow"))
+        if (n := verds.count("collect")):
+            parts.append(alert.color(f"{n} to collect", "yellow"))
+        return "  active orders: " + ", ".join(parts) + " — run `review`" if parts else ""
 
     def cmd_orders(self, args: list[str]) -> None:
         rl = runelite.read()
