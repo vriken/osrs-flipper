@@ -48,6 +48,7 @@ def scan(
     persistence: bool = True,
     candidates: int | None = None,
     mode: str = "balanced",
+    min_gp: int = 0,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -86,9 +87,14 @@ def scan(
         return df
     df = df.sort_values(RANK_COL, ascending=False).reset_index(drop=True)
     if not persistence:
+        if min_gp:
+            df = df[df[base_col] >= min_gp]
         return df.head(top)
 
-    return _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode).head(top).reset_index(drop=True)
+    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode)
+    if min_gp and not out.empty:
+        out = out[out["exp_gp_cycle_adj"] >= min_gp]  # drop flips too small to be worth a slot
+    return out.head(top).reset_index(drop=True)
 
 
 def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataFrame:
@@ -115,6 +121,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
             **row.to_dict(),
             "buy_px": q.buy_px, "sell_px": q.sell_px, "margin_abs": q.net_unit,
             "margin_pct": q.net_unit / q.buy_px if q.buy_px else 0.0,
+            "capital_deployed": q.buy_px * int(row["capacity"]),
             "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
             "exp_gp_cycle_adj": q.ev, "raw_score": q.ev / horizon, "reliability": reliability,
