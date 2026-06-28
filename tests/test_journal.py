@@ -62,6 +62,9 @@ def test_predictions_logged_and_read_back(j):
     j.log_prediction(GOLD_BAR, "Gold bar", 100, 97, 101, 0.9, 0.8, 0.72, 200, source="buy")
     preds = j.recent_predictions(5)
     assert len(preds) == 2
-    assert preds[0]["source"] == "buy"  # newest first
-    assert preds[1]["source"] == "quote"  # default
-    assert preds[1]["buy_px"] == 97 and preds[1]["sell_px"] == 101
+    # don't assume tie order (same-second ts) — find by source
+    assert {p["source"] for p in preds} == {"buy", "quote"}
+    buy = next(p for p in preds if p["source"] == "buy")
+    quote = next(p for p in preds if p["source"] == "quote")
+    assert buy["qty"] == 100 and quote["qty"] == 2000
+    assert quote["buy_px"] == 97 and quote["sell_px"] == 101
