@@ -53,7 +53,7 @@ def _cmd_portfolio(args: argparse.Namespace) -> None:
     free = args.slots if args.slots else max(0, config.GE_SLOTS - len(held))
     picks, idle = scanner.build_portfolio(
         bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
-        members=True if args.members else None)
+        members=True if args.members else None, min_gp=args.min_gp or None)
     print(alert.format_portfolio(picks, cash, held, idle))
 
 
@@ -112,6 +112,7 @@ def main(argv: list[str] | None = None) -> None:
     pf = sub.add_parser("portfolio", help="recommend a diversified allocation for your free slots")
     pf.add_argument("--bankroll", type=int, default=0, help="override cash (default: journal balance)")
     pf.add_argument("--slots", type=int, default=0, help="free slots (default: GE_SLOTS - held positions)")
+    pf.add_argument("--min-gp", type=int, default=0, help="min gp/flip to be worth a slot (default: ~0.2%% of cash)")
     pf.add_argument("--members", action="store_true")
     pf.set_defaults(func=_cmd_portfolio)
 
