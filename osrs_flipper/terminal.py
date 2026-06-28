@@ -31,6 +31,7 @@ _BOND = config.BOND_ITEM_ID
 
 _VERDICTS = {
     "collect": ("📦 COLLECT — frees a slot", "yellow"),
+    "margin": ("🟠 MARGIN GONE — spread collapsed; cancel/re-quote", "red"),
     "stale": ("🔴 STALE — likely mispriced; cancel & re-quote", "red"),
     "slow": ("🟡 SLOW — consider re-pricing", "yellow"),
     "ontrack": ("🟢 on track", "green"),
@@ -188,11 +189,12 @@ class Terminal:
 
     def _review_offers(self) -> list[tuple]:
         """For each live offer: (offer, verdict, elapsed_h, eta_h, progress)."""
+        from .tax import post_tax_received
         rl = runelite.read()
         offers = runelite.active_offers(rl) if rl else []
         if not offers:
             return []
-        hourly = api.one_hour()
+        hourly, latest = api.one_hour(), api.latest()
         now_ms = int(time.time() * 1000)
         out = []
         for o in offers:
@@ -202,7 +204,18 @@ class Terminal:
             eta_h = o.qty / rate if rate > 0 else float("inf")
             elapsed_h = (now_ms - o.started_ms) / 3_600_000 if o.started_ms else 0.0
             prog = o.filled / o.qty if o.qty else 0.0
-            out.append((o, runelite.review_verdict(o.state, prog, elapsed_h, eta_h), elapsed_h, eta_h, prog))
+            verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
+            # market-moved check (buys): is the round-trip margin still there at live prices?
+            if verdict != "collect" and o.is_buy:
+                lo = latest.get(o.item_id, {})
+                lbid, lask = lo.get("low"), lo.get("high")
+                if lbid and lask:
+                    live_net = post_tax_received(lask, item_id=o.item_id) - lbid
+                    abid, aask = v.get("avgLowPrice"), v.get("avgHighPrice")
+                    avg_net = post_tax_received(aask, item_id=o.item_id) - abid if (abid and aask) else None
+                    if runelite.margin_collapsed(live_net, avg_net):
+                        verdict = "margin"
+            out.append((o, verdict, elapsed_h, eta_h, prog))
         return out
 
     def cmd_review(self, args: list[str]) -> None:
@@ -243,6 +256,8 @@ class Terminal:
         """A coloured one-liner if any active offer needs re-pricing/collecting."""
         verds = [v for (_o, v, *_rest) in self._review_offers()]
         parts = []
+        if (n := verds.count("margin")):
+            parts.append(alert.color(f"{n} margin-gone", "red"))
         if (n := verds.count("stale")):
             parts.append(alert.color(f"{n} to re-price", "red"))
         if (n := verds.count("slow")):

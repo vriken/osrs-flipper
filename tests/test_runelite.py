@@ -57,6 +57,14 @@ def test_limit_used_resets_past_window():
     assert runelite.limit_used(TRADES, now_ms=10**18) == {}  # past nGLR → reset
 
 
+def test_margin_collapsed():
+    assert runelite.margin_collapsed(-5, 100) is True   # exit now loses money
+    assert runelite.margin_collapsed(0, 100) is True
+    assert runelite.margin_collapsed(20, 100) is True   # 20 < 0.3×100 → collapsed vs recent
+    assert runelite.margin_collapsed(50, 100) is False  # still healthy
+    assert runelite.margin_collapsed(10, None) is False  # positive, no baseline → fine
+
+
 def test_review_verdict():
     assert runelite.review_verdict("BOUGHT", 1.0, 5, 1) == "collect"
     assert runelite.review_verdict("BUYING", 0.0, 5.0, 1.0) == "stale"   # 5x over ETA, unfilled

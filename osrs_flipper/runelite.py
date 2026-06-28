@@ -90,6 +90,14 @@ def active_offers(data: dict) -> list[Offer]:
     return out
 
 
+def margin_collapsed(live_net: float, avg_net: float | None) -> bool:
+    """True if the currently-achievable flip margin has gone (≤0) or collapsed to a
+    fraction of its recent-average — the market moved against the open offer."""
+    if live_net <= 0:
+        return True
+    return avg_net is not None and avg_net > 0 and live_net < 0.3 * avg_net
+
+
 def review_verdict(state: str, progress: float, elapsed_h: float, eta_h: float) -> str:
     """Advise on an active offer from time/progress alone (we don't get the offer price).
     Returns: collect | stale | slow | ontrack | done."""
