@@ -5,8 +5,8 @@
 Commands (type `help`):
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
-  buy <qty> <price> <item> log a buy fill
-  sell <qty> <price> <item>log a sell fill (applies GE tax)
+  buy <item> <quantity> <price>    log a buy fill
+  sell <item> <quantity> <price>   log a sell fill (applies GE tax)
   pos                      open positions + unrealised P&L (vs live bid)
   pnl                      realised P&L, cash, equity, bond progress
   recent [n]               recent trades
@@ -100,11 +100,12 @@ class Terminal:
                   f"round {p['p_round']:>4.0%}  EV {p['ev']:>8,.0f}")
 
     def _trade(self, args: list[str], side: str) -> None:
-        if len(args) < 3 or not args[0].isdigit() or not args[1].isdigit():
-            print(f"  usage: {side} <qty> <price> <item>")
+        # item name comes first (may contain spaces) → qty and price are the last two tokens
+        if len(args) < 3 or not args[-2].isdigit() or not args[-1].isdigit():
+            print(f"  usage: {side} <item> <quantity> <price>")
             return
-        qty, price = int(args[0]), int(args[1])
-        meta = self.resolve(" ".join(args[2:]))
+        qty, price = int(args[-2]), int(args[-1])
+        meta = self.resolve(" ".join(args[:-2]))
         if not meta:
             print("  item not found")
             return
