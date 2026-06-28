@@ -134,12 +134,13 @@ class Terminal:
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
-        free = int(args[0]) if args and args[0].isdigit() else max(0, config.GE_SLOTS - len(held))
+        specified = bool(args and args[0].isdigit())
+        free = int(args[0]) if specified else max(0, config.GE_SLOTS - len(held))
         print(f"  building portfolio for {free} free slot(s)…")
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
             limit_used=self.j.buy_limit_used())
-        print(alert.format_portfolio(picks, cash, held, idle))
+        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, assumed=not specified))
 
     def cmd_pos(self) -> None:
         pos = self.j.positions()

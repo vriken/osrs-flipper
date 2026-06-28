@@ -63,11 +63,12 @@ def _cmd_portfolio(args: argparse.Namespace) -> None:
     except Exception:
         print("(journal busy — it's open in the `trade` terminal. Using --bankroll; "
               "run `port` inside the terminal for held-position- and buy-limit-aware planning.)\n")
-    free = args.slots if args.slots else max(0, config.GE_SLOTS - len(held))
+    specified = bool(args.slots)
+    free = args.slots if specified else max(0, config.GE_SLOTS - len(held))
     picks, idle = scanner.build_portfolio(
         bankroll=cash, held_ids=[h.item_id for h in held], free_slots=free,
         members=True if args.members else None, min_gp=args.min_gp or None, limit_used=limit_used)
-    print(alert.format_portfolio(picks, cash, held, idle))
+    print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, assumed=not specified))
 
 
 def _cmd_quote(args: argparse.Namespace) -> None:
