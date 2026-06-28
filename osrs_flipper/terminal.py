@@ -10,6 +10,7 @@ Commands (type `help`):
   pos                      open positions + unrealised P&L (vs live bid)
   pnl                      realised P&L, cash, equity, bond progress
   recent [n]               recent trades
+  preds [n]                logged model predictions (for calibration)
   bank <amount>            set your current cash balance
   help | quit
 """
@@ -82,7 +83,21 @@ class Terminal:
         if qty <= 0:
             print("  no quantity (set cash with `bank <amount>` or pass a qty)")
             return
-        print(alert.format_quote(optimal_quote(meta["id"], qty, name=meta["name"])))
+        q = optimal_quote(meta["id"], qty, name=meta["name"])
+        print(alert.format_quote(q))
+        if q:  # log the prediction so we can calibrate it against your real fills later
+            self.j.log_prediction(meta["id"], meta["name"], q.qty, q.buy_px, q.sell_px,
+                                  q.p_buy, q.p_sell, q.p_round, q.ev)
+
+    def cmd_preds(self, args: list[str]) -> None:
+        n = int(args[0]) if args and args[0].isdigit() else 10
+        rows = self.j.recent_predictions(n)
+        if not rows:
+            print("  (no predictions yet — they're logged each time you `quote` an item)")
+            return
+        for p in rows:
+            print(f"  {p['name'][:18]:18} qty {p['qty']:>7,}  buy {p['buy_px']:>7,}  sell {p['sell_px']:>7,}  "
+                  f"round {p['p_round']:>4.0%}  EV {p['ev']:>8,.0f}")
 
     def _trade(self, args: list[str], side: str) -> None:
         if len(args) < 3 or not args[0].isdigit() or not args[1].isdigit():
@@ -148,6 +163,7 @@ class Terminal:
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
+            "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a), "help": lambda a: print(__doc__),
             "?": lambda a: print(__doc__),
         }

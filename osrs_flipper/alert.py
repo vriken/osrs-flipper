@@ -55,6 +55,9 @@ def format_table(df: pd.DataFrame, mode: str = "balanced") -> str:
         lines.append(" ".join(cells))
     lines.append("")
     lines.append(f"[{mode}] " + _MODE_NOTE.get(mode, _MODE_NOTE["balanced"]) + "  ·  eta = hrs to fill both legs")
+    if "exp_gp_cycle_adj" in df.columns:
+        lines.append(f"scores shrunk for the optimizer's curse · spread capital across your top "
+                     f"{config.GE_SLOTS} — don't all-in #1")
     return "\n".join(lines)
 
 

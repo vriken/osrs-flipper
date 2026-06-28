@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import statistics
+
 import pandas as pd
 
 from . import api, config
 from .features import build_features
 from .persistence import fetch_persistence
 
-# composite score = expected gp/cycle ÷ fill_eta^w, where w is the online↔offline dial
 RANK_COL = "score"
+# snapshot (--no-persistence) quick path: composite = gp/cycle ÷ fill_eta^w
 MODE_WEIGHTS = {"online": 1.0, "balanced": 0.5, "offline": 0.0}
+# deep path: mode sets the quote horizon — short = fill-now (online), long = patient (offline)
+MODE_HORIZON = {"online": 0.5, "balanced": 2.0, "offline": 8.0}
 
 
 def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float) -> float:
@@ -20,6 +24,19 @@ def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float) ->
     if fill_eta_h and fill_eta_h > 0:
         return gp_cycle / (fill_eta_h ** time_weight)
     return 0.0  # can't estimate fill time and time matters → unrankable
+
+
+def _shrink(scores: list[float], reliabilities: list[float]) -> list[float]:
+    """Shrink each estimate toward the cross-sectional median, scaled by reliability.
+
+    Counters the optimizer's curse: ranking by estimated EV systematically surfaces the
+    most upward-biased estimates at the top. Low-reliability picks (thin fills, unstable
+    spreads) get pulled back hard; reliable ones keep their edge.
+    """
+    if not scores:
+        return []
+    med = statistics.median(scores)
+    return [med + (s - med) * r for s, r in zip(scores, reliabilities, strict=False)]
 
 
 def scan(
@@ -71,27 +88,42 @@ def scan(
     if not persistence:
         return df.head(top)
 
-    return _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, time_weight, base_col).head(top).reset_index(drop=True)
+    return _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode).head(top).reset_index(drop=True)
 
 
-def _apply_persistence(df: pd.DataFrame, candidates: int, time_weight: float, base_col: str) -> pd.DataFrame:
-    """Deep-check the top snapshot candidates and re-score with the spread-stability factor."""
-    pool = df.head(candidates).copy()
-    stats = [fetch_persistence(int(iid)) for iid in pool["item_id"]]
-    pool["persist"] = [s["persist"] if s else None for s in stats]
-    pool["realizable_spread"] = [s["realizable_spread"] if s else None for s in stats]
-    pool["persist_factor"] = [s["persist_factor"] if s else 0.0 for s in stats]
-    pool["exp_gp_cycle_adj"] = pool[base_col] * pool["persist_factor"]
-    pool["score"] = [_composite(c, e, time_weight)
-                     for c, e in zip(pool["exp_gp_cycle_adj"], pool["fill_eta_h"], strict=False)]
+def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataFrame:
+    """Deep-check the top snapshot candidates: re-price each with the quote optimiser (one
+    source of truth — price-specific fills), then shrink the scores against the curse.
 
-    keep = (
-        pool["realizable_spread"].notna()
-        & (pool["realizable_spread"] > 0)
-        & (pool["persist"] >= config.PERSIST_MIN_FRAC)
-        & (pool["score"] > 0)
-    )
-    return pool[keep].sort_values(RANK_COL, ascending=False)
+    The displayed buy/sell/net/fill all come from the quote here, so the scanner can never
+    disagree with `quote <item>` again. Mode sets the quote horizon (online=fast, offline=patient).
+    """
+    from .quote import optimal_quote
+
+    horizon = MODE_HORIZON.get(mode, 2.0)
+    rows = []
+    for _, row in df.head(candidates).iterrows():
+        iid = int(row["item_id"])
+        st = fetch_persistence(iid)
+        if not st or st["realizable_spread"] <= 0 or st["persist"] < config.PERSIST_MIN_FRAC:
+            continue
+        q = optimal_quote(iid, int(row["capacity"]), name=row["name"], horizon_h=horizon)
+        if not q or q.ev <= 0:
+            continue
+        reliability = st["persist_factor"] * min(1.0, q.p_round / 0.5)
+        rows.append({
+            **row.to_dict(),
+            "buy_px": q.buy_px, "sell_px": q.sell_px, "margin_abs": q.net_unit,
+            "margin_pct": q.net_unit / q.buy_px if q.buy_px else 0.0,
+            "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
+            "persist": st["persist"], "realizable_spread": st["realizable_spread"],
+            "exp_gp_cycle_adj": q.ev, "raw_score": q.ev / horizon, "reliability": reliability,
+        })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out["score"] = _shrink(list(out["raw_score"]), list(out["reliability"]))
+    return out.sort_values(RANK_COL, ascending=False)
 
 
 def bond_progress(bankroll: int | None = None) -> dict[str, float | int | None]:
