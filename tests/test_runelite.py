@@ -49,6 +49,16 @@ def test_completed_offers_parsed():
     assert f.item_id == 2297 and f.is_buy and f.qty == 51 and f.price == 450 and f.uuid == "u1"
 
 
+def test_completed_offers_captures_partial_cancel_skips_unfilled():
+    data = {"trades": [{"id": 1, "name": "X", "h": {"sO": [
+        {"uuid": "a", "b": True, "id": 1, "cQIT": 5, "tQIT": 10, "p": 100, "st": "CANCELLED_BUY"},
+        {"uuid": "b", "b": True, "id": 1, "cQIT": 0, "tQIT": 10, "p": 0, "st": "CANCELLED_BUY"},
+    ]}}]}
+    fills = runelite.completed_offers(data)
+    assert len(fills) == 1  # only the partially-filled cancel
+    assert fills[0].uuid == "a" and fills[0].qty == 5
+
+
 def test_limit_used_from_plugin_counter():
     assert runelite.limit_used(TRADES, now_ms=0)[2297] == 51  # window active → counts
 
