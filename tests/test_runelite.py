@@ -28,3 +28,30 @@ def test_occupied_and_free_slots():
 
 def test_read_missing_file_returns_none(tmp_path):
     assert runelite.read(tmp_path / "nope.json") is None
+
+
+TRADES = {
+    "trades": [{
+        "id": 2297, "name": "Anchovy pizza", "tGL": 10000,
+        "h": {
+            "sO": [{"uuid": "u1", "b": True, "id": 2297, "cQIT": 51, "p": 450,
+                    "st": "BOUGHT", "tQIT": 51, "t": 1782679105000}],
+            "iBTLW": 51, "nGLR": 9_999_999_999_999,
+        },
+    }],
+}
+
+
+def test_completed_offers_parsed():
+    fills = runelite.completed_offers(TRADES)
+    assert len(fills) == 1
+    f = fills[0]
+    assert f.item_id == 2297 and f.is_buy and f.qty == 51 and f.price == 450 and f.uuid == "u1"
+
+
+def test_limit_used_from_plugin_counter():
+    assert runelite.limit_used(TRADES, now_ms=0)[2297] == 51  # window active → counts
+
+
+def test_limit_used_resets_past_window():
+    assert runelite.limit_used(TRADES, now_ms=10**18) == {}  # past nGLR → reset

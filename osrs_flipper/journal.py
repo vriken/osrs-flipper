@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     buy_px BIGINT, sell_px BIGINT, p_buy DOUBLE, p_sell DOUBLE, p_round DOUBLE, ev DOUBLE,
     source TEXT DEFAULT 'quote'
 );
+CREATE TABLE IF NOT EXISTS imported_offers (uuid TEXT PRIMARY KEY);
 """
 
 
@@ -110,6 +111,18 @@ class Journal:
         return proceeds, realized
 
     # --- reporting -----------------------------------------------------------
+    def import_offer(self, uuid: str, item_id: int, name: str, is_buy: bool,
+                     qty: int, price: int) -> bool:
+        """Record a RuneLite fill once. Returns True if newly imported, False if already seen."""
+        if self.con.execute("SELECT 1 FROM imported_offers WHERE uuid = ?", [uuid]).fetchone():
+            return False
+        if is_buy:
+            self.record_buy(item_id, name, qty, price)
+        else:
+            self.record_sell(item_id, name, qty, price)
+        self.con.execute("INSERT INTO imported_offers VALUES (?)", [uuid])
+        return True
+
     def units_bought_since(self, since_ts: int) -> dict[int, int]:
         """Units bought per item since `since_ts` (for buy-limit tracking)."""
         rows = self.con.execute(
