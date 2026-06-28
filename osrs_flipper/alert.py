@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import sys
+
 import pandas as pd
 
 from . import config
 from .http import get_session
+
+_ANSI = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m", "bold": "\033[1m", "reset": "\033[0m"}
+_USE_COLOR = sys.stdout.isatty()
+
+
+def color(text: str, c: str) -> str:
+    """Wrap text in an ANSI colour when stdout is a terminal (no-op when piped/tested)."""
+    return f"{_ANSI[c]}{text}{_ANSI['reset']}" if _USE_COLOR and c in _ANSI else text
 
 _BASE_COLUMNS = [
     ("name", "item", 20, "s"),
