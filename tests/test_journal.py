@@ -160,3 +160,14 @@ def test_reconcile_skips_items_with_no_buy_in_history(j):
         [Fill(uuid="s", item_id=1, name="Held", is_buy=False, qty=200, price=110, state="SOLD", t_ms=0)])
     assert drift == []                      # no buy in history → left alone
     assert j.position(1).qty == 500
+
+
+def test_forget_is_reconcile_proof(j):
+    # bought on this device (RuneLite has the buy), sold on another device (RuneLite lacks the sale)
+    from osrs_flipper.runelite import Fill
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [5, "Black knife", 814, 200.0])
+    j.forget_position(5, "Black knife", 814)
+    assert all(p.item_id != 5 for p in j.positions())          # gone immediately
+    j.reconcile_positions(  # RuneLite still shows the buy, but the forget offsets it
+        [Fill(uuid="b", item_id=5, name="Black knife", is_buy=True, qty=814, price=200, state="BOUGHT", t_ms=0)])
+    assert all(p.item_id != 5 for p in j.positions())          # NOT re-added by reconcile

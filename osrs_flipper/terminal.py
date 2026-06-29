@@ -22,6 +22,7 @@ Commands (type `help`):
   pos                      open positions + unrealised P&L (vs live bid)
   inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
   reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
+  forget <item>            untrack a holding traded elsewhere (stays gone through reconcile)
   pnl                      realised P&L, cash, equity, bond progress
   progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
@@ -745,6 +746,26 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_forget(self, args: list[str]) -> None:
+        """Untrack a held position you disposed of elsewhere (e.g. traded on another device) — removes
+        it without recording a sale, and it stays gone through reconcile. Use `sell <item> <qty>
+        <price>` instead if you want the P&L recorded. Usage: forget <item>"""
+        if not args:
+            print("  usage: forget <item>")
+            return
+        meta = self.resolve(" ".join(args))
+        if not meta:
+            print("  item not found")
+            return
+        iid, name = meta["id"], meta.get("name", str(meta["id"]))
+        pos = self.j.position(iid)
+        if not pos or pos.qty <= 0:
+            print(f"  not holding {name} — nothing to forget")
+            return
+        self.j.forget_position(iid, name, pos.qty)
+        print(f"  forgot {pos.qty:,} {name} — untracked (recorded as disposed elsewhere; stays gone "
+              "through reconcile). Cash unchanged — `bank <gp>` if your gold drifted.")
+
     def cmd_reconcile(self, args: list[str]) -> None:
         """Recompute every held position from RuneLite's full completed-offer history (authoritative,
         order-independent), correcting phantoms from out-of-order imports. Runs automatically on each
@@ -954,6 +975,7 @@ class Terminal:
             "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
             "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
             "reconcile": lambda a: self.cmd_reconcile(a),
+            "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),
