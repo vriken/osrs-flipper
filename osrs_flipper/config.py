@@ -126,5 +126,14 @@ AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sle
 # Overnight buys need a fat margin cushion so a small overnight price drift can't go red.
 OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN", 0.04))
 
+# `review` margin-gone guard. The live book is a single noisy last-trade tick; on a thin
+# spread it flickers to 0 constantly, so two guards stop false "cancel/re-quote" alarms:
+#  - MIN_AGE_H: a real adverse move takes longer than seconds — don't judge a just-placed
+#    order off one tick (this is why a 1-minute-old order should never read "margin gone").
+#  - FLOOR: skip penny-margin staples (a 1gp spread going to 0 isn't a loss worth a cancel);
+#    the alarm only matters where there's a real margin to lose.
+REVIEW_MARGIN_MIN_AGE_H = float(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_MIN_AGE_H", 0.25))
+REVIEW_MARGIN_FLOOR = int(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_FLOOR", 2))
+
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional

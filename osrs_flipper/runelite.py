@@ -115,6 +115,19 @@ def margin_collapsed(live_net: float, avg_net: float | None) -> bool:
     return avg_net is not None and avg_net > 0 and live_net < 0.3 * avg_net
 
 
+def margin_alert(live_net: float, avg_net: float | None, elapsed_h: float, *,
+                 min_age_h: float, floor: float) -> bool:
+    """Should `review` warn that an open BUY's margin is gone? The live book is one noisy
+    last-trade tick, so two guards stop false alarms before consulting margin_collapsed:
+      * the order must be older than `min_age_h` — a real adverse move takes longer than the
+        seconds since you placed it; under that, a ≤0 reading is just instantaneous noise;
+      * the item's recent-average margin must exceed `floor` — on a 1gp penny spread a flicker
+        to 0 is normal and not a loss worth a cancel."""
+    if elapsed_h < min_age_h or avg_net is None or avg_net <= floor:
+        return False
+    return margin_collapsed(live_net, avg_net)
+
+
 def review_verdict(state: str, progress: float, elapsed_h: float, eta_h: float) -> str:
     """Advise on an active offer from time/progress alone (we don't get the offer price).
     Returns: collect | stale | slow | ontrack | done."""
