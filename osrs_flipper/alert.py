@@ -178,7 +178,7 @@ def format_sell_quote(name: str, qty: int, avg_cost: float, rows: list[dict]) ->
     """The sell-price tradeoff curve for a held item."""
     if not rows:
         return "  no sell data for that item"
-    lines = [f"  SELL {name} — you hold {qty:,} @ avg {avg_cost:,.0f}",
+    lines = [f"  SELL {name} — {qty:,} units @ avg cost {avg_cost:,.0f}",
              f"  {'list@':>7} {'fill_eta':>9} {'net/ea':>7} {'total':>11}"]
     for r in rows:
         eta = f"{r['eta_h']:.1f}h" if r["eta_h"] < 100 else "won't fill"
