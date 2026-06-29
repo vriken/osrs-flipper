@@ -41,7 +41,7 @@ from __future__ import annotations
 import threading
 import time
 
-from . import alert, api, calibration, config, monitor, runelite, scanner
+from . import alert, api, calibration, config, local_export, monitor, runelite, scanner
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -281,6 +281,19 @@ class Terminal:
         model self-corrects from real fills. Stays near 1.0 (shrunk) until enough fills accumulate."""
         return calibration.calibrate_fill(self.j.calibration_rows())
 
+    def _sync_cash(self) -> tuple[int | None, int]:
+        """Refresh journal cash from live coins (Local Data Exporter, item 995) and return
+        (coins, tied_in_offers). Coins already reflect placed buys (gold leaves the moment you
+        place a buy) and collected sells, so this keeps `cash` correct with no manual `bank`.
+        No-op when the plugin/inventory snapshot isn't live — cash keeps its last value."""
+        le = local_export.read()
+        if not le:
+            return None, 0
+        c = local_export.coins(le)
+        if c is not None:
+            self.j.set_cash(float(c))
+        return c, local_export.tied_gold(le)
+
     def _autosync(self) -> int:
         """Mirror RuneLite's completed fills into the journal and reconcile them against placed
         attempts. Idempotent → safe to call often."""
@@ -303,6 +316,7 @@ class Terminal:
         # out-of-order incremental imports (the silent-cap bug).
         for name, old, new in self.j.reconcile_positions(fills):
             print(f"  reconciled {name}: {old:,} → {new:,} held (matched to RuneLite's offer history)")
+        self._sync_cash()  # authoritative cash from live coins, if the exporter is running
         self.j.expire_stale_attempts(int(time.time()))
         return n
 
@@ -414,6 +428,7 @@ class Terminal:
         cushioned buys safe to leave (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         hour = datetime.now().hour
+        coins, tied = self._sync_cash()  # live coins on hand + gold tied up in open offers
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
         rl = runelite.read()
@@ -434,7 +449,8 @@ class Terminal:
             regime = f"\U0001f319 winding down ({hours_until_sleep:.0f}h to sleep)"
         else:
             regime = "\U0001f4a4 overnight"
-        print(f"  === {hour:02d}:00 · cash {cash:,} · {len(held)} held · "
+        cash_str = f"cash {cash:,}" + (f" (+{tied:,} in offers)" if coins is not None and tied else "")
+        print(f"  === {hour:02d}:00 · {cash_str} · {len(held)} held · "
               f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
         if held and rl is not None:  # split holdings into bank (sellable) vs tied up in GE
             sp = runelite.holdings_split(held, offers)
@@ -773,11 +789,14 @@ class Terminal:
                   f"{(bid or 0):>9,} {unreal:>+11,.0f}")
 
     def cmd_pnl(self) -> None:
+        _, tied = self._sync_cash()  # live coins → cash; gold tied in open offers → kept in equity
         lat = self.latest()
         bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
-        equity = self.j.equity(bids)
+        equity = self.j.equity(bids) + tied
         bond = lat.get(_BOND, {}).get("high") if not config.MEMBERS else None
         print(f"  cash:        {self.j.cash():>14,.0f}")
+        if tied:
+            print(f"  in offers:   {tied:>14,.0f}  (reserved in open buys + uncollected sells)")
         print(f"  inventory:   {self.j.inventory_value(bids):>14,.0f}")
         print(f"  equity:      {equity:>14,.0f}")
         print(f"  realised P&L:{self.j.realized_pnl():>+14,.0f}")
@@ -978,10 +997,11 @@ class Terminal:
         if len(rows) < 2:
             print("  not enough trade history yet — flip a bit, then `progress`")
             return
+        _, tied = self._sync_cash()  # fold gold tied in open offers back into liquid for continuity
         lat = self.latest()
         bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
-        equity_now = self.j.equity(bids)
-        initial, times, nw = progress.build_history(rows, self.j.cash())
+        equity_now = self.j.equity(bids) + tied
+        initial, times, nw = progress.build_history(rows, self.j.cash() + tied)
         rate, span_days = progress.fit_daily_rate(rows, initial)
         out = "/tmp/osrs_progress.png"
         if not progress.render(out, initial=initial, times=times, networth=nw, equity_now=equity_now,
