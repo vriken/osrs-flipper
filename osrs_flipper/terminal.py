@@ -340,7 +340,8 @@ class Terminal:
     def cmd_go(self, args: list[str]) -> None:
         """THE one command — everything on one screen so you don't juggle review/port/pos/brief:
         active offers + verdicts, what to sell, what to buy with free slots, and a single NEXT
-        action. Schedule-aware (day → diversified buys, night → one big buy/slot). Alias: Enter."""
+        action. Runway-aware: by day → patient cyclable flips; near bedtime/overnight → big
+        cushioned buys safe to leave (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         hour = datetime.now().hour
         cash = int(self.j.cash()) or config.BANKROLL
@@ -349,10 +350,22 @@ class Terminal:
         offers = runelite.active_offers(rl) if rl else []
         free = (runelite.free_slots(rl, config.GE_SLOTS) if rl is not None
                 else max(0, config.GE_SLOTS - len(held)))
-        bp = scanner.bond_progress(cash)
+        bp = scanner.bond_progress(cash) if not config.MEMBERS else {}
         pct = f" · {bp['pct']:.0f}% to bond" if bp.get("pct") else ""
+        # runway to bed picks the plan: a flip placed now must round-trip (buy + sell) before
+        # you sleep to be a "day" flip; within NIGHT_SWITCH_H of bedtime it'd be left overnight,
+        # so hand over the overnight plan (fat-margin holds safe to leave) instead.
+        awake = config.AWAKE_START <= hour < config.AWAKE_END
+        hours_until_sleep = config.AWAKE_END - hour if awake else 0
+        daytime = awake and hours_until_sleep > config.NIGHT_SWITCH_H
+        if daytime:
+            regime = "☀️ day"
+        elif awake:
+            regime = f"\U0001f319 winding down ({hours_until_sleep:.0f}h to sleep)"
+        else:
+            regime = "\U0001f4a4 overnight"
         print(f"  === {hour:02d}:00 · cash {cash:,} · {len(held)} held · "
-              f"{free}/{config.GE_SLOTS} slots free{pct} ===")
+              f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
 
         rows = self._review_offers()  # ACTIVE offers + verdicts (the old `review`)
         if rows:
@@ -371,7 +384,7 @@ class Terminal:
             print(alert.format_sell_plan(sell_rows))
 
         picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
-        if free > 0 and config.AWAKE_START <= hour < config.AWAKE_END:
+        if free > 0 and daytime:
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
                                                   free_slots=free, limit_used=self._limit_used(rl))
@@ -573,7 +586,7 @@ class Terminal:
         lat = self.latest()
         bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
         equity = self.j.equity(bids)
-        bond = lat.get(_BOND, {}).get("high")
+        bond = lat.get(_BOND, {}).get("high") if not config.MEMBERS else None
         print(f"  cash:        {self.j.cash():>14,.0f}")
         print(f"  inventory:   {self.j.inventory_value(bids):>14,.0f}")
         print(f"  equity:      {equity:>14,.0f}")

@@ -17,12 +17,22 @@ MODE_WEIGHTS = {"online": 1.0, "balanced": 0.5, "offline": 0.0}
 MODE_HORIZON = {"online": 0.5, "balanced": 2.0, "offline": 8.0}
 
 
-def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float) -> float:
-    """EV per unit of the scarce resource: real-time (online) vs GE slot/cycle (offline)."""
+def _roi_mult(margin_pct: float | None, roi_weight: float) -> float:
+    """Capital-efficiency tilt: × margin_pct^roi_weight (1.0 when disabled or no ROI)."""
+    if roi_weight and margin_pct and margin_pct > 0:
+        return margin_pct ** roi_weight
+    return 1.0
+
+
+def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float,
+               *, margin_pct: float | None = None, roi_weight: float = 0.0) -> float:
+    """EV per unit of the scarce resource: real-time (online) vs GE slot/cycle (offline),
+    tilted toward ROI by × margin_pct^roi_weight (roi_weight=0 → pure gp, the old behaviour)."""
+    roi = _roi_mult(margin_pct, roi_weight)
     if time_weight <= 0:
-        return gp_cycle  # offline: wall-clock is free, only the per-cycle haul matters
+        return gp_cycle * roi  # offline: wall-clock is free, only the per-cycle haul matters
     if fill_eta_h and fill_eta_h > 0:
-        return gp_cycle / (fill_eta_h ** time_weight)
+        return gp_cycle * roi / (fill_eta_h ** time_weight)
     return 0.0  # can't estimate fill time and time matters → unrankable
 
 
@@ -82,7 +92,8 @@ def scan(
             margin_pct=df["margin_fast"] / df["fast_buy"].where(df["fast_buy"] > 0, 1),
         )
 
-    df["score"] = [_composite(c, e, time_weight) for c, e in zip(df[base_col], df["fill_eta_h"], strict=False)]
+    df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=config.SCORE_ROI_WEIGHT)
+                   for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
     df = df[df["score"] > 0]
     if df.empty:
         return df
@@ -125,7 +136,9 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
             "capital_deployed": q.buy_px * int(row["capacity"]),
             "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
-            "exp_gp_cycle_adj": q.ev, "raw_score": q.ev / horizon, "reliability": reliability,
+            "exp_gp_cycle_adj": q.ev, "reliability": reliability,
+            "raw_score": q.ev / horizon * _roi_mult(
+                q.net_unit / q.buy_px if q.buy_px else None, config.SCORE_ROI_WEIGHT),
         })
     if not rows:
         return pd.DataFrame()
@@ -173,23 +186,35 @@ def _worth_gp(row, cap_units: int, tier: str) -> float:
     return int(row["margin_abs"]) * cap_units * fill
 
 
+def _place_score(p: dict) -> float:
+    """Placement priority: ROI-tilted gp-per-hour. Fast active flips (high gp, short ETA) rank
+    above slow holds; within a tier, higher ROI wins. Replaces fastest-fill-first, which buried
+    high-ROI slow flips under fat-but-thin-margin churn."""
+    eta = p["buy_eta_h"] if p.get("buy_eta_h", float("inf")) < 100 else 100.0
+    roi = p["margin_abs"] / p["buy_px"] if p.get("buy_px") else 0.0
+    return p["gp"] / max(eta, 1e-9) * _roi_mult(roi, config.SCORE_ROI_WEIGHT)
+
+
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
                     max_accumulate: int = 6, min_gp: int | None = None,
                     min_margin: float = 0.01, limit_used: dict[int, int] | None = None) -> tuple[list[dict], float]:
-    """Two-tier capital deployment:
-      ACTIVE  — one diversified flip per free slot (online/balanced/offline), capped by
-                fast-fill liquidity — what you work in your slots right now.
-      HOLD    — extra positions to absorb idle cash into inventory, capped by each item's
-                buy limit (you accumulate over 4h cycles; the 3 slots only gate offers).
-    Only items whose spread survives a queue-jump (fast_net > 0) qualify, so the pile
-    can't pour into penny traps. Returns (allocated picks, idle cash).
+    """Two-tier daytime capital deployment (the night plan lives in `overnight`):
+      ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
+                fast-fill liquidity — what you work in your slots right now and cycle.
+      HOLD    — extra positions to absorb idle cash into inventory, capped by each item's buy
+                limit, gated by HOLD_MIN_MARGIN so only quality spreads soak the overflow.
+    Only items whose spread survives a queue-jump (fast_net > 0) qualify as ACTIVE, so the pile
+    can't pour into penny traps. Picks are ordered by ROI-tilted gp/hour. Returns (picks, idle).
     """
     if free_slots <= 0:
         return [], float(bankroll)  # no free slots → can't place any new buys
     # a flip must clear this to be worth a slot + the clicks (≈0.2% of bankroll, floor 250)
     if min_gp is None:
         min_gp = max(250, int(bankroll * 0.002))
-    roles = ["online", "balanced", "offline"][:max(0, free_slots)]
+    # daytime plan: every free slot is a patient ~2h flip (you cycle them between check-ins).
+    # the slow/offline deals are reserved for the night plan (`overnight`), so during the day
+    # we rank every slot on the balanced (2h) horizon.
+    roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used)
                 for m in modes}
@@ -213,7 +238,10 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     for _, row in rankings["balanced"].iterrows():  # hold: accumulate the rest into inventory
         if sum(p["tier"] == "hold" for p in picks) >= max_accumulate:
             break
-        if ok(row, fast=False) and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp:
+        # quality floor: a hold ties capital up for hours, so only park cash in it if it clears
+        # HOLD_MIN_MARGIN. Below that, leave the gold liquid to recycle rather than churn junk.
+        if (ok(row, fast=False) and float(row["margin_pct"]) >= config.HOLD_MIN_MARGIN
+                and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp):
             picks.append(_pick_row(row, "hold", int(row["buy_limit_eff"])))
             taken.add(int(row["item_id"]))
 
@@ -223,8 +251,9 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         p["gp"] = p["margin_abs"] * p["qty"] * fill
         br = p.get("buy_rate", 0.0)
         p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
-    # placement order: fastest-filling buys first, so slots clear and you can cycle the rest
-    allocated.sort(key=lambda p: p["buy_eta_h"])
+    # placement order: best ROI-tilted gp/hour first, so the limited free slots go to the
+    # highest-quality fast flips now and holds queue behind (was fastest-fill-first).
+    allocated.sort(key=_place_score, reverse=True)
     _schedule(allocated, free_slots)
     return allocated, idle
 
