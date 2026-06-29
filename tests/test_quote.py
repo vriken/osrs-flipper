@@ -9,6 +9,13 @@ BARS = [
 ]
 
 
+def test_robust_price_ignores_single_bar_glitch():
+    from osrs_flipper.quote import _robust
+    bars = [{"avgLowPrice": 40}, {"avgLowPrice": 40}, {"avgLowPrice": 39},
+            {"avgLowPrice": 41}, {"avgLowPrice": 10}]  # last bar is a glitch
+    assert _robust(bars, "avgLowPrice") == 40  # median, not the stray 10
+
+
 def test_buy_rate_increases_with_price():
     rate_buy, _ = _rates(BARS, window_h=3)
     assert rate_buy(98) > rate_buy(96)  # a higher buy price qualifies more sell volume → faster fill

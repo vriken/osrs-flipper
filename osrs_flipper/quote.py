@@ -17,6 +17,7 @@ Rank by EV. This is fill-intensity vs margin, grounded in real volume.
 
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 
 from . import api, config
@@ -54,6 +55,13 @@ class Quote:
     t_buy_h: float
     t_sell_h: float
     frontier: list[dict] = field(default_factory=list)
+
+
+def _robust(bars: list[dict], key: str, n: int = 12) -> float | None:
+    """Median of the last n bars for a price key — ignores single-bar glitches
+    (e.g. a stray avgLow=10 on an item that trades at 40)."""
+    vals = [b[key] for b in bars[-n:] if b.get(key)]
+    return statistics.median(vals) if vals else None
 
 
 def _rates(bars: list[dict], window_h: float):
@@ -98,10 +106,9 @@ def optimal_quote(
     clow, chigh = cur.get("low"), cur.get("high")
     if clow is not None and chigh is not None and clow > chigh:
         return None  # crossed/inverted live book → prices unreliable
-    bid = hr.get("avgLowPrice")
-    bid = int(round(bid)) if bid is not None else cur.get("low")
-    ask = hr.get("avgHighPrice")
-    ask = int(round(ask)) if ask is not None else cur.get("high")
+    rbid, rask = _robust(bars, "avgLowPrice"), _robust(bars, "avgHighPrice")  # median, glitch-resistant
+    bid = int(round(rbid)) if rbid is not None else (hr.get("avgLowPrice") or cur.get("low"))
+    ask = int(round(rask)) if rask is not None else (hr.get("avgHighPrice") or cur.get("high"))
     if bid is None or ask is None:
         return None
     # reject when the live book and the 1h average wildly disagree (deflating pump / stale)
@@ -167,7 +174,8 @@ def sell_frontier(item_id: int, qty: int, avg_cost: float, *, capture: float = c
     window_h = len(bars) * _BAR_HOURS.get(timestep, 1.0)
     _, rate_sell = _rates(bars, window_h)
     cur, hr = api.latest().get(item_id, {}), api.one_hour().get(item_id, {})
-    ask = hr.get("avgHighPrice") or cur.get("high")
+    rask = _robust(bars, "avgHighPrice")  # median, glitch-resistant
+    ask = rask if rask is not None else (hr.get("avgHighPrice") or cur.get("high"))
     if not ask:
         return None
     ask = int(round(ask))
