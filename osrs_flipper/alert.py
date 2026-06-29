@@ -174,6 +174,20 @@ def format_overnight(rows: list[dict], cash: int, free: int) -> str:
     return "\n".join(lines)
 
 
+def format_sell_quote(name: str, qty: int, avg_cost: float, rows: list[dict]) -> str:
+    """The sell-price tradeoff curve for a held item."""
+    if not rows:
+        return "  no sell data for that item"
+    lines = [f"  SELL {name} — you hold {qty:,} @ avg {avg_cost:,.0f}",
+             f"  {'list@':>7} {'fill_eta':>9} {'net/ea':>7} {'total':>11}"]
+    for r in rows:
+        eta = f"{r['eta_h']:.1f}h" if r["eta_h"] < 100 else "won't fill"
+        prof = color(f"{r['profit']:+,.0f}", "green" if r["net_unit"] >= 0 else "red")
+        lines.append(f"  {r['price']:>7,} {eta:>9} {r['net_unit']:>+7,} {prof:>11}")
+    lines.append("  higher list price = more profit but slower fill (and may not fill at all)")
+    return "\n".join(lines)
+
+
 def format_sell_plan(rows: list[dict]) -> str:
     """Recommended sell listings for inventory you hold (and aren't already selling)."""
     if not rows:

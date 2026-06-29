@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from . import cache
-from .config import API_BASE, CACHE_DEFAULT_TTL_S, CACHE_ENABLED, CACHE_TTL_S
+from .config import API_BASE, CACHE_DEFAULT_TTL_S, CACHE_ENABLED, CACHE_TTL_S, HTTP_TIMEOUT
 from .http import get_session
 
 TimeStep = str  # one of "5m", "1h", "6h", "24h"
@@ -32,7 +32,7 @@ def _get(path: str, params: dict[str, Any] | None = None) -> Any:
         hit = cache.get(key, ttl)
         if hit is not None:
             return hit
-    resp = get_session().get(f"{API_BASE}{path}", params=params, timeout=30)
+    resp = get_session().get(f"{API_BASE}{path}", params=params, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
     if CACHE_ENABLED:

@@ -24,6 +24,7 @@ USER_AGENT = f"osrs-flipper (flip analysis, manual trading) - {_CONTACT}"
 # Be a good citizen: the API has no hard rate limit but asks you not to sustain
 # multiple large queries per second. The bulk endpoints return all items at once.
 MIN_REQUEST_INTERVAL_S = 1.0
+HTTP_TIMEOUT = int(os.environ.get("OSRS_FLIPPER_HTTP_TIMEOUT", 15))  # fail fast, don't freeze the REPL
 
 # Response caching. TTLs are matched to how fast each endpoint actually changes, so
 # we avoid redundant calls WITHOUT serving stale data — per-item staleness is judged

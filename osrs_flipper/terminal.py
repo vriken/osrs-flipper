@@ -11,6 +11,7 @@ Commands (type `help`):
   brief | now              schedule-aware: day plan in active hours, overnight plan off-hours
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
+  sellquote | sq <item>    sell-price tradeoff for inventory you hold (fill time vs profit)
   buy <item> <quantity> <price>    log a buy fill
   sell <item> <quantity> <price>   log a sell fill (applies GE tax)
   pos                      open positions + unrealised P&L (vs live bid)
@@ -18,6 +19,8 @@ Commands (type `help`):
   recent [n]               recent trades
   preds [n]                logged model predictions (for calibration)
   bank <amount>            set your current cash balance
+  update                   git pull latest + reload (OTA, no manual restart)
+  reload                   re-exec to pick up code changes (keeps your DB/state)
   help | quit
 """
 
@@ -374,6 +377,22 @@ class Terminal:
             side = "BUY " if o.is_buy else "SELL"
             print(f"  slot {o.slot}  {side} {str(names.get(o.item_id, o.item_id))[:18]:18} x{o.qty:<6} {o.state}")
 
+    def cmd_sellquote(self, args: list[str]) -> None:
+        if not args:
+            print("  usage: sellquote <item you hold>")
+            return
+        meta = self.resolve(" ".join(args))
+        if not meta:
+            print("  item not found")
+            return
+        pos = self.j.position(meta["id"])
+        if not pos or pos.qty <= 0:
+            print(f"  you don't hold {meta.get('name', args)} — sellquote is for inventory you own")
+            return
+        from .quote import sell_frontier
+        rows = sell_frontier(meta["id"], pos.qty, pos.avg_cost)
+        print(alert.format_sell_quote(meta["name"], pos.qty, pos.avg_cost, rows))
+
     def cmd_pos(self) -> None:
         pos = self.j.positions()
         if not pos:
@@ -406,6 +425,36 @@ class Terminal:
             tag = f"{t['pnl']:+,.0f}" if t["side"] == "SELL" else ""
             print(f"  {t['side']:4} {t['qty']:>8,} {t['name'][:18]:18} @ {t['price']:>7,} {tag}")
 
+    def cmd_reload(self, args: list[str]) -> None:
+        """Re-exec the terminal in place to pick up new code (DB/state persists)."""
+        import os
+        import sys
+        print("  reloading…")
+        try:
+            self.j.con.close()  # release the DB before the new process opens it
+        except Exception:
+            pass
+        os.execv(sys.executable, [sys.executable, "-m", "osrs_flipper.cli", "trade"])
+
+    def cmd_update(self, args: list[str]) -> None:
+        """git pull the latest, then reload — over-the-air update without quitting."""
+        import subprocess
+        from pathlib import Path
+        repo = Path(__file__).resolve().parent.parent
+        print("  pulling latest…")
+        try:
+            r = subprocess.run(["git", "-C", str(repo), "pull", "--ff-only"],
+                               capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            print(f"  pull failed: {e}")
+            return
+        lines = (r.stdout or r.stderr).strip().splitlines()
+        print("  " + (lines[-1] if lines else "done"))
+        if r.returncode == 0:
+            self.cmd_reload(args)
+        else:
+            print("  pull failed — not reloading")
+
     def cmd_bank(self, args: list[str]) -> None:
         if not args or not args[0].replace("_", "").isdigit():
             print(f"  current cash: {self.j.cash():,.0f}  (set with `bank <amount>`)")
@@ -421,6 +470,7 @@ class Terminal:
             print(f"  (auto-synced {n0} fill(s) from RuneLite)")
         handlers = {
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
+            "sellquote": lambda a: self.cmd_sellquote(a), "sq": lambda a: self.cmd_sellquote(a),
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
             "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
@@ -431,7 +481,9 @@ class Terminal:
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),
-            "bank": lambda a: self.cmd_bank(a), "help": lambda a: print(__doc__),
+            "bank": lambda a: self.cmd_bank(a),
+            "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
+            "help": lambda a: print(__doc__),
             "?": lambda a: print(__doc__),
         }
         while True:
