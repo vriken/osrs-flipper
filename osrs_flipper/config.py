@@ -25,6 +25,9 @@ USER_AGENT = f"osrs-flipper (flip analysis, manual trading) - {_CONTACT}"
 # multiple large queries per second. The bulk endpoints return all items at once.
 MIN_REQUEST_INTERVAL_S = 1.0
 HTTP_TIMEOUT = int(os.environ.get("OSRS_FLIPPER_HTTP_TIMEOUT", 15))  # fail fast, don't freeze the REPL
+# Reject an item when its live book and 1h average disagree by more than this fraction —
+# the data is stale/pumped/manipulated and no price is trustworthy (e.g. a deflating pump).
+PRICE_DIVERGENCE_MAX = float(os.environ.get("OSRS_FLIPPER_PRICE_DIVERGENCE_MAX", 0.5))
 
 # Response caching. TTLs are matched to how fast each endpoint actually changes, so
 # we avoid redundant calls WITHOUT serving stale data — per-item staleness is judged

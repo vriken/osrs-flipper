@@ -72,6 +72,13 @@ def test_crossed_live_book_is_dropped():
     assert df.empty
 
 
+def test_diverged_live_vs_average_dropped():
+    # live ~410 mid but 1h-avg ~925 mid (deflating pump) → too divergent to trust → dropped
+    m = [_mapping(1, "Pump")]
+    df = build_features({1: _latest(420, 400, 60)}, {1: _hourly(950, 900, 500, 500)}, m, now_ts=NOW)
+    assert df.empty
+
+
 def test_buy_limit_used_reduces_capacity():
     m = [_mapping(1, "Pricey", limit=1000)]
     lat, h1 = {1: _latest(2000, 1900, 60)}, {1: _hourly(2000, 1900, 100_000, 100_000)}
