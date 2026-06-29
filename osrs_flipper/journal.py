@@ -7,6 +7,7 @@ mark-to-market. Cash is a single tracked balance; the ledger is append-only hist
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +31,14 @@ CREATE TABLE IF NOT EXISTS predictions (
     source TEXT DEFAULT 'quote'
 );
 CREATE TABLE IF NOT EXISTS imported_offers (uuid TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS attempts (
+    attempt_id TEXT PRIMARY KEY, ts BIGINT, item_id INTEGER, name TEXT, side TEXT,
+    qty BIGINT, limit_px BIGINT, horizon_h DOUBLE,
+    avg_low BIGINT, avg_high BIGINT, spread BIGINT, vol_1h_binding BIGINT,
+    pred_p_fill DOUBLE, pred_eta_h DOUBLE, pred_ev DOUBLE,
+    filled_qty BIGINT DEFAULT 0, fill_px DOUBLE, filled_ts BIGINT,
+    status TEXT DEFAULT 'open'
+);
 """
 
 
@@ -169,6 +178,71 @@ class Journal:
         ).fetchall()
         return [{"ts": r[0], "name": r[1], "qty": r[2], "buy_px": r[3], "sell_px": r[4],
                  "p_round": r[5], "ev": r[6], "source": r[7]} for r in rows]
+
+    # --- order-attempt lifecycle (calibration) -------------------------------
+    def record_attempt(self, item_id: int, name: str, side: str, qty: int, limit_px: int, *,
+                       horizon_h: float, avg_low: int | None, avg_high: int | None,
+                       vol_1h_binding: int, pred_p_fill: float | None = None,
+                       pred_eta_h: float | None = None, pred_ev: float | None = None) -> str:
+        """Record an order the user actually PLACED, with the decision-time market snapshot and
+        model prediction. Reconciled against real fills later. Returns a short attempt id."""
+        aid = uuid.uuid4().hex[:8]
+        spread = (avg_high or 0) - (avg_low or 0)
+        self.con.execute(
+            "INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [aid, int(time.time()), item_id, name, side.upper(), qty, limit_px, horizon_h,
+             avg_low, avg_high, spread, vol_1h_binding, pred_p_fill, pred_eta_h, pred_ev,
+             0, None, None, "open"])
+        return aid
+
+    def reconcile_fill(self, item_id: int, is_buy: bool, qty: int, price: int,
+                       fill_ts: int) -> str | None:
+        """Attach a real fill to the oldest matching OPEN attempt (same item + side, placed
+        before the fill). Marks it filled or partial; VWAPs the fill price. Returns the id."""
+        side = "BUY" if is_buy else "SELL"
+        row = self.con.execute(
+            "SELECT attempt_id, qty, filled_qty, fill_px FROM attempts WHERE item_id=? AND side=? "
+            "AND status IN ('open','partial') AND ts <= ? ORDER BY ts LIMIT 1",
+            [item_id, side, fill_ts]).fetchone()
+        if not row:
+            return None
+        aid, target_qty, prior_filled, prior_px = row[0], row[1], row[2] or 0, row[3] or 0.0
+        new_filled = prior_filled + qty
+        vwap = (prior_filled * prior_px + qty * price) / new_filled if new_filled else float(price)
+        status = "filled" if new_filled >= target_qty else "partial"
+        self.con.execute(
+            "UPDATE attempts SET filled_qty=?, fill_px=?, filled_ts=?, status=? WHERE attempt_id=?",
+            [new_filled, vwap, fill_ts, status, aid])
+        return aid
+
+    def expire_stale_attempts(self, now_ts: int) -> int:
+        """Mark open attempts past their horizon as expired — these never-filled cases are
+        first-class calibration data (they keep the fill-rate estimate from being optimistic).
+        Returns how many were expired by this call."""
+        n = self.con.execute(
+            "SELECT COUNT(*) FROM attempts WHERE status='open' AND ts + horizon_h*3600 < ?",
+            [now_ts]).fetchone()[0]
+        if n:
+            self.con.execute(
+                "UPDATE attempts SET status='expired' WHERE status='open' AND ts + horizon_h*3600 < ?",
+                [now_ts])
+        return n
+
+    def open_attempts(self) -> list[dict[str, Any]]:
+        rows = self.con.execute(
+            "SELECT attempt_id,name,side,qty,limit_px,filled_qty FROM attempts WHERE status='open' "
+            "ORDER BY ts").fetchall()
+        return [{"attempt_id": r[0], "name": r[1], "side": r[2], "qty": r[3],
+                 "limit_px": r[4], "filled_qty": r[5]} for r in rows]
+
+    def calibration_rows(self) -> list[dict[str, Any]]:
+        """Resolved attempts (filled / partial / expired) with snapshot + outcome for calibration."""
+        cols = ["side", "qty", "limit_px", "avg_low", "avg_high", "spread", "vol_1h_binding",
+                "pred_p_fill", "filled_qty", "fill_px", "status"]
+        rows = self.con.execute(
+            f"SELECT {','.join(cols)} FROM attempts WHERE status IN ('filled','partial','expired')"
+        ).fetchall()
+        return [dict(zip(cols, r, strict=True)) for r in rows]
 
     def recent(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self.con.execute(
