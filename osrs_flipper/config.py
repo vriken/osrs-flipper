@@ -28,6 +28,12 @@ HTTP_TIMEOUT = int(os.environ.get("OSRS_FLIPPER_HTTP_TIMEOUT", 15))  # fail fast
 # Reject an item when its live book and 1h average disagree by more than this fraction —
 # the data is stale/pumped/manipulated and no price is trustworthy (e.g. a deflating pump).
 PRICE_DIVERGENCE_MAX = float(os.environ.get("OSRS_FLIPPER_PRICE_DIVERGENCE_MAX", 0.5))
+# Tighter, margin-aware guard layered on top of the absolute gate above: reject a flip when
+# the recent DOWNWARD drift (1h-avg mid → live mid) has already eaten more than this fraction
+# of the modeled margin. A 50% absolute divergence is far too loose — a 2% adverse move wipes
+# a 3% flip. Tying the threshold to each item's own margin catches falling knives that the flat
+# gate misses, while a fat-margin item tolerates more drift. Set to a large value to disable.
+ADVERSE_MOVE_MAX_FRAC = float(os.environ.get("OSRS_FLIPPER_ADVERSE_MOVE_MAX_FRAC", 0.5))
 
 # Response caching. TTLs are matched to how fast each endpoint actually changes, so
 # we avoid redundant calls WITHOUT serving stale data — per-item staleness is judged

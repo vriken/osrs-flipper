@@ -70,6 +70,23 @@ def read(path: Path | None = None) -> dict | None:
         return None
 
 
+def schema_health(data: dict | None) -> list[str]:
+    """Detect plugin-format drift. The slot/limit/fill readers all use dict.get(...) with
+    empty-collection defaults, so a renamed/missing key fails OPEN — `free_slots` reports
+    every slot free, `limit_used` reports nothing used — and the tool confidently recommends
+    trades that exceed your real slots/limits. Return human-readable warnings (empty = healthy)
+    so the caller can fail loud instead. A genuinely idle account (no trades yet) is healthy:
+    the keys exist and are empty; we only warn when an expected key is ABSENT."""
+    if not data:
+        return []
+    warnings = []
+    if "slotTimers" not in data:
+        warnings.append("no 'slotTimers' key — free-slot detection is blind (assumes all slots free)")
+    if "trades" not in data:
+        warnings.append("no 'trades' key — fill sync and 4h buy-limit tracking are blind")
+    return warnings
+
+
 def active_offers(data: dict) -> list[Offer]:
     """In-progress offers occupying a slot, from slotTimers[*].currentOffer."""
     out = []

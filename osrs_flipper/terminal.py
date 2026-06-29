@@ -141,8 +141,8 @@ class Terminal:
                 if q:
                     self.j.log_prediction(meta["id"], meta["name"], q.qty, q.buy_px, q.sell_px,
                                           q.p_buy, q.p_sell, q.p_round, q.ev, source="buy")
-            except Exception:
-                pass
+            except Exception as e:  # don't lose the buy, but don't silently corrupt calibration data
+                print(f"  ⚠ prediction not logged for calibration ({type(e).__name__}: {e})")
         else:
             proceeds, realized = self.j.record_sell(meta["id"], meta["name"], qty, price)
             print(f"  sold {qty:,} {meta['name']} @ {price} = +{proceeds:,.0f} "
@@ -469,6 +469,10 @@ class Terminal:
     # --- loop ----------------------------------------------------------------
     def run(self) -> None:
         print("osrs-flipper terminal — type `help`, `quit` to exit")
+        rl0 = runelite.read()
+        for w in runelite.schema_health(rl0):
+            print(alert.color(f"  ⚠ RuneLite data looks wrong: {w}. Slot/limit advice may be unsafe — "
+                              f"pass free slots explicitly (`port <n>`).", "red"))
         n0 = self._autosync()
         if n0:
             print(f"  (auto-synced {n0} fill(s) from RuneLite)")

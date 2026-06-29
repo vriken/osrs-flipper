@@ -71,6 +71,13 @@ def build_features(
         buy_px, sell_px = haircut_prices(ah, al)
         margin_abs = post_tax_received(sell_px, item_id=iid) - buy_px
         margin_pct = margin_abs / buy_px if buy_px else 0.0
+        # margin-aware adverse-move gate: if the live mid has already fallen below the 1h-avg
+        # mid by more than ADVERSE_MOVE_MAX_FRAC of the modeled margin, the flip is a falling
+        # knife — your stale-high sell target won't fill and you'll mark down into the red.
+        if high is not None and low is not None and mid > 0 and margin_pct > 0:
+            adverse_drop = (mid - (high + low) / 2) / mid  # >0 when price has dropped since the 1h window
+            if adverse_drop > config.ADVERSE_MOVE_MAX_FRAC * margin_pct:
+                continue
         # Naive (no haircut) for comparison — uses live bid/ask.
         n_buy, n_sell = (low, high) if (low is not None and high is not None) else (al, ah)
         margin_abs_naive = post_tax_received(int(n_sell), item_id=iid) - int(n_buy)
