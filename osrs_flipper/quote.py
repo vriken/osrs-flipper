@@ -147,6 +147,33 @@ def optimal_quote(
     )
 
 
+def sell_frontier(item_id: int, qty: int, avg_cost: float, *, capture: float = config.ALPHA,
+                  timestep: str = config.PERSIST_TIMESTEP, recent_bars: int = config.QUOTE_RECENT_BARS,
+                  rows_max: int = 14) -> list[dict] | None:
+    """Sell-side tradeoff for inventory you hold: at each list price, the estimated fill
+    time (qty ÷ α·sell-rate) and profit vs avg cost. Higher price = more profit, slower fill."""
+    bars = api.timeseries(item_id, timestep)
+    if not bars:
+        return None
+    bars = bars[-recent_bars:]
+    window_h = len(bars) * _BAR_HOURS.get(timestep, 1.0)
+    _, rate_sell = _rates(bars, window_h)
+    cur, hr = api.latest().get(item_id, {}), api.one_hour().get(item_id, {})
+    ask = hr.get("avgHighPrice") or cur.get("high")
+    if not ask:
+        return None
+    ask = int(round(ask))
+    lo, hi = ask - 2, ask + max(3, round(0.05 * ask))  # from just below the ask up to +5%
+    step = max(1, (hi - lo) // rows_max)
+    rows = []
+    for s in range(lo, hi + 1, step):
+        rs = rate_sell(s)
+        eta = qty / (capture * rs) if rs > 0 else float("inf")
+        net = post_tax_received(s, item_id=item_id) - avg_cost
+        rows.append({"price": s, "eta_h": eta, "net_unit": int(net), "profit": net * qty})
+    return rows
+
+
 def _frontier(results: list[dict]) -> list[dict]:
     """One rung per margin level (the highest-EV quote at each net), sorted by margin."""
     best_per_net: dict[int, dict] = {}

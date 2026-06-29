@@ -17,8 +17,8 @@ def get_session() -> Session:
     if _session is None:
         _session = Session()
         retry = Retry(
-            total=3,
-            backoff_factor=1,
+            total=2,  # fail fast — don't stack long retries and freeze the terminal
+            backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
         )
         adapter = HTTPAdapter(max_retries=retry)
