@@ -120,3 +120,43 @@ def test_stale_attempt_expires_and_enters_calibration_set(j):
     assert not j.open_attempts()
     row = j.calibration_rows()[0]
     assert row["status"] == "expired" and row["filled_qty"] == 0  # a counted miss
+
+
+def test_record_sell_records_full_qty_no_silent_cap(j):
+    j.record_buy(GOLD_BAR, "Gold bar", 100, 50)            # hold 100
+    j.record_sell(GOLD_BAR, "Gold bar", 250, 60)           # sell 250 (matching buy imported later)
+    sold = j.con.execute("SELECT qty FROM ledger WHERE side='SELL' AND item_id=?", [GOLD_BAR]).fetchone()
+    assert sold[0] == 250                                  # full sale recorded, not capped to 100
+    assert all(p.item_id != GOLD_BAR for p in j.positions())  # position floored at 0, not negative
+
+
+def test_reconcile_positions_clears_phantom(j):
+    from osrs_flipper.runelite import Fill
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [9143, "Adamant bolts", 1126, 142.0])
+    fills = [  # RuneLite's authoritative history balances → net 0 held
+        Fill(uuid="a", item_id=9143, name="Adamant bolts", is_buy=True, qty=2864, price=141, state="BOUGHT", t_ms=0),
+        Fill(uuid="b", item_id=9143, name="Adamant bolts", is_buy=False, qty=2864, price=148, state="SOLD", t_ms=0),
+    ]
+    drift = j.reconcile_positions(fills)
+    assert ("Adamant bolts", 1126, 0) in drift
+    assert all(p.item_id != 9143 for p in j.positions())   # phantom cleared
+
+
+def test_reconcile_positions_sets_correct_remaining(j):
+    from osrs_flipper.runelite import Fill
+    j.reconcile_positions([
+        Fill(uuid="a", item_id=1, name="X", is_buy=True, qty=1000, price=100, state="BOUGHT", t_ms=0),
+        Fill(uuid="b", item_id=1, name="X", is_buy=False, qty=600, price=110, state="SOLD", t_ms=0),
+    ])
+    p = j.position(1)
+    assert p.qty == 400 and p.avg_cost == 100              # 1000 bought − 600 sold; avg from buys
+
+
+def test_reconcile_skips_items_with_no_buy_in_history(j):
+    # a position whose buy predates RuneLite's window (only a sell shows up) must NOT be cleared
+    from osrs_flipper.runelite import Fill
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [1, "Held", 500, 100.0])
+    drift = j.reconcile_positions(
+        [Fill(uuid="s", item_id=1, name="Held", is_buy=False, qty=200, price=110, state="SOLD", t_ms=0)])
+    assert drift == []                      # no buy in history → left alone
+    assert j.position(1).qty == 500
