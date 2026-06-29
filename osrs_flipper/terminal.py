@@ -22,6 +22,7 @@ Commands (type `help`):
   recent [n]               recent trades
   preds [n]                logged model predictions (for calibration)
   bank <amount>            set your current cash balance
+  alerts [on|off|test]     background Discord push when an offer needs you (auto-on if webhook set)
   update                   git pull latest + reload (OTA, no manual restart)
   reload                   re-exec to pick up code changes (keeps your DB/state)
   help | quit
@@ -29,9 +30,10 @@ Commands (type `help`):
 
 from __future__ import annotations
 
+import threading
 import time
 
-from . import alert, api, config, runelite, scanner
+from . import alert, api, config, monitor, runelite, scanner
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -54,6 +56,8 @@ class Terminal:
         self._latest: dict[int, dict] = {}
         self._latest_ts = 0.0
         self._last_quote: tuple | None = None  # (meta, Quote, qty) — used by `placed`
+        self._alert_stop = threading.Event()
+        self._alert_thread: threading.Thread | None = None
 
     # --- data helpers --------------------------------------------------------
     def mapping(self) -> dict[str, dict]:
@@ -277,38 +281,13 @@ class Terminal:
               f"realised {self.j.realized_pnl():+,.0f}")
 
     def _review_offers(self) -> list[tuple]:
-        """For each live offer: (offer, verdict, elapsed_h, eta_h, progress)."""
-        from .tax import post_tax_received
+        """For each live offer: (offer, verdict, elapsed_h, eta_h, progress). Shares the pure
+        verdict logic with the background alert watcher (monitor.review_offers)."""
         rl = runelite.read()
         offers = runelite.active_offers(rl) if rl else []
         if not offers:
             return []
-        hourly, latest = api.one_hour(), api.latest()
-        now_ms = int(time.time() * 1000)
-        out = []
-        for o in offers:
-            v = hourly.get(o.item_id, {})
-            vol = (v.get("lowPriceVolume") if o.is_buy else v.get("highPriceVolume")) or 0
-            rate = config.ALPHA * vol
-            eta_h = o.qty / rate if rate > 0 else float("inf")
-            elapsed_h = (now_ms - o.started_ms) / 3_600_000 if o.started_ms else 0.0
-            prog = o.filled / o.qty if o.qty else 0.0
-            verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
-            # market-moved check (buys): is the round-trip margin still there at live prices?
-            # Guarded against snapshot noise on fresh orders / penny spreads (see margin_alert).
-            if verdict != "collect" and o.is_buy:
-                lo = latest.get(o.item_id, {})
-                lbid, lask = lo.get("low"), lo.get("high")
-                if lbid and lask:
-                    live_net = post_tax_received(lask, item_id=o.item_id) - lbid
-                    abid, aask = v.get("avgLowPrice"), v.get("avgHighPrice")
-                    avg_net = post_tax_received(aask, item_id=o.item_id) - abid if (abid and aask) else None
-                    if runelite.margin_alert(live_net, avg_net, elapsed_h,
-                                             min_age_h=config.REVIEW_MARGIN_MIN_AGE_H,
-                                             floor=config.REVIEW_MARGIN_FLOOR):
-                        verdict = "margin"
-            out.append((o, verdict, elapsed_h, eta_h, prog))
-        return out
+        return monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
 
     def cmd_review(self, args: list[str]) -> None:
         rows = self._review_offers()
@@ -421,6 +400,45 @@ class Terminal:
             wait = f"~{min(etas) * 60:.0f}m" if etas else "a while"
             return f"all slots working — nothing to do; check back in {wait}"
         return "idle — set cash with `bank <gp>`, or `scan` for ideas"
+
+    # --- background Discord alerts -------------------------------------------
+    def _alerts_running(self) -> bool:
+        return self._alert_thread is not None and self._alert_thread.is_alive()
+
+    def _start_alerts(self) -> bool:
+        """Spawn the daemon watcher (read-only: RuneLite + API, never the journal → no DB lock)."""
+        if not config.DISCORD_WEBHOOK_URL or self._alerts_running():
+            return self._alerts_running()
+        self._alert_stop.clear()
+        self._alert_thread = threading.Thread(target=monitor.watch_loop, args=(self._alert_stop,), daemon=True)
+        self._alert_thread.start()
+        return True
+
+    def _stop_alerts(self) -> None:
+        self._alert_stop.set()
+        self._alert_thread = None
+
+    def cmd_alerts(self, args: list[str]) -> None:
+        """Background Discord alerts when an offer needs you (filled/margin-gone/stale).
+          alerts           status      alerts on|off    toggle      alerts test    send a test ping"""
+        sub = args[0].lower() if args else "status"
+        if sub == "on":
+            if not config.DISCORD_WEBHOOK_URL:
+                print("  no webhook — set OSRS_FLIPPER_DISCORD_WEBHOOK, then `reload`")
+            else:
+                self._start_alerts()
+                print(f"  alerts ON — polling RuneLite every {config.ALERT_POLL_S}s, pushing to Discord")
+        elif sub == "off":
+            self._stop_alerts()
+            print("  alerts OFF")
+        elif sub == "test":
+            ok, detail = alert.post_discord("\U0001f514 osrs-flipper test alert — you're wired up.")
+            print(f"  discord test: {detail}")
+        else:
+            state = "ON" if self._alerts_running() else "OFF"
+            hook = "configured" if config.DISCORD_WEBHOOK_URL else "NOT set (OSRS_FLIPPER_DISCORD_WEBHOOK)"
+            print(f"  alerts {state} · webhook {hook} · poll {config.ALERT_POLL_S}s")
+            print("  `alerts on|off` to toggle · `alerts test` to verify the webhook")
 
     def cmd_overnight(self, args: list[str]) -> None:
         """Overnight plan. No arg → diversified buys across all free slots; <item> → one big buy."""
@@ -616,6 +634,8 @@ class Terminal:
         n0 = self._autosync()
         if n0:
             print(f"  (auto-synced {n0} fill(s) from RuneLite)")
+        if self._start_alerts():  # auto-on when a webhook is configured
+            print(f"  (Discord alerts ON — every {config.ALERT_POLL_S}s; `alerts off` to stop)")
         handlers = {
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
             "sellquote": lambda a: self.cmd_sellquote(a), "sq": lambda a: self.cmd_sellquote(a),
@@ -633,6 +653,7 @@ class Terminal:
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
+            "alerts": lambda a: self.cmd_alerts(a),
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
             "help": lambda a: print(__doc__),
             "?": lambda a: print(__doc__),

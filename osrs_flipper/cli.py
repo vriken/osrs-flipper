@@ -38,8 +38,8 @@ def _cmd_scan(args: argparse.Namespace) -> None:
     print()
     print(alert.format_bond_line(prog))
     if args.discord:
-        ok = alert.to_discord(alert.format_table(df))
-        print(f"discord: {'sent' if ok else 'no webhook configured'}")
+        _ok, detail = alert.post_discord(alert.format_table(df))
+        print(f"discord: {detail}")
 
 
 def _cmd_trade(args: argparse.Namespace) -> None:
