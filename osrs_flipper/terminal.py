@@ -508,6 +508,9 @@ class Terminal:
                 return " + ".join(actions) + " now (auto-logged from RuneLite — no `placed` needed)"
         if sell_rows:
             return "list your holdings for sale (see SELL above)"
+        if free > 0:  # a slot IS free — say so, don't claim "all slots working"
+            return (f"{free} slot(s) free but nothing cleared the filters — no flip worth a slot "
+                    "right now; wait for a better spread or `scan` to widen")
         if review_rows:
             etas = [eta for (_o, _v, _e, eta, _p) in review_rows if eta < 100]
             wait = f"~{min(etas) * 60:.0f}m" if etas else "a while"

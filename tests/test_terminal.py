@@ -142,5 +142,11 @@ def test_all_slots_working_reports_wait_time():
     assert "check back" in msg and "120m" in msg
 
 
+def test_free_slot_but_nothing_passed_is_not_all_slots_working():
+    # a free slot with no pick must NOT claim "all slots working"
+    msg = na([_row("ontrack")], sell_rows=[], free=1, picks=[])
+    assert "nothing cleared" in msg and "all slots working" not in msg
+
+
 def test_idle_when_nothing_to_do():
     assert "idle" in na([], sell_rows=[], free=0, picks=[])
