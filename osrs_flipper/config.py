@@ -75,7 +75,8 @@ BREAKOUT_RANGE_DAYS = 14  # momentum: lookback for the price range break
 # --- Liquidity / staleness gating (see features.py) --------------------------
 TAU_S = 1800  # staleness decay for liquidity score (30 min)
 STALENESS_MAX_S = 3600  # exclude items whose last trade is older than this (1h)
-V_MIN_1H = 50  # minimum 1h volume (binding side) to be considered tradeable
+V_MIN_1H = int(os.environ.get("OSRS_FLIPPER_V_MIN_1H", 500))  # min 1h volume (binding side) to recommend;
+# thin items (low two-sided volume) are easily pumped and you can't reliably fill at the quoted price
 V_SUSPICIOUS_1H = 100  # below this + wide spread => flag manipulation-suspect
 
 # --- Spread persistence (see persistence.py) ---------------------------------
