@@ -11,7 +11,7 @@ Commands (type `help`):
   brief | now              schedule-aware: day plan in active hours, overnight plan off-hours
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
-  sellquote | sq <item>    sell-price tradeoff for inventory you hold (fill time vs profit)
+  sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
   buy <item> <quantity> <price>    log a buy fill
   sell <item> <quantity> <price>   log a sell fill (applies GE tax)
   pos                      open positions + unrealised P&L (vs live bid)
@@ -379,19 +379,23 @@ class Terminal:
 
     def cmd_sellquote(self, args: list[str]) -> None:
         if not args:
-            print("  usage: sellquote <item you hold>")
+            print("  usage: sellquote <item> [qty]")
             return
+        qty_override = None
+        if len(args) > 1 and args[-1].isdigit():  # trailing number = quantity to quote
+            qty_override, args = int(args[-1]), args[:-1]
         meta = self.resolve(" ".join(args))
         if not meta:
             print("  item not found")
             return
         pos = self.j.position(meta["id"])
         if not pos or pos.qty <= 0:
-            print(f"  you don't hold {meta.get('name', args)} — sellquote is for inventory you own")
+            print(f"  you don't hold {meta.get('name', '?')} — sellquote is for inventory you own")
             return
+        qty = qty_override or pos.qty
         from .quote import sell_frontier
-        rows = sell_frontier(meta["id"], pos.qty, pos.avg_cost)
-        print(alert.format_sell_quote(meta["name"], pos.qty, pos.avg_cost, rows))
+        rows = sell_frontier(meta["id"], qty, pos.avg_cost)
+        print(alert.format_sell_quote(meta["name"], qty, pos.avg_cost, rows))
 
     def cmd_pos(self) -> None:
         pos = self.j.positions()
