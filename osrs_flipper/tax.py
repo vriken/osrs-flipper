@@ -46,6 +46,20 @@ def post_tax_received(price: int, *, item_id: int | None = None, on_date: dt.dat
     return price - ge_tax(price, item_id=item_id, on_date=on_date)
 
 
+def breakeven_sell(avg_cost: float, *, item_id: int | None = None, on_date: dt.date | None = None) -> int:
+    """Smallest whole sell price whose post-tax proceeds cover `avg_cost` — the price at or above
+    which a sale is not a loss. The sell plan floors its recommendation here so it never tells you
+    to dump under cost when the market ticks down."""
+    if avg_cost <= 0:
+        return 0
+    # closed-form estimate (price grossed up for the rate), then nudge for integer flooring, the
+    # sub-50gp exemption and the 5M cap — bounds the loop to a couple of iterations at any price.
+    p = max(1, (int(avg_cost) * TAX_RATE_DEN) // max(1, TAX_RATE_DEN - TAX_RATE_NUM) - 2)
+    while post_tax_received(p, item_id=item_id, on_date=on_date) < avg_cost:
+        p += 1
+    return p
+
+
 def effective_tax_rate(price: int, *, item_id: int | None = None, on_date: dt.date | None = None) -> float:
     """Realised tax as a fraction of price (drops below 2% once the 5M cap binds)."""
     if price <= 0:

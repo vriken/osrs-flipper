@@ -156,10 +156,10 @@ NIGHT_SWITCH_H = float(os.environ.get("OSRS_FLIPPER_NIGHT_SWITCH_H", 3))
 # spread it flickers to 0 constantly, so two guards stop false "cancel/re-quote" alarms:
 #  - MIN_AGE_H: a real adverse move takes longer than seconds — don't judge a just-placed
 #    order off one tick (this is why a 1-minute-old order should never read "margin gone").
-#  - FLOOR: skip penny-margin staples (a 1gp spread going to 0 isn't a loss worth a cancel);
-#    the alarm only matters where there's a real margin to lose.
+#  - FLOOR: skip thin-margin staples (a ≤3gp spread flickering to 0 is tick noise on a 30gp item,
+#    not a loss worth a cancel); the alarm only matters where there's a real margin to lose.
 REVIEW_MARGIN_MIN_AGE_H = float(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_MIN_AGE_H", 0.25))
-REVIEW_MARGIN_FLOOR = int(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_FLOOR", 2))
+REVIEW_MARGIN_FLOOR = int(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_FLOOR", 3))
 
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional

@@ -3,7 +3,7 @@
 import datetime as dt
 
 from osrs_flipper.config import TAX_CAP
-from osrs_flipper.tax import effective_tax_rate, ge_tax, post_tax_received
+from osrs_flipper.tax import breakeven_sell, effective_tax_rate, ge_tax, post_tax_received
 
 POST = dt.date(2025, 6, 1)  # after the 2% cutoff
 PRE = dt.date(2025, 1, 1)  # 1% era
@@ -18,6 +18,24 @@ def test_sub_50gp_is_exempt():
 def test_50gp_is_first_taxable():
     # 2% of 50 = 1
     assert ge_tax(50, on_date=POST) == 1
+
+
+def test_breakeven_sell_covers_cost():
+    # cost 80 (taxed ~2%): break-even is the lowest price whose post-tax proceeds reach 80
+    be = breakeven_sell(80, on_date=POST)
+    assert post_tax_received(be, on_date=POST) >= 80
+    assert post_tax_received(be - 1, on_date=POST) < 80  # one tick lower is a loss
+
+
+def test_breakeven_sell_low_price_no_tax():
+    # sub-50gp is exempt → break-even equals the cost (no tax to cover)
+    assert breakeven_sell(40, on_date=POST) == 40
+
+
+def test_breakeven_sell_large_price_terminates_fast():
+    # closed-form start keeps the loop O(1) even for a 1.8M-cost item
+    be = breakeven_sell(1_800_000, on_date=POST)
+    assert post_tax_received(be, on_date=POST) >= 1_800_000
 
 
 def test_two_percent_floored():

@@ -123,7 +123,13 @@ def optimal_quote(
     if spread < 1:
         return None  # no spread to capture
     step = max(1, spread // 30)
-    buy_grid = range(int(bid), int(ask), step)
+    # never recommend a buy below the current live bid: you'd sit out of market (it won't fill)
+    # and the live monitor would rightly flag it "margin gone". Clamp the buy floor up to the
+    # live bid when the book has moved above the 1h-median.
+    buy_lo = int(bid)
+    if clow is not None and int(clow) > buy_lo:
+        buy_lo = min(int(clow), int(ask) - 1)
+    buy_grid = range(buy_lo, int(ask), step)
     sell_grid = range(int(bid) + 1, int(ask) + 1, step)
 
     results = []

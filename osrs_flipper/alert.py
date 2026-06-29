@@ -209,8 +209,9 @@ def format_sell_plan(rows: list[dict]) -> str:
     for r in rows:
         eta_s = f"{r['eta_h']:.1f}h" if r["eta_h"] < 100 else "—"
         prof = color(f"{r['profit']:+,.0f}", "green" if r["profit"] >= 0 else "red")
+        flag = color("  ⚠ underwater — mkt below cost, holding at break-even", "yellow") if r.get("underwater") else ""
         lines.append(f"  {str(r['name'])[:22]:22} {r['qty']:>7,} {r['avg_cost']:>8,.0f} "
-                     f"{r['sell_px']:>8,} {eta_s:>6} {prof:>9}")
+                     f"{r['sell_px']:>8,} {eta_s:>6} {prof:>9}{flag}")
     return "\n".join(lines)
 
 

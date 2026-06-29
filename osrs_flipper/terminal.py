@@ -242,14 +242,16 @@ class Terminal:
             free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
         # don't recommend what you already hold OR already have an offer on
         exclude = [h.item_id for h in held] + active_ids
-        print(f"  building portfolio for {free} free slot(s)…")
-        picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=exclude, free_slots=free, limit_used=self._limit_used(rl))
-        print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))
         active_sell_ids = {o.item_id for o in offers if not o.is_buy}
-        sell = alert.format_sell_plan(self._sell_plan(held, active_sell_ids))
-        if sell:
-            print(sell)
+        sell_rows = self._sell_plan(held, active_sell_ids)
+        buy_slots = max(0, free - len(sell_rows))  # reserve a slot per pending sell listing
+        if sell_rows:
+            print(alert.format_sell_plan(sell_rows))
+        print(f"  building portfolio for {buy_slots} free slot(s)"
+              + (f" ({len(sell_rows)} reserved for sells)…" if sell_rows else "…"))
+        picks, idle = scanner.build_portfolio(
+            bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(rl))
+        print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
             print(nudge)
@@ -305,7 +307,7 @@ class Terminal:
 
     def _sell_plan(self, held: list, active_sell_ids: set) -> list[dict]:
         """Recommended sell price + expected profit for each held item not already listed."""
-        from .tax import post_tax_received
+        from .tax import breakeven_sell, post_tax_received
         hourly, latest = api.one_hour(), api.latest()
         rows = []
         for p in held:
@@ -315,12 +317,16 @@ class Terminal:
             ask = h.get("avgHighPrice") or (latest.get(p.item_id, {}) or {}).get("high")
             if not ask:
                 continue
-            sell_px = int(round(ask))
+            # never list under cost: when the market drops below your break-even, hold the listing
+            # at break-even rather than dump at a loss just because the average ticked down.
+            be = breakeven_sell(p.avg_cost, item_id=p.item_id)
+            market_px = int(round(ask))
+            sell_px = max(market_px, be)
             net = post_tax_received(sell_px, item_id=p.item_id) - p.avg_cost
             hv = h.get("highPriceVolume") or 0
             eta_h = p.qty / (config.ALPHA * hv) if hv > 0 else float("inf")
-            rows.append({"name": p.name, "qty": p.qty, "avg_cost": p.avg_cost,
-                         "sell_px": sell_px, "profit": net * p.qty, "eta_h": eta_h})
+            rows.append({"name": p.name, "qty": p.qty, "avg_cost": p.avg_cost, "sell_px": sell_px,
+                         "profit": net * p.qty, "eta_h": eta_h, "underwater": market_px < be})
         return rows
 
     def _attention_nudge(self) -> str:
@@ -384,13 +390,18 @@ class Terminal:
             print(alert.format_sell_plan(sell_rows))
 
         picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
-        if free > 0 and daytime:
+        # reserve a slot for each pending sell listing — a sell occupies a GE slot too, so buys
+        # can't claim every free slot or you'd have nowhere to list what you're holding.
+        buy_slots = max(0, free - len(sell_rows))
+        if buy_slots > 0 and daytime:
+            if sell_rows:
+                print(f"  ({len(sell_rows)} slot(s) reserved for the sell listing(s) above)")
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
-                                                  free_slots=free, limit_used=self._limit_used(rl))
+                                                  free_slots=buy_slots, limit_used=self._limit_used(rl))
             src = "runelite" if rl is not None else "assumed"
-            print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=src))
-        elif free > 0:
+            print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
+        elif buy_slots > 0:
             self._overnight_plan(cash)
 
         print("  " + alert.color("NEXT: " + self._next_action(rows, sell_rows, free, picks), "bold"))
@@ -403,9 +414,15 @@ class Terminal:
             return f"collect {n} finished offer(s) — frees a slot, then press Enter again"
         if "margin" in verds or "stale" in verds:
             return "re-price the flagged offer(s): cancel & re-quote (see ACTIVE OFFERS)"
-        if free > 0 and picks:
+        if free > 0 and (picks or sell_rows):
+            actions = []
+            if sell_rows:
+                actions.append(f"list {len(sell_rows)} sell(s)")
             n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
-            return f"place buy #1–#{n_now} now — then type `placed` so the fills calibrate the model"
+            if n_now:
+                actions.append(f"place buy #1–#{n_now}")
+            if actions:
+                return " + ".join(actions) + " now — then `placed` so the fills calibrate the model"
         if sell_rows:
             return "list your holdings for sale (see SELL above)"
         if review_rows:
