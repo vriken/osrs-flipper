@@ -108,19 +108,19 @@ def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, lim
             "hold_units": min(vol, limit), "buy_rate": 5000.0}
 
 
-def test_penny_spread_staple_still_qualifies_as_a_hold(monkeypatch):
-    # regression: a high-volume 1gp-spread staple (Air rune 4→5) has margin_fast ≤ 0 (a
-    # queue-jump collapses the spread) but a real patient margin. It must accumulate as a
-    # HOLD, not be excluded entirely — otherwise a big F2P bankroll funnels into one item.
+def test_one_gp_tick_flip_is_dropped(monkeypatch):
+    # reversal (was "penny staple kept as hold"): a 1gp integer-tick staple (Air rune 4→5) shows
+    # 25% ROI but doesn't fill — you're behind a wall of identical 1gp bids (fill calibration ≈0).
+    # Now gated by MIN_NET_MARGIN. A real ≥2gp flip stays.
     df = pd.DataFrame([
-        _candidate(561, "Air rune", 4, 5, margin_abs=1, margin_fast=-1),     # penny staple
+        _candidate(561, "Air rune", 4, 5, margin_abs=1, margin_fast=-1),          # 1gp → dropped
         _candidate(1391, "Battlestaff", 200, 215, margin_abs=10, margin_fast=5),  # real fast flip
     ])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
     picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     by_name = {p["name"]: p for p in picks}
-    assert by_name["Air rune"]["tier"] == "hold"        # the penny staple is kept, as a hold
-    assert by_name["Battlestaff"]["tier"] != "hold"     # the queue-jumpable flip is active
+    assert "Air rune" not in by_name                     # 1gp margin < MIN_NET_MARGIN → gated out
+    assert by_name["Battlestaff"]["tier"] != "hold"      # 10gp queue-jumpable flip is active
 
 
 def test_hold_quality_floor_drops_low_roi(monkeypatch):

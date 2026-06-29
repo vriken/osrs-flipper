@@ -92,6 +92,12 @@ def scan(
             margin_pct=df["margin_fast"] / df["fast_buy"].where(df["fast_buy"] > 0, 1),
         )
 
+    # drop integer-tick flips: a ≤1gp after-tax margin shows fat ROI% on cheap items but doesn't
+    # fill (calibration ≈0). Gate on absolute margin — the % floors miss it at low prices.
+    df = df[df["margin_abs"].abs() >= config.MIN_NET_MARGIN]
+    if df.empty:
+        return df
+
     df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=config.SCORE_ROI_WEIGHT)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
     df = df[df["score"] > 0]
@@ -126,8 +132,8 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
         if not st or st["realizable_spread"] <= 0 or st["persist"] < config.PERSIST_MIN_FRAC:
             continue
         q = optimal_quote(iid, int(row["capacity"]), name=row["name"], horizon_h=horizon)
-        if not q or q.ev <= 0:
-            continue
+        if not q or q.ev <= 0 or q.net_unit < config.MIN_NET_MARGIN:
+            continue  # integer-tick flip — fat ROI%, doesn't fill
         reliability = st["persist_factor"] * min(1.0, q.p_round / 0.5)
         rows.append({
             **row.to_dict(),
@@ -226,7 +232,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         # ACTIVE flips queue-jump (buy bid+1 / sell ask-1) → must clear the fast spread.
         # HOLDS place a passive bid and accumulate over 4h → the patient spread is what they
         # capture, so high-volume penny-spread staples (Air rune 4→5) belong here, not nowhere.
-        return float(row.get("margin_fast", 1)) > 0 if fast else float(row["margin_abs"]) > 0
+        m = float(row.get("margin_fast", 0)) if fast else float(row["margin_abs"])
+        return m >= config.MIN_NET_MARGIN  # ≥2gp: 1gp integer-tick flips don't fill (calibration ≈0)
 
     picks: list[dict] = []
     for role in roles:  # active: best worth-it flip for the role
