@@ -3,12 +3,13 @@
     osrs-flipper trade
 
 Commands (type `help`):
+  go | (press Enter)       ★ THE one command: offers+verdicts, what to sell, what to buy, next action
+  ---- drill-downs (go shows all of these together) ----
   sync                    import completed RuneLite fills into the journal
   orders | ge             live GE slots + active offers (from RuneLite)
   review | check          flag active offers to re-price / cancel / collect
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   overnight [item]         plan one big ~8h buy to leave while you sleep
-  brief | now              schedule-aware: day plan in active hours, overnight plan off-hours
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
@@ -357,16 +358,69 @@ class Terminal:
             parts.append(alert.color(f"{n} to collect", "yellow"))
         return "  active orders: " + ", ".join(parts) + " — run `review`" if parts else ""
 
-    def cmd_brief(self, args: list[str]) -> None:
-        """Schedule-aware: active hours → day plan (port); off-hours → overnight plan."""
+    def cmd_go(self, args: list[str]) -> None:
+        """THE one command — everything on one screen so you don't juggle review/port/pos/brief:
+        active offers + verdicts, what to sell, what to buy with free slots, and a single NEXT
+        action. Schedule-aware (day → diversified buys, night → one big buy/slot). Alias: Enter."""
         from datetime import datetime
         hour = datetime.now().hour
-        if config.AWAKE_START <= hour < config.AWAKE_END:
-            print(f"  [{hour:02d}:00] active hours — day plan:")
-            self.cmd_port([])
-        else:
-            print(f"  [{hour:02d}:00] off-hours — overnight plan:")
-            self.cmd_overnight([])
+        cash = int(self.j.cash()) or config.BANKROLL
+        held = self.j.positions()
+        rl = runelite.read()
+        offers = runelite.active_offers(rl) if rl else []
+        free = (runelite.free_slots(rl, config.GE_SLOTS) if rl is not None
+                else max(0, config.GE_SLOTS - len(held)))
+        bp = scanner.bond_progress(cash)
+        pct = f" · {bp['pct']:.0f}% to bond" if bp.get("pct") else ""
+        print(f"  === {hour:02d}:00 · cash {cash:,} · {len(held)} held · "
+              f"{free}/{config.GE_SLOTS} slots free{pct} ===")
+
+        rows = self._review_offers()  # ACTIVE offers + verdicts (the old `review`)
+        if rows:
+            names = {r["id"]: r["name"] for r in api.mapping()}
+            print("  ACTIVE OFFERS:")
+            for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
+                text, c = _VERDICTS[v]
+                eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
+                print(f"    {o.slot:<2} {str(names.get(o.item_id, o.item_id))[:18]:18} "
+                      f"{'BUY' if o.is_buy else 'SELL':4} {prog:>4.0%} {elapsed_h:>5.1f}h "
+                      f"{eta_s:>6}  {alert.color(text, c) if c else text}")
+
+        active_sell_ids = {o.item_id for o in offers if not o.is_buy}  # SELL holdings (the old port tail)
+        sell_rows = self._sell_plan(held, active_sell_ids)
+        if sell_rows:
+            print(alert.format_sell_plan(sell_rows))
+
+        picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
+        if free > 0 and config.AWAKE_START <= hour < config.AWAKE_END:
+            exclude = [h.item_id for h in held] + [o.item_id for o in offers]
+            picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
+                                                  free_slots=free, limit_used=self._limit_used(rl))
+            src = "runelite" if rl is not None else "assumed"
+            print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=src))
+        elif free > 0:
+            self._overnight_plan(cash)
+
+        print("  " + alert.color("NEXT: " + self._next_action(rows, sell_rows, free, picks), "bold"))
+
+    @staticmethod
+    def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
+        """The single most important thing to do right now, synthesized from current state."""
+        verds = [v for (_o, v, *_rest) in review_rows]
+        if (n := verds.count("collect")):
+            return f"collect {n} finished offer(s) — frees a slot, then press Enter again"
+        if "margin" in verds or "stale" in verds:
+            return "re-price the flagged offer(s): cancel & re-quote (see ACTIVE OFFERS)"
+        if free > 0 and picks:
+            n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
+            return f"place buy #1–#{n_now} now — then type `placed` so the fills calibrate the model"
+        if sell_rows:
+            return "list your holdings for sale (see SELL above)"
+        if review_rows:
+            etas = [eta for (_o, _v, _e, eta, _p) in review_rows if eta < 100]
+            wait = f"~{min(etas) * 60:.0f}m" if etas else "a while"
+            return f"all slots working — nothing to do; check back in {wait}"
+        return "idle — set cash with `bank <gp>`, or `scan` for ideas"
 
     def cmd_overnight(self, args: list[str]) -> None:
         """Overnight plan. No arg → diversified buys across all free slots; <item> → one big buy."""
@@ -573,7 +627,8 @@ class Terminal:
             "review": lambda a: self.cmd_review(a), "check": lambda a: self.cmd_review(a),
             "sync": lambda a: self.cmd_sync(a),
             "overnight": lambda a: self.cmd_overnight(a), "night": lambda a: self.cmd_overnight(a),
-            "brief": lambda a: self.cmd_brief(a), "now": lambda a: self.cmd_brief(a),
+            "go": lambda a: self.cmd_go(a), "g": lambda a: self.cmd_go(a),
+            "brief": lambda a: self.cmd_go(a), "now": lambda a: self.cmd_go(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "preds": lambda a: self.cmd_preds(a),
@@ -589,7 +644,7 @@ class Terminal:
                 print()
                 break
             if not raw:
-                continue
+                raw = "go"  # bare Enter → the everything dashboard
             cmd, *args = raw.split()
             cmd = cmd.lower()
             if cmd in ("quit", "exit", "q"):
