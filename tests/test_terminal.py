@@ -39,6 +39,30 @@ def test_autodetect_skips_completed_offers(tmp_path, monkeypatch):
     j.con.close()
 
 
+def test_refine_sell_priced_to_market_downgrades_to_ontrack(monkeypatch):
+    # a stale SELL still at/under market is priced to sell, just slow → don't tell me to re-list
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {561: {"high": 6}})
+    o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=6)
+    v, hint = Terminal._refine_verdict(o, "stale")
+    assert v == "ontrack" and "just slow" in hint
+
+
+def test_refine_sell_above_market_says_relist_lower(monkeypatch):
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {561: {"high": 6}})
+    o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=9)
+    v, hint = Terminal._refine_verdict(o, "stale")
+    assert v == "stale" and "re-list" in hint
+
+
+def test_refine_buy_same_price_downgrades_to_ontrack(monkeypatch):
+    from osrs_flipper import quote as quote_mod
+    monkeypatch.setattr(quote_mod, "optimal_quote",
+                        lambda *a, **k: types.SimpleNamespace(buy_px=4, sell_px=6, net_unit=1))
+    o = Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=100, price=4)
+    v, hint = Terminal._refine_verdict(o, "margin")
+    assert v == "ontrack" and "just slow" in hint
+
+
 def _row(verdict, eta_h=1.0):
     return (None, verdict, 0.5, eta_h, 0.0)  # (offer, verdict, elapsed, eta, progress)
 

@@ -404,17 +404,22 @@ class Terminal:
               f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
 
         rows = self._review_offers()  # ACTIVE offers + verdicts (the old `review`)
+        refined = []  # verdicts re-checked against a fresh quote so we never churn a priced-right offer
         if rows:
             names = {r["id"]: r["name"] for r in api.mapping()}
             print("  ACTIVE OFFERS:")
             for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
+                hint = ""
+                if v in ("margin", "stale", "slow"):
+                    v, hint = self._refine_verdict(o, v)
                 text, c = _VERDICTS[v]
                 eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
                 print(f"    {o.slot:<2} {str(names.get(o.item_id, o.item_id))[:18]:18} "
                       f"{'BUY' if o.is_buy else 'SELL':4} {prog:>4.0%} {elapsed_h:>5.1f}h "
                       f"{eta_s:>6}  {alert.color(text, c) if c else text}")
-                if v in ("margin", "stale", "slow") and (hint := self._reprice_hint(o)):
+                if hint:
                     print(hint)
+                refined.append((o, v, elapsed_h, eta_h, prog))
 
         active_sell_ids = {o.item_id for o in offers if not o.is_buy}  # SELL holdings (the old port tail)
         sell_rows = self._sell_plan(held, active_sell_ids)
@@ -436,7 +441,7 @@ class Terminal:
         elif buy_slots > 0:
             self._overnight_plan(cash)
 
-        print("  " + alert.color("NEXT: " + self._next_action(rows, sell_rows, free, picks), "bold"))
+        print("  " + alert.color("NEXT: " + self._next_action(refined, sell_rows, free, picks), "bold"))
 
     @staticmethod
     def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
@@ -464,18 +469,29 @@ class Terminal:
         return "idle — set cash with `bank <gp>`, or `scan` for ideas"
 
     @staticmethod
-    def _reprice_hint(o) -> str:
-        """Fresh marketable price for a flagged offer, so 'cancel/re-quote' says what to re-quote
-        TO — not just that you should. Returns '' if there's nothing useful to add."""
-        from .quote import optimal_quote
-        q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
-        if not q:
-            return alert.color("         → no profitable spread right now — cancel & redeploy that cash", "yellow")
+    def _refine_verdict(o, verdict: str) -> tuple[str, str]:
+        """Consult fresh prices on a flagged offer so the advice is actionable, not churn:
+          - priced right, just slow   → downgrade to on-track (no pointless cancel/re-list)
+          - genuinely mispriced        → keep the flag, show the price to move to
+          - no profitable spread (buy) → keep the flag, say cancel & redeploy
+        Returns (possibly-downgraded verdict, indented hint line)."""
         if o.is_buy:
+            from .quote import optimal_quote
+            q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
+            if not q:
+                return verdict, alert.color("         → no profitable spread now — cancel & redeploy that cash", "yellow")
             if q.buy_px == o.price:
-                return alert.color(f"         → quote still says buy {q.buy_px:,} — it's just slow, not mispriced; hold", "yellow")
-            return alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
-        return alert.color(f"         → re-list at {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
+                return "ontrack", alert.color(f"         → quote still says buy {q.buy_px:,} — priced right, just slow; hold", "green")
+            return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
+        # SELL: is your ask still at/under the current market ask? then it fills, just slowly.
+        m = api.latest().get(o.item_id, {})
+        ask = m.get("high") or api.one_hour().get(o.item_id, {}).get("avgHighPrice")
+        if not ask:
+            return verdict, ""
+        ask = int(round(ask))
+        if o.price <= ask:
+            return "ontrack", alert.color(f"         → listed {o.price:,} ≤ market {ask:,} — priced to sell, just slow; hold", "green")
+        return verdict, alert.color(f"         → re-list nearer {ask:,} — you're above market", "bold")
 
     # --- background Discord alerts -------------------------------------------
     def _alerts_running(self) -> bool:
