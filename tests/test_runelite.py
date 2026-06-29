@@ -87,6 +87,17 @@ def test_margin_collapsed():
     assert runelite.margin_collapsed(10, None) is False  # positive, no baseline → fine
 
 
+def test_margin_alert_ignores_fresh_orders_and_penny_spreads():
+    # a 1-minute-old order: even a ≤0 live read is snapshot noise → no alert
+    assert runelite.margin_alert(0, 50, elapsed_h=0.01, min_age_h=0.25, floor=2) is False
+    # penny staple (avg margin ≤ floor): a flicker to 0 is normal, not a loss → no alert
+    assert runelite.margin_alert(0, 1, elapsed_h=5.0, min_age_h=0.25, floor=2) is False
+    # aged order with a real margin that genuinely collapsed → alert fires
+    assert runelite.margin_alert(-5, 50, elapsed_h=1.0, min_age_h=0.25, floor=2) is True
+    assert runelite.margin_alert(10, 50, elapsed_h=1.0, min_age_h=0.25, floor=2) is True  # 10 < 0.3×50
+    assert runelite.margin_alert(40, 50, elapsed_h=1.0, min_age_h=0.25, floor=2) is False  # still healthy
+
+
 def test_review_verdict():
     assert runelite.review_verdict("BOUGHT", 1.0, 5, 1) == "collect"
     assert runelite.review_verdict("BUYING", 0.0, 5.0, 1.0) == "stale"   # 5x over ETA, unfilled

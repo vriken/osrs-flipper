@@ -294,6 +294,7 @@ class Terminal:
             prog = o.filled / o.qty if o.qty else 0.0
             verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
             # market-moved check (buys): is the round-trip margin still there at live prices?
+            # Guarded against snapshot noise on fresh orders / penny spreads (see margin_alert).
             if verdict != "collect" and o.is_buy:
                 lo = latest.get(o.item_id, {})
                 lbid, lask = lo.get("low"), lo.get("high")
@@ -301,7 +302,9 @@ class Terminal:
                     live_net = post_tax_received(lask, item_id=o.item_id) - lbid
                     abid, aask = v.get("avgLowPrice"), v.get("avgHighPrice")
                     avg_net = post_tax_received(aask, item_id=o.item_id) - abid if (abid and aask) else None
-                    if runelite.margin_collapsed(live_net, avg_net):
+                    if runelite.margin_alert(live_net, avg_net, elapsed_h,
+                                             min_age_h=config.REVIEW_MARGIN_MIN_AGE_H,
+                                             floor=config.REVIEW_MARGIN_FLOOR):
                         verdict = "margin"
             out.append((o, verdict, elapsed_h, eta_h, prog))
         return out
