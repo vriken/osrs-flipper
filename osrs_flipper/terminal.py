@@ -37,7 +37,7 @@ from __future__ import annotations
 import threading
 import time
 
-from . import alert, api, config, monitor, runelite, scanner
+from . import alert, api, calibration, config, monitor, runelite, scanner
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -94,7 +94,8 @@ class Terminal:
         mode = next((a for a in args if a in scanner.MODE_WEIGHTS), "balanced")
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
-        df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used())
+        df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
+                          fill_cal=self._fill_cal())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -226,11 +227,16 @@ class Terminal:
             if b:
                 print(f"    {name:>4} liquidity: measured {b['measured']:.2f} "
                       f"→ {b['shrunk']:.2f}  (n={b['n']})")
-        if fill["correction"] is not None:
-            c = fill["correction"]
-            verdict = "too pessimistic" if c > 1.1 else "too optimistic" if c < 0.9 else "well-calibrated"
-            print(f"  fill rate: ×{c:.2f} ({verdict}, n={fill['n']})")
-        print("  report only — nothing applied. Update BETA in config.py if you trust the measured value.")
+        if fill["global_measured"] is not None:
+            gm, g = fill["global_measured"], fill["global"]
+            verdict = "too pessimistic" if g > 1.1 else "too optimistic" if g < 0.9 else "well-calibrated"
+            print(f"  fill rate: measured ×{gm:.2f} → applied ×{g:.2f}  ({verdict}, n={fill['n']}, shrunk→1.0)")
+            for name in ("low", "med", "high"):
+                b = fill["buckets"].get(name)
+                if b:
+                    print(f"    {name:>4} liquidity: measured ×{b['measured']:.2f} → ×{b['shrunk']:.2f}  (n={b['n']})")
+        print("  fill correction is AUTO-APPLIED to EV/ranking (go/scan/port). β is report-only — "
+              "update BETA in config.py if you trust the measured value.")
 
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL
@@ -254,7 +260,8 @@ class Terminal:
         print(f"  building portfolio for {buy_slots} free slot(s)"
               + (f" ({len(sell_rows)} reserved for sells)…" if sell_rows else "…"))
         picks, idle = scanner.build_portfolio(
-            bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(rl))
+            bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(rl),
+            fill_cal=self._fill_cal())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -264,6 +271,11 @@ class Terminal:
         """Prefer RuneLite's exact buy-limit counter; fall back to journal-summed buys."""
         rl = rl if rl is not None else runelite.read()
         return runelite.limit_used(rl) if rl else self.j.buy_limit_used()
+
+    def _fill_cal(self) -> dict:
+        """Fill-rate calibration from your resolved attempts, auto-applied to the EV/ranking so the
+        model self-corrects from real fills. Stays near 1.0 (shrunk) until enough fills accumulate."""
+        return calibration.calibrate_fill(self.j.calibration_rows())
 
     def _autosync(self) -> int:
         """Mirror RuneLite's completed fills into the journal and reconcile them against placed
@@ -447,10 +459,14 @@ class Terminal:
             if sell_rows:
                 print(f"  ({len(sell_rows)} slot(s) reserved for the sell listing(s) above)")
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
-            picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
-                                                  free_slots=buy_slots, limit_used=self._limit_used(rl))
+            fcal = self._fill_cal()
+            picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
+                                                  limit_used=self._limit_used(rl), fill_cal=fcal)
             src = "runelite" if rl is not None else "assumed"
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
+            if fcal.get("global_measured") is not None:
+                print(f"  (fills auto-calibrated ×{fcal['global']:.2f} from {fcal['n']} attempts — "
+                      "applied to gp & ranking)")
             self._explain_picks(picks)  # one-line "why" for each buy you're about to place
         elif buy_slots > 0:
             self._overnight_plan(cash)

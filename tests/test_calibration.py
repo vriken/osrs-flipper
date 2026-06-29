@@ -35,12 +35,22 @@ def test_shrinkage_pulls_small_samples_toward_prior():
 def test_expired_attempts_drag_fill_correction_down():
     # one fill (100% of qty) at predicted 0.5 → factor 2.0; one expired (0% filled) → factor 0.0
     rows = [
-        {"qty": 10, "filled_qty": 10, "pred_p_fill": 0.5, "status": "filled"},
-        {"qty": 10, "filled_qty": 0, "pred_p_fill": 0.5, "status": "expired"},
+        {"qty": 10, "filled_qty": 10, "pred_p_fill": 0.5, "status": "filled", "vol_1h_binding": 100},
+        {"qty": 10, "filled_qty": 0, "pred_p_fill": 0.5, "status": "expired", "vol_1h_binding": 100},
     ]
     out = calibration.calibrate_fill(rows)
     assert out["n"] == 2
-    assert out["correction"] == 1.0  # median(2.0, 0.0) — the miss is counted, not dropped
+    assert out["global_measured"] == 1.0  # median(2.0, 0.0) — the miss is counted, not dropped
+
+
+def test_fill_multiplier_demotes_overoptimistic_but_shrinks_and_clamps():
+    # heavy over-optimism on a high-liquidity item (all misses) → multiplier < 1 but shrunk off 0
+    rows = [{"qty": 10, "filled_qty": 0, "pred_p_fill": 0.8, "status": "expired", "vol_1h_binding": 50_000}
+            for _ in range(4)]
+    cal = calibration.calibrate_fill(rows)
+    m = calibration.fill_multiplier(cal, 50_000)
+    assert 0.1 <= m < 1.0                                   # demoted, shrunk toward 1.0, floored
+    assert calibration.fill_multiplier(None, 50_000) == 1.0  # no calibration → no change
 
 
 def test_beta_skips_rows_without_a_fill_price():

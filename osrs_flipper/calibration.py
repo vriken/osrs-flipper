@@ -77,14 +77,38 @@ def calibrate_beta(rows: list[dict], prior: float, k: int = 20) -> dict:
     return out
 
 
-def calibrate_fill(rows: list[dict]) -> dict:
-    """Fill-probability correction = median(actual_fill_fraction / predicted_p_fill).
+def calibrate_fill(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict:
+    """Fill-probability correction = median(actual_fill_fraction / predicted_p_fill), overall and
+    per liquidity bucket, shrunk toward `prior` (1.0 = model unbiased).
 
-    >1 means the model is too pessimistic (fills more than predicted); <1 too optimistic.
-    Expired attempts (fill fraction 0) pull this down — that's the point."""
-    factors = []
+    >1 ⇒ model too pessimistic (fills more than predicted); <1 ⇒ too optimistic. Expired attempts
+    (fill fraction 0) pull it down — that's the point. Same partial-pooling as β so a handful of
+    fills barely moves it off 1.0. `global_measured` is the raw read; `global` the shrunk one."""
+    pairs = []
     for r in rows:
         ff, p = _fill_frac(r), r.get("pred_p_fill")
         if ff is not None and p and p > 0:
-            factors.append(ff / p)
-    return {"n": len(factors), "correction": statistics.median(factors) if factors else None}
+            pairs.append((liquidity_bucket(r.get("vol_1h_binding") or 0), ff / p))
+    out: dict = {"n": len(pairs), "prior": prior, "buckets": {}}
+    if pairs:
+        g = statistics.median(f for _, f in pairs)
+        out["global_measured"], out["global"] = g, shrink(g, prior, len(pairs), k)
+    else:
+        out["global_measured"], out["global"] = None, prior
+    for name in _BUCKETS:
+        fs = [f for bk, f in pairs if bk == name]
+        if fs:
+            m = statistics.median(fs)
+            out["buckets"][name] = {"n": len(fs), "measured": m,
+                                    "shrunk": shrink(m, out["global"], len(fs), k)}
+    return out
+
+
+def fill_multiplier(cal: dict | None, vol: float, *, lo: float = 0.1, hi: float = 1.5) -> float:
+    """Per-item EV correction: the item's liquidity-bucket shrunk fill factor (else global, else
+    1.0), clamped so a thin/degenerate sample can't zero out or balloon the estimate."""
+    if not cal:
+        return 1.0
+    bucket = cal.get("buckets", {}).get(liquidity_bucket(vol))
+    c = bucket["shrunk"] if bucket else cal.get("global", 1.0)
+    return max(lo, min(hi, c if c is not None else 1.0))
