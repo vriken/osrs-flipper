@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS imported_offers (uuid TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS manual_fills (
     ts BIGINT, item_id INTEGER, name TEXT, is_buy BOOLEAN, qty BIGINT, price BIGINT
 );
+CREATE TABLE IF NOT EXISTS offer_progress (uuid TEXT PRIMARY KEY, accounted_qty BIGINT);
 CREATE TABLE IF NOT EXISTS attempts (
     attempt_id TEXT PRIMARY KEY, ts BIGINT, item_id INTEGER, name TEXT, side TEXT,
     qty BIGINT, limit_px BIGINT, horizon_h DOUBLE,
@@ -200,6 +201,36 @@ class Journal:
         else:
             self.record_sell(item_id, name, qty, price)
         self.con.execute("INSERT INTO imported_offers VALUES (?)", [uuid])
+        return True
+
+    def account_fill_delta(self, uuid: str, item_id: int, name: str, is_buy: bool,
+                           cqit: int, price: int) -> int:
+        """Credit/debit only the units newly filled since last sync for this offer, so a partially
+        sold listing books as it sells — not only on completion. Tracks accounted cQIT per uuid.
+        Migration-safe: a uuid already imported under the old all-or-nothing path counts as
+        accounted, so it isn't re-credited. Returns the delta accounted (0 if none)."""
+        row = self.con.execute("SELECT accounted_qty FROM offer_progress WHERE uuid=?", [uuid]).fetchone()
+        if row is not None:
+            prev = row[0]
+        elif self.con.execute("SELECT 1 FROM imported_offers WHERE uuid=?", [uuid]).fetchone():
+            prev = cqit  # legacy fully-imported offer → already accounted
+        else:
+            prev = 0
+        delta = cqit - prev
+        if delta > 0:
+            (self.record_buy if is_buy else self.record_sell)(item_id, name, delta, price)
+        self.con.execute("INSERT OR REPLACE INTO offer_progress VALUES (?,?)", [uuid, cqit])
+        return max(0, delta)
+
+    def migrate_fill_accounting_if_needed(self, fills) -> bool:
+        """One-time baseline for incremental fill accounting: mark every currently-visible fill as
+        already accounted, so existing partials aren't re-credited on top of your current `bank`
+        read. Credits only deltas from here on. Returns True if it migrated this call."""
+        if self.con.execute("SELECT 1 FROM meta WHERE key='fill_acct_v2'").fetchone():
+            return False
+        for f in fills:
+            self.con.execute("INSERT OR REPLACE INTO offer_progress VALUES (?,?)", [f.uuid, f.qty])
+        self.con.execute("INSERT OR REPLACE INTO meta VALUES ('fill_acct_v2', 1)")
         return True
 
     def units_bought_since(self, since_ts: int) -> dict[int, int]:

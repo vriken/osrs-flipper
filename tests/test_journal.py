@@ -181,3 +181,34 @@ def test_hold_position_adds_without_cash_and_survives_reconcile(j):
     assert j.cash() == cash0                               # cash untouched
     j.reconcile_positions([])                              # no RuneLite buys, but the manual buy keeps it
     assert j.position(7).qty == 5000                       # not wiped by reconcile
+
+
+def test_account_fill_delta_credits_partial_sells_incrementally(j):
+    from osrs_flipper.tax import post_tax_received
+    j.record_buy(GOLD_BAR, "Gold bar", 1000, 100)        # hold 1000
+    cash1 = j.cash()
+    assert j.account_fill_delta("u1", GOLD_BAR, "Gold bar", False, 400, 110) == 400  # 400 sold so far
+    assert j.account_fill_delta("u1", GOLD_BAR, "Gold bar", False, 700, 110) == 300  # +300 new
+    assert j.account_fill_delta("u1", GOLD_BAR, "Gold bar", False, 700, 110) == 0    # re-seen → nothing
+    assert j.cash() == cash1 + 700 * post_tax_received(110, item_id=GOLD_BAR)        # 700 proceeds credited
+    assert j.position(GOLD_BAR).qty == 300               # 1000 − 700 sold
+
+
+def test_account_fill_delta_skips_legacy_imported(j):
+    j.record_buy(GOLD_BAR, "Gold bar", 500, 100)
+    j.con.execute("INSERT INTO imported_offers VALUES ('legacy')")
+    cash0 = j.cash()
+    assert j.account_fill_delta("legacy", GOLD_BAR, "Gold bar", False, 500, 110) == 0  # already accounted
+    assert j.cash() == cash0
+
+
+def test_migrate_baselines_then_credits_only_new(j):
+    from osrs_flipper.runelite import Fill
+    j.record_buy(GOLD_BAR, "Gold bar", 1000, 100)
+    cash0 = j.cash()
+    assert j.migrate_fill_accounting_if_needed(
+        [Fill(uuid="u", item_id=GOLD_BAR, name="Gold bar", is_buy=False, qty=400, price=110, state="SELLING", t_ms=0)])
+    assert j.account_fill_delta("u", GOLD_BAR, "Gold bar", False, 400, 110) == 0   # existing 400 NOT re-credited
+    assert j.cash() == cash0
+    assert j.account_fill_delta("u", GOLD_BAR, "Gold bar", False, 600, 110) == 200  # only new units credit
+    assert j.migrate_fill_accounting_if_needed([]) is False                         # one-time

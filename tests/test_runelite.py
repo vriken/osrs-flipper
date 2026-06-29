@@ -3,7 +3,7 @@
 import types
 
 from osrs_flipper import runelite
-from osrs_flipper.runelite import Offer, holdings_split
+from osrs_flipper.runelite import Offer, all_fills, holdings_split
 
 SAMPLE = {
     "slotTimers": [
@@ -113,15 +113,27 @@ def test_holdings_split_bank_vs_ge():
     def pos(iid, qty):
         return types.SimpleNamespace(item_id=iid, name=f"item{iid}", qty=qty, avg_cost=10.0)
 
-    positions = [pos(1, 10_000), pos(2, 500)]
+    positions = [pos(1, 8000), pos(2, 500)]                   # item1: 8000 held (2000 already sold out)
     offers = [
-        Offer(slot=0, item_id=1, is_buy=False, state="SELLING", qty=6000, price=0, filled=2000),
+        Offer(slot=0, item_id=1, is_buy=False, state="SELLING", qty=6000, price=0, filled=2000),  # 4000 unsold
         Offer(slot=1, item_id=3, is_buy=True, state="BUYING", qty=1000, price=0, filled=300),
     ]
     s = holdings_split(positions, offers)
-    assert s[1]["bank"] == 4000 and s[1]["listed"] == 6000   # 10k owned, 6k listed → 4k in bank
+    assert s[1]["listed"] == 4000 and s[1]["bank"] == 4000   # 8k held, 4k still on the market → 4k bank
     assert s[2]["bank"] == 500 and s[2]["listed"] == 0        # not listed → all in bank
     assert s[3]["incoming"] == 300 and s[3]["bank"] == 0      # being bought, not a position yet
+
+
+def test_all_fills_captures_active_partial_sell():
+    data = {
+        "trades": [{"name": "Gold bar", "id": 2357, "h": {"sO": [
+            {"st": "BOUGHT", "id": 2357, "b": True, "cQIT": 1000, "p": 100, "uuid": "buy1", "t": 1}]}}],
+        "slotTimers": [{"slotIndex": 0, "currentOffer": {
+            "id": 2357, "b": False, "st": "SELLING", "cQIT": 400, "tQIT": 1000, "p": 110, "uuid": "sell1"}}],
+    }
+    fills = {f.uuid: f for f in all_fills(data, {2357: "Gold bar"})}
+    assert fills["buy1"].is_buy and fills["buy1"].qty == 1000
+    assert not fills["sell1"].is_buy and fills["sell1"].qty == 400   # active partial sell captured
 
 
 def test_holdings_split_flags_drift():
