@@ -35,6 +35,10 @@ export OSRS_FLIPPER_CONTACT="you@example or @you on Discord"   # required by the
 Optional environment overrides: `OSRS_FLIPPER_BANKROLL` (default 200000),
 `OSRS_FLIPPER_MEMBERS=1` (default F2P-only), `OSRS_FLIPPER_DISCORD_WEBHOOK`.
 
+Set `OSRS_FLIPPER_DISCORD_WEBHOOK` and the trade terminal auto-starts a background watcher
+that pushes a Discord alert when an offer needs you (filled → collect, margin gone, stale) —
+so you can step away. Control it in-terminal with `alerts on|off|test`.
+
 ## Usage
 
 ```bash

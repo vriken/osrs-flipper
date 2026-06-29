@@ -137,3 +137,6 @@ REVIEW_MARGIN_FLOOR = int(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_FLOOR", 2))
 
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
+# Background attention monitor: how often to poll RuneLite for offers that need you
+# (filled → collect, margin gone, stale). Pushes to Discord only on NEW events (de-duped).
+ALERT_POLL_S = int(os.environ.get("OSRS_FLIPPER_ALERT_POLL_S", 60))

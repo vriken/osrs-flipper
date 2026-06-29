@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 
 import pandas as pd
@@ -11,6 +12,7 @@ from .http import get_session
 
 _ANSI = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m", "bold": "\033[1m", "reset": "\033[0m"}
 _USE_COLOR = sys.stdout.isatty()
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")  # strip colour codes before sending to Discord
 
 
 def color(text: str, c: str) -> str:
@@ -228,10 +230,21 @@ def format_quote(q) -> str:
     return "\n".join(lines)
 
 
-def to_discord(content: str, webhook_url: str | None = None) -> bool:
-    """Post a fenced message to a Discord webhook. Returns True on success."""
+def post_discord(content: str, webhook_url: str | None = None) -> tuple[bool, str]:
+    """Post a fenced message to a Discord webhook. Returns (ok, detail) — detail explains
+    the failure (no webhook / HTTP status / exception) so callers can surface why, instead
+    of a bare silent False. ANSI colour codes are stripped (they render as garbage in Discord)."""
     url = webhook_url or config.DISCORD_WEBHOOK_URL
     if not url:
-        return False
-    resp = get_session().post(url, json={"content": f"```\n{content[:1900]}\n```"}, timeout=15)
-    return resp.ok
+        return False, "no webhook configured — set OSRS_FLIPPER_DISCORD_WEBHOOK"
+    clean = _ANSI_RE.sub("", content)[:1900]
+    try:
+        resp = get_session().post(url, json={"content": f"```\n{clean}\n```"}, timeout=config.HTTP_TIMEOUT)
+        return (True, "sent") if resp.ok else (False, f"HTTP {resp.status_code}: {resp.text[:120]}")
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def to_discord(content: str, webhook_url: str | None = None) -> bool:
+    """Back-compat boolean wrapper around post_discord (True on success)."""
+    return post_discord(content, webhook_url)[0]
