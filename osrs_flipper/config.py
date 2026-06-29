@@ -102,11 +102,20 @@ MIN_PRICE = 50  # ignore sub-tax-threshold junk
 MAX_PRICE = None  # set to cap by item price; None = no cap
 HIGH_VALUE_THRESHOLD = 250_000_000  # above this, effective tax dips below 2%
 
+# Ranking blend: the composite score is gp/cycle ÷ fill_eta^time_weight, tilted toward
+# capital efficiency by × margin_pct^SCORE_ROI_WEIGHT. 0 = pure gp (old behaviour); higher =
+# prefer high-ROI flips even when they tie up less capital, so the gold works in *quality*
+# spreads rather than fat-but-thin-margin commodity churn.
+SCORE_ROI_WEIGHT = float(os.environ.get("OSRS_FLIPPER_SCORE_ROI_WEIGHT", 0.5))
+# Daytime HOLD (accumulate) quality floor: don't park overflow cash in a slow hold unless it
+# clears this ROI. Stricter than the 1% active floor — a hold ties capital up for hours, so it
+# must earn its keep; below this, leave the cash liquid to recycle through the active slots.
+HOLD_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_HOLD_MIN_MARGIN", 0.03))
+
 # --- Account type ------------------------------------------------------------
-# Free-to-play accounts can only trade non-members items and have fewer GE slots.
-# Set OSRS_FLIPPER_MEMBERS=1 (or flip the default) once you redeem a bond to unlock
-# the full members market.
-MEMBERS = os.environ.get("OSRS_FLIPPER_MEMBERS", "0") == "1"
+# Members account (bond redeemed): full market + 8 GE slots. Set OSRS_FLIPPER_MEMBERS=0
+# to simulate F2P (non-members items only, 3 slots) — e.g. for testing the F2P path.
+MEMBERS = os.environ.get("OSRS_FLIPPER_MEMBERS", "1") == "1"
 GE_SLOTS = 8 if MEMBERS else 3  # simultaneous active offers — hard cap on parallel flips
 BOND_ITEM_ID = 13190  # F2P-tradeable, tax-exempt; redeeming it converts the account to members
 
@@ -125,6 +134,11 @@ AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wa
 AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sleep
 # Overnight buys need a fat margin cushion so a small overnight price drift can't go red.
 OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN", 0.04))
+# Runway-to-bed switch: when fewer than this many hours remain before AWAKE_END, a flip placed
+# now can't round-trip (buy + sell) before you sleep, so `go` hands you the overnight plan
+# (fat-margin holds safe to leave) instead of fast day flips. ~one balanced round-trip (2h) +
+# buffer. With AWAKE_END=23 and 3h, `go` flips to night trades at 20:00.
+NIGHT_SWITCH_H = float(os.environ.get("OSRS_FLIPPER_NIGHT_SWITCH_H", 3))
 
 # `review` margin-gone guard. The live book is a single noisy last-trade tick; on a thin
 # spread it flickers to 0 constantly, so two guards stop false "cancel/re-quote" alarms:

@@ -51,7 +51,7 @@ gp kept per unit after tax = `post_tax(sell) − buy`. The spread you keep.
 `margin × qty` assuming the accumulated inventory eventually fully sells (no time bound). Distinct from per-cycle profit — never sum it with `gp/cyc`.
 
 **SCORE**:
-The scanner's *ranking key* — a mode-weighted composite, shrunk for the optimizer's curse. NOT a literal gp figure.
+The scanner's *ranking key* — a mode-weighted, ROI-tilted composite (`gp/cycle × margin_pct^roi_w ÷ fill_eta^time_w`), shrunk for the optimizer's curse. NOT a literal gp figure.
 _Avoid_: reading SCORE as "gp"
 
 ## Relationships

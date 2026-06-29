@@ -19,6 +19,20 @@ def test_balanced_uses_sqrt_of_time():
     assert _composite(1000, fill_eta_h=4.0, time_weight=0.5) == 500  # 1000 / sqrt(4)
 
 
+def test_roi_weight_zero_is_old_behaviour():
+    # default and explicit 0 must reproduce the pure-gp composite
+    assert _composite(1000, fill_eta_h=2.0, time_weight=1.0) == 500
+    assert _composite(1000, fill_eta_h=2.0, time_weight=1.0, margin_pct=0.10, roi_weight=0.0) == 500
+
+
+def test_roi_tilt_prefers_capital_efficiency():
+    # same gp/cycle and fill time → the higher-ROI flip scores higher once roi_weight > 0
+    lo = _composite(1000, fill_eta_h=2.0, time_weight=1.0, margin_pct=0.02, roi_weight=1.0)
+    hi = _composite(1000, fill_eta_h=2.0, time_weight=1.0, margin_pct=0.10, roi_weight=1.0)
+    assert hi > lo
+    assert hi == 1000 * 0.10 / 2  # gp/hour × roi
+
+
 def test_unknown_fill_time_unrankable_when_time_matters():
     assert _composite(1000, fill_eta_h=None, time_weight=1.0) == 0.0
     assert _composite(1000, fill_eta_h=None, time_weight=0.0) == 1000  # but fine offline
@@ -107,4 +121,31 @@ def test_penny_spread_staple_still_qualifies_as_a_hold(monkeypatch):
     by_name = {p["name"]: p for p in picks}
     assert by_name["Air rune"]["tier"] == "hold"        # the penny staple is kept, as a hold
     assert by_name["Battlestaff"]["tier"] != "hold"     # the queue-jumpable flip is active
+
+
+def test_hold_quality_floor_drops_low_roi(monkeypatch):
+    # overflow cash only parks in holds that clear HOLD_MIN_MARGIN (3%); a 2% commodity is left
+    # liquid rather than churned, while a 6% spread is kept.
+    df = pd.DataFrame([
+        _candidate(1391, "Battlestaff", 200, 215, margin_abs=10, margin_fast=5),   # active flip
+        _candidate(561, "Quality hold", 100, 107, margin_abs=6, margin_fast=-1),   # 6% → hold
+        _candidate(1117, "Junk hold", 100, 102, margin_abs=2, margin_fast=-1),     # 2% → dropped
+    ])
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    by_name = {p["name"]: p for p in picks}
+    assert by_name["Quality hold"]["tier"] == "hold"
+    assert "Junk hold" not in by_name  # below HOLD_MIN_MARGIN → left liquid, not churned
+
+
+def test_placement_order_ranks_by_roi_not_just_speed(monkeypatch):
+    # two equal-everything holds: the higher-ROI one is placed first (ROI-tilted gp/hour),
+    # not left in scan/df order.
+    df = pd.DataFrame([
+        _candidate(561, "Low ROI", 100, 105, margin_abs=5, margin_fast=-1),    # 5%
+        _candidate(562, "High ROI", 100, 111, margin_abs=10, margin_fast=-1),  # 10%
+    ])
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    assert picks[0]["name"] == "High ROI"
 

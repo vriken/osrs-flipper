@@ -102,8 +102,12 @@ def format_portfolio_summary(df: pd.DataFrame, bankroll: int, slots: int = confi
     line = (f"best {used}-slot allocation deploys {deployed:,.0f} of {bankroll:,.0f} "
             f"({deployed / bankroll * 100:.0f}%, {idle:,.0f} idle)  →  ~{gp_total:,.0f} gp/cycle")
     if idle > 0.5 * bankroll:
-        line += ("\n⚠ over half your cash is idle — F2P flips can't absorb it. Use --mode offline, run "
-                 "more items, or grind toward a bond (members = 8 slots + a far deeper market).")
+        if config.MEMBERS:
+            line += ("\n⚠ over half your cash is idle — not enough flips clear the floor. "
+                     "Use --mode offline or widen the item set.")
+        else:
+            line += ("\n⚠ over half your cash is idle — F2P flips can't absorb it. Use --mode offline, run "
+                     "more items, or grind toward a bond (members = 8 slots + a far deeper market).")
     return line
 
 
@@ -128,8 +132,8 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
             lines.append("  (nothing passed the filters)")
     else:
         lines.append(f"  {'#':>2} {'type':9} {'item':22} {'buy':>7} {'sell':>7} {'qty':>8} "
-                     f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'gp':>9}")
-        lines.append("  " + "-" * 90)
+                     f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'roi%':>6} {'gp':>9}")
+        lines.append("  " + "-" * 97)
         tot_dep = 0.0
         for i, p in enumerate(picks, 1):
             label = p["tier"] if p["tier"] != "hold" else "hold↓"
@@ -137,10 +141,11 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
             fb = p.get("fill_by_h", float("inf"))
             eta_s = f"{eta:.1f}h" if eta < 100 else "—"
             fb_s = f"{fb:.1f}h" if fb < 100 else "—"
+            roi_s = f"{p['margin_abs'] / p['buy_px'] * 100:.1f}%" if p.get("buy_px") else "—"
             lines.append(f"  {i:>2} {label:9} {p['name'][:22]:22} {p['buy_px']:>7,} {p['sell_px']:>7,} "
-                         f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>5} {fb_s:>6} {p['gp']:>9,.0f}")
+                         f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>5} {fb_s:>6} {roi_s:>6} {p['gp']:>9,.0f}")
             tot_dep += p["deploy"]
-        lines.append("  " + "-" * 90)
+        lines.append("  " + "-" * 97)
         active_gp = sum(p["gp"] for p in picks if p["tier"] != "hold")
         hold_gp = sum(p["gp"] for p in picks if p["tier"] == "hold")
         n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
@@ -150,11 +155,16 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
         lines.append(f"  place #1-#{n_now} NOW (your free slots); each next as a slot fills · ~{makespan:.1f}h to place all")
         lines.append("  KEY  gp = active: per buy→sell cycle · hold↓: total once sold (different time bases — not added)")
         lines.append("       ETA = fill once placed · fillBy = when actually bought given your slot count")
+        lines.append("       roi% = margin kept per gp deployed · rows ranked by ROI-tilted gp/hour")
     if held:
         lines.append("  held (selling): " + ", ".join(f"{h.name} ({h.qty:,})" for h in held[:6]))
     if picks and free_slots > 0 and bankroll and idle > 0.5 * bankroll:
-        lines.append("  ⚠ still over half idle — even buy-limit accumulation can't absorb it; "
-                     "the F2P market is the ceiling. A bond opens the members market.")
+        if config.MEMBERS:
+            lines.append("  ⚠ still over half idle — not enough flips clear the quality floor right now; "
+                         "the rest stays liquid rather than churning junk.")
+        else:
+            lines.append("  ⚠ still over half idle — even buy-limit accumulation can't absorb it; "
+                         "the F2P market is the ceiling. A bond opens the members market.")
     return "\n".join(lines)
 
 
