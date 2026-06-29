@@ -195,22 +195,25 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
                 for m in modes}
     taken = {int(i) for i in held_ids}
 
-    def ok(row) -> bool:
-        return (int(row["item_id"]) not in taken
-                and float(row.get("margin_fast", 1)) > 0  # spread survives a queue-jump
-                and float(row["margin_pct"]) >= min_margin)  # return rate worth the capital/risk
+    def ok(row, *, fast: bool) -> bool:
+        if int(row["item_id"]) in taken or float(row["margin_pct"]) < min_margin:
+            return False  # already used, or return rate too thin for the capital/risk
+        # ACTIVE flips queue-jump (buy bid+1 / sell ask-1) → must clear the fast spread.
+        # HOLDS place a passive bid and accumulate over 4h → the patient spread is what they
+        # capture, so high-volume penny-spread staples (Air rune 4→5) belong here, not nowhere.
+        return float(row.get("margin_fast", 1)) > 0 if fast else float(row["margin_abs"]) > 0
 
     picks: list[dict] = []
     for role in roles:  # active: best worth-it flip for the role
         for _, row in rankings[role].iterrows():
-            if ok(row) and _worth_gp(row, int(row["liq_units"]), role) >= min_gp:
+            if ok(row, fast=True) and _worth_gp(row, int(row["liq_units"]), role) >= min_gp:
                 picks.append(_pick_row(row, role, int(row["liq_units"])))
                 taken.add(int(row["item_id"]))
                 break
     for _, row in rankings["balanced"].iterrows():  # hold: accumulate the rest into inventory
         if sum(p["tier"] == "hold" for p in picks) >= max_accumulate:
             break
-        if ok(row) and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp:
+        if ok(row, fast=False) and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp:
             picks.append(_pick_row(row, "hold", int(row["buy_limit_eff"])))
             taken.add(int(row["item_id"]))
 

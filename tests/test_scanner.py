@@ -1,5 +1,8 @@
 """Composite score + shrinkage behaviour."""
 
+import pandas as pd
+
+from osrs_flipper import scanner
 from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _schedule, _shrink, _worth_gp
 
 
@@ -82,4 +85,26 @@ def test_allocate_fair_share_prevents_one_slot_soaking_all():
     out, idle = _allocate([_pick(1, 10**9, 1), _pick(1, 10**9, 1)], 100)
     assert out[0]["deploy"] == 50 and out[1]["deploy"] == 50
     assert idle == 0
+
+
+def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, limit=50_000):
+    return {"item_id": iid, "name": name, "buy_px": buy, "sell_px": sell,
+            "margin_abs": margin_abs, "margin_pct": margin_abs / buy, "margin_fast": margin_fast,
+            "p_complete": 0.9, "liq_units": min(vol, limit), "buy_limit_eff": limit,
+            "buy_rate": 5000.0}
+
+
+def test_penny_spread_staple_still_qualifies_as_a_hold(monkeypatch):
+    # regression: a high-volume 1gp-spread staple (Air rune 4→5) has margin_fast ≤ 0 (a
+    # queue-jump collapses the spread) but a real patient margin. It must accumulate as a
+    # HOLD, not be excluded entirely — otherwise a big F2P bankroll funnels into one item.
+    df = pd.DataFrame([
+        _candidate(561, "Air rune", 4, 5, margin_abs=1, margin_fast=-1),     # penny staple
+        _candidate(1391, "Battlestaff", 200, 215, margin_abs=10, margin_fast=5),  # real fast flip
+    ])
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    by_name = {p["name"]: p for p in picks}
+    assert by_name["Air rune"]["tier"] == "hold"        # the penny staple is kept, as a hold
+    assert by_name["Battlestaff"]["tier"] != "hold"     # the queue-jumpable flip is active
 
