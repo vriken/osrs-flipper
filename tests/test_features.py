@@ -108,6 +108,41 @@ def test_small_adverse_move_within_margin_survives():
     assert df.loc[0, "tradeable"]
 
 
+def test_wide_spread_low_volume_is_suspect():
+    # a fat % spread on thin volume (Curry-leaf-like: 40→59 @ ~900/h) is an illiquidity artifact,
+    # not a capturable flip → flagged suspect (and dropped from the default scan)
+    m = [_mapping(1, "Trap")]
+    df = build_features({1: _latest(59, 40, 60)}, {1: _hourly(59, 40, 900, 900)}, m, now_ts=NOW)
+    assert df.loc[0, "suspect"]
+
+
+def test_wide_spread_high_volume_not_suspect():
+    # a penny staple (fat % spread but huge volume — Air rune 4→5) is real, must NOT be flagged
+    m = [_mapping(1, "Air rune")]
+    df = build_features({1: _latest(5, 4, 60)}, {1: _hourly(5, 4, 159_000, 159_000)}, m, now_ts=NOW)
+    assert not df.loc[0, "suspect"]
+
+
+def test_wide_spread_stale_leg_is_suspect():
+    # wide spread measured with one trade leg 40 min stale = phantom margin across two regimes
+    m = [_mapping(1, "Stale")]
+    lat = {"high": 100, "highTime": NOW - 60, "low": 70, "lowTime": NOW - 2400}  # low leg 40m old
+    # volume (50k) is high enough to clear the spread-vs-volume gate, so suspect here is purely
+    # the stale-leg clause firing
+    df = build_features({1: lat}, {1: _hourly(100, 70, 50_000, 50_000)}, m, now_ts=NOW)
+    assert df.loc[0, "suspect"]
+
+
+def test_hold_units_capped_by_realizable_volume():
+    # illiquid item: hold qty capped by ALPHA(0.1)×vol(900)×HOLD_WINDOW_H(8)=720, not the buy limit
+    m = [_mapping(1, "Thinhold", limit=10_000)]
+    df = build_features({1: _latest(33, 30, 60)}, {1: _hourly(33, 30, 900, 900)}, m, now_ts=NOW)
+    assert df.loc[0, "hold_units"] == 720
+    # liquid item: the buy limit binds instead of volume
+    big = build_features({1: _latest(33, 30, 60)}, {1: _hourly(33, 30, 500_000, 500_000)}, m, now_ts=NOW)
+    assert big.loc[0, "hold_units"] == 10_000
+
+
 def test_now_default_runs():
     m = [_mapping(1, "X")]
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}, m,

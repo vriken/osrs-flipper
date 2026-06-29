@@ -241,8 +241,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         # quality floor: a hold ties capital up for hours, so only park cash in it if it clears
         # HOLD_MIN_MARGIN. Below that, leave the gold liquid to recycle rather than churn junk.
         if (ok(row, fast=False) and float(row["margin_pct"]) >= config.HOLD_MIN_MARGIN
-                and _worth_gp(row, int(row["buy_limit_eff"]), "hold") >= min_gp):
-            picks.append(_pick_row(row, "hold", int(row["buy_limit_eff"])))
+                and _worth_gp(row, int(row["hold_units"]), "hold") >= min_gp):
+            picks.append(_pick_row(row, "hold", int(row["hold_units"])))  # cap by realizable volume
             taken.add(int(row["item_id"]))
 
     allocated, idle = _allocate(picks, bankroll)

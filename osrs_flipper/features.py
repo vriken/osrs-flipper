@@ -135,6 +135,9 @@ def build_features(
             "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
             "buy_limit_eff": buy_limit_eff,  # remaining buy-limit room (4h)
             "liq_units": min(buy_limit_eff, int(math.floor(config.ALPHA * vol_binding))),  # cash-independent absorb cap
+            # realizable hold size: what the market clears at an ALPHA share over the hold window,
+            # capped by buy limit — stops "hoard 4k of a 900/hr item" phantom-spread holds.
+            "hold_units": min(buy_limit_eff, int(math.floor(config.ALPHA * vol_binding * config.HOLD_WINDOW_H))),
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,
@@ -153,7 +156,16 @@ def build_features(
     if df.empty:
         return df
     df["tradeable"] = is_tradeable(df, now_ts)
-    df["suspect"] = (df["rel_spread"] > 0.10) & (df["vol_1h_binding"] < config.V_SUSPICIOUS_1H)
+    # spread sanity: thin-and-wide, wide-but-unbacked-by-volume, or wide-across-a-stale-leg → the
+    # spread is an illiquidity/staleness artifact you can't actually capture, not a real flip.
+    rel, vol = df["rel_spread"], df["vol_1h_binding"]
+    stale = df["staleness_s"].fillna(1e12)
+    wide = rel > config.REL_SPREAD_SUSPECT
+    df["suspect"] = (
+        ((rel > 0.10) & (vol < config.V_SUSPICIOUS_1H))
+        | (wide & (vol < config.SPREAD_VOL_K * rel))
+        | (wide & (stale > config.STALE_LEG_MAX_S))
+    )
     return df
 
 
