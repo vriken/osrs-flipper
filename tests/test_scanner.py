@@ -101,11 +101,11 @@ def test_allocate_fair_share_prevents_one_slot_soaking_all():
     assert idle == 0
 
 
-def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, limit=50_000):
+def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, limit=50_000, fill_mult=1.0):
     return {"item_id": iid, "name": name, "buy_px": buy, "sell_px": sell,
             "margin_abs": margin_abs, "margin_pct": margin_abs / buy, "margin_fast": margin_fast,
             "p_complete": 0.9, "liq_units": min(vol, limit), "buy_limit_eff": limit,
-            "hold_units": min(vol, limit), "buy_rate": 5000.0}
+            "hold_units": min(vol, limit), "buy_rate": 5000.0, "fill_mult": fill_mult}
 
 
 def test_one_gp_tick_flip_is_dropped(monkeypatch):
@@ -136,6 +136,15 @@ def test_hold_quality_floor_drops_low_roi(monkeypatch):
     by_name = {p["name"]: p for p in picks}
     assert by_name["Quality hold"]["tier"] == "hold"
     assert "Junk hold" not in by_name  # below HOLD_MIN_MARGIN → left liquid, not churned
+
+
+def test_build_portfolio_scales_gp_by_fill_mult(monkeypatch):
+    # a flip with calibrated fill_mult 0.5 → its expected gp is halved (model self-corrects)
+    df = pd.DataFrame([_candidate(1, "A", 100, 110, margin_abs=10, margin_fast=5, fill_mult=0.5)])
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    p = picks[0]
+    assert abs(p["gp"] - 10 * p["qty"] * 0.9 * 0.5) < 1   # margin × qty × p_complete × fill_mult
 
 
 def test_placement_order_ranks_by_roi_not_just_speed(monkeypatch):

@@ -6,7 +6,7 @@ import statistics
 
 import pandas as pd
 
-from . import api, config
+from . import api, calibration, config
 from .features import build_features
 from .persistence import fetch_persistence
 
@@ -60,6 +60,7 @@ def scan(
     mode: str = "balanced",
     min_gp: int = 0,
     limit_used: dict[int, int] | None = None,
+    fill_cal: dict | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -98,6 +99,12 @@ def scan(
     if df.empty:
         return df
 
+    # auto-applied fill calibration: deflate EV by the (shrunk, per-liquidity) measured fill rate,
+    # so the model self-corrects from your real fills. 1.0 per item when there's no calibration yet.
+    df["fill_mult"] = [calibration.fill_multiplier(fill_cal, v) for v in df["vol_1h_binding"]]
+    df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"]
+    df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"]
+
     df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=config.SCORE_ROI_WEIGHT)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
     df = df[df["score"] > 0]
@@ -109,13 +116,14 @@ def scan(
             df = df[df[base_col] >= min_gp]
         return df.head(top)
 
-    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode)
+    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal)
     if min_gp and not out.empty:
         out = out[out["exp_gp_cycle_adj"] >= min_gp]  # drop flips too small to be worth a slot
     return out.head(top).reset_index(drop=True)
 
 
-def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataFrame:
+def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
+                       fill_cal: dict | None = None) -> pd.DataFrame:
     """Deep-check the top snapshot candidates: re-price each with the quote optimiser (one
     source of truth — price-specific fills), then shrink the scores against the curse.
 
@@ -135,6 +143,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
         if not q or q.ev <= 0 or q.net_unit < config.MIN_NET_MARGIN:
             continue  # integer-tick flip — fat ROI%, doesn't fill
         reliability = st["persist_factor"] * min(1.0, q.p_round / 0.5)
+        mult = calibration.fill_multiplier(fill_cal, row.get("vol_1h_binding") or 0)
         rows.append({
             **row.to_dict(),
             "buy_px": q.buy_px, "sell_px": q.sell_px, "margin_abs": q.net_unit,
@@ -142,8 +151,8 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str) -> pd.DataF
             "capital_deployed": q.buy_px * int(row["capacity"]),
             "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
-            "exp_gp_cycle_adj": q.ev, "reliability": reliability,
-            "raw_score": q.ev / horizon * _roi_mult(
+            "exp_gp_cycle_adj": q.ev * mult, "reliability": reliability, "fill_mult": mult,
+            "raw_score": q.ev / horizon * mult * _roi_mult(
                 q.net_unit / q.buy_px if q.buy_px else None, config.SCORE_ROI_WEIGHT),
         })
     if not rows:
@@ -183,6 +192,7 @@ def _pick_row(row, tier: str, cap_units: int) -> dict:
         "buy_px": int(row["buy_px"]), "sell_px": int(row["sell_px"]),
         "margin_abs": int(row["margin_abs"]), "p_complete": float(row["p_complete"]),
         "cap_units": max(0, cap_units), "buy_rate": float(row.get("buy_rate", 0.0)),
+        "fill_mult": float(row.get("fill_mult", 1.0)),
     }
 
 
@@ -202,8 +212,9 @@ def _place_score(p: dict) -> float:
 
 
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
-                    max_accumulate: int = 6, min_gp: int | None = None,
-                    min_margin: float = 0.01, limit_used: dict[int, int] | None = None) -> tuple[list[dict], float]:
+                    max_accumulate: int = 6, min_gp: int | None = None, min_margin: float = 0.01,
+                    limit_used: dict[int, int] | None = None,
+                    fill_cal: dict | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
                 fast-fill liquidity — what you work in your slots right now and cycle.
@@ -222,7 +233,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     # we rank every slot on the balanced (2h) horizon.
     roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
-    rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used)
+    rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
+                        fill_cal=fill_cal)
                 for m in modes}
     taken = {int(i) for i in held_ids}
 
@@ -238,7 +250,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     picks: list[dict] = []
     for role in roles:  # active: best worth-it flip for the role
         for _, row in rankings[role].iterrows():
-            if ok(row, fast=True) and _worth_gp(row, int(row["liq_units"]), role) >= min_gp:
+            fm = float(row.get("fill_mult", 1.0))  # calibrated fill discount
+            if ok(row, fast=True) and _worth_gp(row, int(row["liq_units"]), role) * fm >= min_gp:
                 picks.append(_pick_row(row, role, int(row["liq_units"])))
                 taken.add(int(row["item_id"]))
                 break
@@ -248,14 +261,14 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         # quality floor: a hold ties capital up for hours, so only park cash in it if it clears
         # HOLD_MIN_MARGIN. Below that, leave the gold liquid to recycle rather than churn junk.
         if (ok(row, fast=False) and float(row["margin_pct"]) >= config.HOLD_MIN_MARGIN
-                and _worth_gp(row, int(row["hold_units"]), "hold") >= min_gp):
+                and _worth_gp(row, int(row["hold_units"]), "hold") * float(row.get("fill_mult", 1.0)) >= min_gp):
             picks.append(_pick_row(row, "hold", int(row["hold_units"])))  # cap by realizable volume
             taken.add(int(row["item_id"]))
 
     allocated, idle = _allocate(picks, bankroll)
     for p in allocated:  # active gp is per-cycle; hold gp is the spread captured once sold
         fill = p["p_complete"] if p["tier"] != "hold" else 1.0
-        p["gp"] = p["margin_abs"] * p["qty"] * fill
+        p["gp"] = p["margin_abs"] * p["qty"] * fill * p.get("fill_mult", 1.0)  # calibrated fill
         br = p.get("buy_rate", 0.0)
         p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
     # placement order: best ROI-tilted gp/hour first, so the limited free slots go to the
