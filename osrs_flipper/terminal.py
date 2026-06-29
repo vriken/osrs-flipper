@@ -11,6 +11,7 @@ Commands (type `help`):
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   overnight [item]         plan one big ~8h buy to leave while you sleep
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
+  anomaly | manip          price dislocations on abnormal volume (pumps to avoid / dumps to revert-buy)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
   buy <item> <quantity> <price>    log a buy fill
@@ -694,6 +695,29 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_anomaly(self, args: list[str]) -> None:
+        """Detect price dislocations on abnormal volume — pumps (avoid / sell into) and over-dumps
+        (mean-revert buy). Only the RECOVER/DUMP side is exploitable in OSRS (no shorting)."""
+        from . import anomaly
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        print("  scanning for dislocations (deep-checks top candidates — a few API calls)…")
+        hits = anomaly.detect(api.latest(), api.one_hour(), names, api.timeseries)
+        if not hits:
+            print("  no anomalies — nothing liquid is dislocated from baseline on abnormal volume right now")
+            return
+        print(f"  {'phase':8} {'item':22} {'live':>8} {'baseline':>9} {'div':>7} {'vol_z':>6} {'revertEV':>9}  verdict")
+        print("  " + "-" * 110)
+        for h in hits[:15]:
+            ev = f"{h['revert_ev_unit']:+,}" if h["div_now"] < 0 else "—"
+            c = "green" if h["div_now"] < 0 and h["revert_ev_unit"] > 0 else ("red" if h["div_now"] > 0 else None)
+            line = (f"  {h['phase']:8} {h['name'][:22]:22} {h['live_mid']:>8,.0f} {h['baseline']:>9,.0f} "
+                    f"{h['div_now'] * 100:>+6.1f}% {h['vol_z']:>6.1f} {ev:>9}  {h['verdict']}")
+            print(alert.color(line, c) if c else line)
+        print("  KEY  div = live vs recent baseline · vol_z = how abnormal current volume is · "
+              "revertEV = gp/unit buying live, selling back at baseline")
+        print("  ⚡ only RECOVER↑/DUMP↓ (over-dumped) are exploitable here — you can't short a pump; "
+              "and the buy limit caps size. Treat as opportunistic, verify before committing.")
+
     def cmd_progress(self, args: list[str]) -> None:
         """Net-worth progress chart: realized history + live (marked-to-market) equity, projected
         to 10M/100M at a growth rate re-fit from your own trade history. Saves + opens a PNG."""
@@ -804,6 +828,8 @@ class Terminal:
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
+            "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
+            "manip": lambda a: self.cmd_anomaly(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),
