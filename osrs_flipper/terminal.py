@@ -12,6 +12,7 @@ Commands (type `help`):
   overnight [item]         plan one big ~8h buy to leave while you sleep
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
   anomaly | manip          price dislocations on abnormal volume (pumps to avoid / dumps to revert-buy)
+  why <item>               explain an item's price: live vs recent baselines, volume z, falling-knife check
   quote <item> [qty]       solve optimal buy/sell prices for an item
   sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
   buy <item> <quantity> <price>    log a buy fill
@@ -443,10 +444,27 @@ class Terminal:
                                                   free_slots=buy_slots, limit_used=self._limit_used(rl))
             src = "runelite" if rl is not None else "assumed"
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
+            self._explain_picks(picks)  # one-line "why" for each buy you're about to place
         elif buy_slots > 0:
             self._overnight_plan(cash)
 
         print("  " + alert.color("NEXT: " + self._next_action(refined, sell_rows, free, picks), "bold"))
+
+    def _explain_picks(self, picks: list, limit: int = 5) -> None:
+        """Print a one-line price-position 'why' for each buy being placed now (bounded — one
+        /timeseries fetch each). Silent on any error so it never breaks the dashboard."""
+        from . import anomaly
+        lat, hr = api.latest(), api.one_hour()
+        shown = 0
+        for i, p in enumerate(picks, 1):
+            if p.get("place_at_h", 0) != 0 or shown >= limit:
+                continue
+            try:
+                a = anomaly.assess(p["item_id"], lat, hr, api.timeseries)
+                print(f"     why #{i} {str(p['name'])[:18]:18} {anomaly.summary_line(a)}")
+                shown += 1
+            except Exception:  # noqa: BLE001 — explanation is best-effort, never fatal
+                pass
 
     @staticmethod
     def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
@@ -695,6 +713,34 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_why(self, args: list[str]) -> None:
+        """Explain an item's price position: live vs its recent baselines (1d/2wk/3mo/30d), volume
+        z-score, slope, and phase verdict — is it normal, a real dip to buy, or a falling knife?
+          why <item>"""
+        if not args:
+            print("  usage: why <item>")
+            return
+        from . import anomaly
+        meta = self.resolve(" ".join(args))
+        if not meta:
+            print("  item not found")
+            return
+        name = meta.get("name", str(meta["id"]))
+        a = anomaly.assess(meta["id"], api.latest(), api.one_hour(), api.timeseries, deep=True)
+        if a["live_mid"] is None or not a["baselines"]:
+            print(f"  {name}: no live price / history to assess")
+            return
+        print(f"  === {name} — why ===")
+        print(f"  live bid {a['live_bid']:,} / ask {a['live_ask']:,}  ·  1h avg {a['avg_low']}/{a['avg_high']}")
+        print(f"  {'window':6} {'baseline':>9} {'vs live':>8}")
+        for lbl in ("1d", "2wk", "3mo", "30d"):
+            if lbl in a["baselines"]:
+                b = a["baselines"][lbl]
+                print(f"  {lbl:6} {b:>9,.0f} {(a['live_mid'] - b) / b * 100:>+7.0f}%")
+        print(f"  vol_z {a['vol_z']:+.1f} (abnormal ≥{config.ANOMALY_VOL_Z_MIN:.0f})  ·  "
+              f"slope {a['slope']:+.1f}  ·  phase {a['phase'] or '—'}")
+        print("  → " + alert.color(anomaly.summary_line(a), "bold"))
+
     def cmd_anomaly(self, args: list[str]) -> None:
         """Detect price dislocations on abnormal volume — pumps (avoid / sell into) and over-dumps
         (mean-revert buy). Only the RECOVER/DUMP side is exploitable in OSRS (no shorting)."""
@@ -829,7 +875,7 @@ class Terminal:
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
             "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
             "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
-            "manip": lambda a: self.cmd_anomaly(a),
+            "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),
