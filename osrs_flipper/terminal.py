@@ -21,6 +21,7 @@ Commands (type `help`):
   calibrate | calib        measure empirical β + fill correction from your real attempts
   pos                      open positions + unrealised P&L (vs live bid)
   inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
+  reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
   pnl                      realised P&L, cash, equity, bond progress
   progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
@@ -285,12 +286,17 @@ class Terminal:
             self.j.expire_stale_attempts(int(time.time()))
             return 0
         n = 0
-        for f in runelite.completed_offers(rl):
+        fills = runelite.completed_offers(rl)
+        for f in fills:
             if self.j.import_offer(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price):
                 n += 1
                 self.j.reconcile_fill(f.item_id, f.is_buy, f.qty, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
         self._autodetect_placements(rl)
+        # authoritative position re-sync from the full offer history — heals phantoms left by
+        # out-of-order incremental imports (the silent-cap bug).
+        for name, old, new in self.j.reconcile_positions(fills):
+            print(f"  reconciled {name}: {old:,} → {new:,} held (matched to RuneLite's offer history)")
         self.j.expire_stale_attempts(int(time.time()))
         return n
 
@@ -739,6 +745,23 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_reconcile(self, args: list[str]) -> None:
+        """Recompute every held position from RuneLite's full completed-offer history (authoritative,
+        order-independent), correcting phantoms from out-of-order imports. Runs automatically on each
+        sync; this shows the result on demand."""
+        rl = runelite.read()
+        if rl is None:
+            print("  no RuneLite data — can't reconcile against the offer history")
+            return
+        drift = self.j.reconcile_positions(runelite.completed_offers(rl))
+        if not drift:
+            print("  positions already match RuneLite's offer history — nothing to correct")
+            return
+        for name, old, new in drift:
+            print(f"  {name}: {old:,} → {new:,} held  (corrected)")
+        print(f"  reconciled {len(drift)} position(s). Cash/P&L from a historically mis-recorded sell "
+              "aren't auto-rewritten — run `bank <gp>` to resync cash if it looks off.")
+
     def cmd_inventory(self, args: list[str]) -> None:
         """What you actually hold, split BANK (sellable now) vs IN-GE (listed for sale / being
         bought), reconciled from your transactions against live RuneLite offers. Alias: inv."""
@@ -930,6 +953,7 @@ class Terminal:
             "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
             "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
             "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
+            "reconcile": lambda a: self.cmd_reconcile(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),

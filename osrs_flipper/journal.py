@@ -103,21 +103,60 @@ class Journal:
         return cost
 
     def record_sell(self, item_id: int, name: str, qty: int, price: int) -> tuple[float, float]:
-        """Log a sell fill. Returns (net proceeds, realised pnl). Applies GE tax."""
+        """Log a sell fill (full quantity). Returns (net proceeds, realised pnl). Applies GE tax.
+
+        Records the FULL qty sold — never silently caps at the tracked position. Capping (the old
+        `min(qty, pos.qty)`) silently dropped the excess when a sale's matching buy was imported
+        out of order, leaving a phantom position. An over-sell now floors the position at 0;
+        `reconcile_positions` is the authoritative correction from the full offer history."""
         pos = self.position(item_id)
         avg_cost = pos.avg_cost if pos else 0.0
-        sell_qty = min(qty, pos.qty) if pos else 0
         tax_unit = ge_tax(price, item_id=item_id)
         net_unit = price - tax_unit
-        proceeds = sell_qty * net_unit
-        realized = sell_qty * (net_unit - avg_cost)
-        if pos:
-            self.con.execute("UPDATE positions SET qty=qty-? WHERE item_id=?", [sell_qty, item_id])
+        proceeds = qty * net_unit
+        realized = qty * (net_unit - avg_cost)
+        new_qty = max(0, (pos.qty if pos else 0) - qty)
+        self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
+                         [item_id, name, new_qty, avg_cost if new_qty else 0.0])
         self._adjust_cash(proceeds)
         self.con.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?,?,?)",
-                         [int(time.time()), item_id, name, "SELL", sell_qty, price,
-                          tax_unit * sell_qty, proceeds, realized])
+                         [int(time.time()), item_id, name, "SELL", qty, price,
+                          tax_unit * qty, proceeds, realized])
         return proceeds, realized
+
+    def reconcile_positions(self, fills) -> list[tuple[str, int, int]]:
+        """Recompute each held position from the authoritative completed-offer history — Σbought −
+        Σsold per item, which is ORDER-INDEPENDENT, so out-of-order incremental imports can't leave
+        a phantom. Only touches items that appear in `fills`; returns [(name, old_qty, new_qty)]
+        for the ones that changed, so the drift is surfaced rather than silently fudged.
+
+        `fills` is RuneLite's full completed-offer list (runelite.completed_offers)."""
+        agg: dict[int, dict[str, Any]] = {}
+        for f in fills:
+            a = agg.setdefault(f.item_id, {"name": f.name, "bought": 0, "sold": 0, "cost": 0})
+            if f.is_buy:
+                a["bought"] += f.qty
+                a["cost"] += f.qty * f.price
+            else:
+                a["sold"] += f.qty
+        drift = []
+        for iid, a in agg.items():
+            if a["bought"] == 0:
+                continue  # only sells in history → the buy predates RuneLite's window; can't
+                          # trust the net, so leave the position rather than wrongly clear it
+            new_qty = max(0, a["bought"] - a["sold"])
+            cur = self.position(iid)
+            old_qty = cur.qty if cur else 0
+            if new_qty == old_qty:
+                continue
+            drift.append((a["name"], old_qty, new_qty))
+            if new_qty > 0:
+                avg = a["cost"] / a["bought"] if a["bought"] else 0.0
+                self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
+                                 [iid, a["name"], new_qty, avg])
+            else:
+                self.con.execute("DELETE FROM positions WHERE item_id=?", [iid])
+        return drift
 
     # --- reporting -----------------------------------------------------------
     def import_offer(self, uuid: str, item_id: int, name: str, is_buy: bool,
