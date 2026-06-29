@@ -125,9 +125,9 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
         else:
             lines.append("  (nothing passed the filters)")
     else:
-        lines.append(f"  {'#':>2} {'type':9} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} "
+        lines.append(f"  {'#':>2} {'type':9} {'item':22} {'buy':>7} {'sell':>7} {'qty':>8} "
                      f"{'deploy':>9} {'ETA':>5} {'fillBy':>6} {'gp':>9}")
-        lines.append("  " + "-" * 84)
+        lines.append("  " + "-" * 90)
         tot_dep = 0.0
         for i, p in enumerate(picks, 1):
             label = p["tier"] if p["tier"] != "hold" else "hold↓"
@@ -135,10 +135,10 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
             fb = p.get("fill_by_h", float("inf"))
             eta_s = f"{eta:.1f}h" if eta < 100 else "—"
             fb_s = f"{fb:.1f}h" if fb < 100 else "—"
-            lines.append(f"  {i:>2} {label:9} {p['name'][:16]:16} {p['buy_px']:>7,} {p['sell_px']:>7,} "
+            lines.append(f"  {i:>2} {label:9} {p['name'][:22]:22} {p['buy_px']:>7,} {p['sell_px']:>7,} "
                          f"{p['qty']:>8,} {p['deploy']:>9,} {eta_s:>5} {fb_s:>6} {p['gp']:>9,.0f}")
             tot_dep += p["deploy"]
-        lines.append("  " + "-" * 84)
+        lines.append("  " + "-" * 90)
         active_gp = sum(p["gp"] for p in picks if p["tier"] != "hold")
         hold_gp = sum(p["gp"] for p in picks if p["tier"] == "hold")
         n_now = sum(1 for p in picks if p.get("place_at_h", 0) == 0)
@@ -161,11 +161,11 @@ def format_overnight(rows: list[dict], cash: int, free: int) -> str:
     if not rows:
         return "  no safe overnight buys for your free slots right now"
     lines = [f"  {free} free slot(s) — place these {len(rows)} buy(s) now, then sleep:",
-             f"  {'#':>2} {'item':16} {'buy':>7} {'sell':>7} {'qty':>8} {'deploy':>9} {'fill8h':>6} {'profit':>9}"]
+             f"  {'#':>2} {'item':22} {'buy':>7} {'sell':>7} {'qty':>8} {'deploy':>9} {'fill8h':>6} {'profit':>9}"]
     tot_dep = tot_prof = 0.0
     for i, r in enumerate(rows, 1):
         prof = color(f"+{r['profit']:,.0f}", "green")
-        lines.append(f"  {i:>2} {str(r['name'])[:16]:16} {r['buy']:>7,} {r['sell']:>7,} "
+        lines.append(f"  {i:>2} {str(r['name'])[:22]:22} {r['buy']:>7,} {r['sell']:>7,} "
                      f"{r['qty']:>8,} {r['deploy']:>9,} {r['fill8h']:>5.0%} {prof:>9}")
         tot_dep += r["deploy"]
         tot_prof += r["profit"]
@@ -193,11 +193,11 @@ def format_sell_plan(rows: list[dict]) -> str:
     if not rows:
         return ""
     lines = ["  SELL your holdings:",
-             f"  {'item':16} {'qty':>7} {'avg':>8} {'sell@':>8} {'eta':>6} {'profit':>9}"]
+             f"  {'item':22} {'qty':>7} {'avg':>8} {'sell@':>8} {'eta':>6} {'profit':>9}"]
     for r in rows:
         eta_s = f"{r['eta_h']:.1f}h" if r["eta_h"] < 100 else "—"
         prof = color(f"{r['profit']:+,.0f}", "green" if r["profit"] >= 0 else "red")
-        lines.append(f"  {str(r['name'])[:16]:16} {r['qty']:>7,} {r['avg_cost']:>8,.0f} "
+        lines.append(f"  {str(r['name'])[:22]:22} {r['qty']:>7,} {r['avg_cost']:>8,.0f} "
                      f"{r['sell_px']:>8,} {eta_s:>6} {prof:>9}")
     return "\n".join(lines)
 

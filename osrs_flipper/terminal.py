@@ -120,7 +120,7 @@ class Terminal:
             print("  (no predictions yet — they're logged each time you `quote` an item)")
             return
         for p in rows:
-            print(f"  [{p['source']:5}] {p['name'][:16]:16} qty {p['qty']:>7,}  buy {p['buy_px']:>7,}  "
+            print(f"  [{p['source']:5}] {p['name'][:22]:22} qty {p['qty']:>7,}  buy {p['buy_px']:>7,}  "
                   f"sell {p['sell_px']:>7,}  round {p['p_round']:>4.0%}  EV {p['ev']:>8,.0f}")
 
     def _trade(self, args: list[str], side: str) -> None:
@@ -229,11 +229,11 @@ class Terminal:
             print("  no active offers (or no RuneLite data)")
             return
         names = {r["id"]: r["name"] for r in api.mapping()}
-        print(f"  {'slot':4} {'item':16} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
+        print(f"  {'slot':4} {'item':22} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
         for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
             text, c = _VERDICTS[v]
             eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
-            print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:16]:16} {'BUY' if o.is_buy else 'SELL':4} "
+            print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:22]:22} {'BUY' if o.is_buy else 'SELL':4} "
                   f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {alert.color(text, c) if c else text}")
         print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
 
@@ -375,7 +375,7 @@ class Terminal:
         print(f"  GE slots: {occ} occupied, {free} free (of {config.GE_SLOTS})")
         for o in sorted(offers, key=lambda x: x.slot):
             side = "BUY " if o.is_buy else "SELL"
-            print(f"  slot {o.slot}  {side} {str(names.get(o.item_id, o.item_id))[:18]:18} x{o.qty:<6} {o.state}")
+            print(f"  slot {o.slot}  {side} {str(names.get(o.item_id, o.item_id))[:22]:22} x{o.qty:<6} {o.state}")
 
     def cmd_sellquote(self, args: list[str]) -> None:
         if not args:
@@ -427,7 +427,7 @@ class Terminal:
         n = int(args[0]) if args and args[0].isdigit() else 10
         for t in self.j.recent(n):
             tag = f"{t['pnl']:+,.0f}" if t["side"] == "SELL" else ""
-            print(f"  {t['side']:4} {t['qty']:>8,} {t['name'][:18]:18} @ {t['price']:>7,} {tag}")
+            print(f"  {t['side']:4} {t['qty']:>8,} {t['name'][:22]:22} @ {t['price']:>7,} {tag}")
 
     def cmd_reload(self, args: list[str]) -> None:
         """Re-exec the terminal in place to pick up new code (DB/state persists)."""
