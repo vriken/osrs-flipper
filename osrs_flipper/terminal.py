@@ -256,8 +256,7 @@ class Terminal:
             free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
         # don't recommend what you already hold OR already have an offer on
         exclude = [h.item_id for h in held] + active_ids
-        active_sell_ids = {o.item_id for o in offers if not o.is_buy}
-        sell_rows = self._sell_plan(held, active_sell_ids)
+        sell_rows = self._sell_plan(held, set(active_ids))  # skip held items with any live offer
         buy_slots = max(0, free - len(sell_rows))  # reserve a slot per pending sell listing
         if sell_rows:
             print(alert.format_sell_plan(sell_rows))
@@ -361,13 +360,15 @@ class Terminal:
                   f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {alert.color(text, c) if c else text}")
         print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
 
-    def _sell_plan(self, held: list, active_sell_ids: set) -> list[dict]:
-        """Recommended sell price + expected profit for each held item not already listed."""
+    def _sell_plan(self, held: list, busy_ids: set) -> list[dict]:
+        """Recommended sell price + expected profit for each held item with NO active offer.
+        `busy_ids` = items with any live offer: already-listed sells (don't re-list) AND active
+        buys (you're accumulating more — don't sell the partial out from under yourself)."""
         from .tax import breakeven_sell, post_tax_received
         hourly, latest = api.one_hour(), api.latest()
         rows = []
         for p in held:
-            if p.item_id in active_sell_ids:
+            if p.item_id in busy_ids:
                 continue
             h = hourly.get(p.item_id, {})
             ask = h.get("avgHighPrice") or (latest.get(p.item_id, {}) or {}).get("high")
@@ -457,8 +458,8 @@ class Terminal:
                     print(hint)
                 refined.append((o, v, elapsed_h, eta_h, prog))
 
-        active_sell_ids = {o.item_id for o in offers if not o.is_buy}  # SELL holdings (the old port tail)
-        sell_rows = self._sell_plan(held, active_sell_ids)
+        busy_ids = {o.item_id for o in offers}  # skip held items with ANY live offer (selling / accumulating)
+        sell_rows = self._sell_plan(held, busy_ids)
         if sell_rows:
             print(alert.format_sell_plan(sell_rows))
             self._explain_recovery(sell_rows)  # underwater → bounce-likely (hold/double) vs cut
@@ -653,9 +654,10 @@ class Terminal:
         if free <= 0:
             print("  no free slots — collect or cancel an offer first, then `overnight`")
             return
-        # reserve a slot for each holding still needing a sell listing — a sell occupies a slot too
-        active_sell_ids = {o.item_id for o in offers if not o.is_buy}
-        pending_sells = sum(1 for h in held if h.item_id not in active_sell_ids)
+        # reserve a slot for each holding still needing a sell listing — a sell occupies a slot too.
+        # holdings with ANY live offer (being sold OR being accumulated) don't need a reserved slot.
+        busy_ids = {o.item_id for o in offers}
+        pending_sells = sum(1 for h in held if h.item_id not in busy_ids)
         free = max(0, free - pending_sells)
         if free <= 0:
             print(f"  all free slot(s) reserved for {pending_sells} sell listing(s) — list those first")
