@@ -146,6 +146,14 @@ class Journal:
         self.record_manual_fill(item_id, name, is_buy=False, qty=qty)
         self.con.execute("DELETE FROM positions WHERE item_id=?", [item_id])
 
+    def hold_position(self, item_id: int, name: str, qty: int, avg_cost: float) -> None:
+        """Declare a holding acquired off this device (inverse of forget): record a manual BUY (so
+        the reconcile keeps it) and set the position. Cash/P&L untouched — the gold was already
+        spent elsewhere and your `bank` read already reflects it."""
+        self.record_manual_fill(item_id, name, is_buy=True, qty=qty, price=int(round(avg_cost)))
+        self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
+                         [item_id, name, qty, float(avg_cost)])
+
     def reconcile_positions(self, fills) -> list[tuple[str, int, int]]:
         """Recompute each held position from the authoritative offer history — Σbought − Σsold per
         item, which is ORDER-INDEPENDENT, so out-of-order incremental imports can't leave a phantom.
