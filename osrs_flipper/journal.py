@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     source TEXT DEFAULT 'quote'
 );
 CREATE TABLE IF NOT EXISTS imported_offers (uuid TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS manual_fills (
+    ts BIGINT, item_id INTEGER, name TEXT, is_buy BOOLEAN, qty BIGINT, price BIGINT
+);
 CREATE TABLE IF NOT EXISTS attempts (
     attempt_id TEXT PRIMARY KEY, ts BIGINT, item_id INTEGER, name TEXT, side TEXT,
     qty BIGINT, limit_px BIGINT, horizon_h DOUBLE,
@@ -124,15 +127,35 @@ class Journal:
                           tax_unit * qty, proceeds, realized])
         return proceeds, realized
 
+    def record_manual_fill(self, item_id: int, name: str, is_buy: bool, qty: int, price: int = 0) -> None:
+        """Record a trade NOT in this device's RuneLite (an other-device trade or a `forget`), so
+        the position reconcile folds it in and doesn't undo it from the RuneLite-only net."""
+        self.con.execute("INSERT INTO manual_fills VALUES (?,?,?,?,?,?)",
+                         [int(time.time()), item_id, name, is_buy, qty, price])
+
+    def manual_fills(self) -> list:
+        """Manual adjustments as Fill-shaped objects, for reconcile to fold in alongside RuneLite."""
+        from .runelite import Fill
+        rows = self.con.execute("SELECT item_id,name,is_buy,qty,price FROM manual_fills").fetchall()
+        return [Fill(uuid="", item_id=r[0], name=r[1], is_buy=bool(r[2]), qty=r[3], price=r[4] or 0,
+                     state="", t_ms=0) for r in rows]
+
+    def forget_position(self, item_id: int, name: str, qty: int) -> None:
+        """Untrack a position disposed of elsewhere: record a manual SELL of `qty` (so the reconcile
+        keeps it gone) and drop the position now. Cash/P&L untouched."""
+        self.record_manual_fill(item_id, name, is_buy=False, qty=qty)
+        self.con.execute("DELETE FROM positions WHERE item_id=?", [item_id])
+
     def reconcile_positions(self, fills) -> list[tuple[str, int, int]]:
-        """Recompute each held position from the authoritative completed-offer history — Σbought −
-        Σsold per item, which is ORDER-INDEPENDENT, so out-of-order incremental imports can't leave
-        a phantom. Only touches items that appear in `fills`; returns [(name, old_qty, new_qty)]
-        for the ones that changed, so the drift is surfaced rather than silently fudged.
+        """Recompute each held position from the authoritative offer history — Σbought − Σsold per
+        item, which is ORDER-INDEPENDENT, so out-of-order incremental imports can't leave a phantom.
+        Folds in manual_fills (other-device trades / forgets) so the RuneLite-only net doesn't undo
+        them. Only touches items with a buy in the history; returns [(name, old_qty, new_qty)] for
+        the ones that changed, surfacing the drift rather than silently fudging it.
 
         `fills` is RuneLite's full completed-offer list (runelite.completed_offers)."""
         agg: dict[int, dict[str, Any]] = {}
-        for f in fills:
+        for f in [*fills, *self.manual_fills()]:
             a = agg.setdefault(f.item_id, {"name": f.name, "bought": 0, "sold": 0, "cost": 0})
             if f.is_buy:
                 a["bought"] += f.qty
