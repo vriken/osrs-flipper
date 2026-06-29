@@ -20,6 +20,7 @@ Commands (type `help`):
   placed [item buy|sell qty price]  log a PLACED order (or the last quote) for fill calibration
   calibrate | calib        measure empirical β + fill correction from your real attempts
   pos                      open positions + unrealised P&L (vs live bid)
+  inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
   pnl                      realised P&L, cash, equity, bond progress
   progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
@@ -408,6 +409,12 @@ class Terminal:
             regime = "\U0001f4a4 overnight"
         print(f"  === {hour:02d}:00 · cash {cash:,} · {len(held)} held · "
               f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
+        if held and rl is not None:  # split holdings into bank (sellable) vs tied up in GE
+            sp = runelite.holdings_split(held, offers)
+            nb = sum(1 for h in sp.values() if h["bank"] > 0)
+            nl = sum(1 for h in sp.values() if h["listed"] > 0)
+            ni = sum(1 for h in sp.values() if h["incoming"] > 0)
+            print(f"  holdings: {nb} in bank · {nl} listed in GE · {ni} buying  (`inv` for detail)")
 
         rows = self._review_offers()  # ACTIVE offers + verdicts (the old `review`)
         refined = []  # verdicts re-checked against a fresh quote so we never churn a priced-right offer
@@ -713,6 +720,33 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_inventory(self, args: list[str]) -> None:
+        """What you actually hold, split BANK (sellable now) vs IN-GE (listed for sale / being
+        bought), reconciled from your transactions against live RuneLite offers. Alias: inv."""
+        rl = runelite.read()
+        if rl is None:
+            print("  no RuneLite data — `pos` shows total holdings; can't split bank vs GE without it")
+            return
+        split = runelite.holdings_split(self.j.positions(), runelite.active_offers(rl))
+        if not split:
+            print("  nothing held or in GE")
+            return
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        print(f"  {'item':22} {'bank':>9} {'listed(GE)':>11} {'buying(GE)':>11} {'avg':>9}")
+        print("  " + "-" * 66)
+        tb = tl = ti = 0
+        for iid, h in sorted(split.items(), key=lambda kv: -kv[1]["total"]):
+            name = h["name"] or names.get(iid, str(iid))
+            drift = alert.color("  ⚠ drift", "red") if h["bank"] < 0 else ""
+            print(f"  {str(name)[:22]:22} {h['bank']:>9,} {h['listed']:>11,} {h['incoming']:>11,} "
+                  f"{h['avg_cost']:>9,.0f}{drift}")
+            tb += max(0, h["bank"])
+            tl += h["listed"]
+            ti += h["incoming"]
+        print("  " + "-" * 66)
+        print(f"  {'TOTAL units':22} {tb:>9,} {tl:>11,} {ti:>11,}")
+        print("  bank = sellable now · listed = tied up in active sell offers · buying = bought, awaiting collection")
+
     def cmd_why(self, args: list[str]) -> None:
         """Explain an item's price position: live vs its recent baselines (1d/2wk/3mo/30d), volume
         z-score, slope, and phase verdict — is it normal, a real dip to buy, or a falling knife?
@@ -876,6 +910,7 @@ class Terminal:
             "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
             "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
             "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
+            "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),

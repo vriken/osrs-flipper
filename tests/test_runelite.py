@@ -1,6 +1,9 @@
 """RuneLite Flipping Utilities reader — parse offers and derive slot occupancy."""
 
+import types
+
 from osrs_flipper import runelite
+from osrs_flipper.runelite import Offer, holdings_split
 
 SAMPLE = {
     "slotTimers": [
@@ -104,3 +107,24 @@ def test_review_verdict():
     assert runelite.review_verdict("BUYING", 0.3, 1.5, 1.0) == "slow"    # past ETA
     assert runelite.review_verdict("BUYING", 0.2, 0.3, 1.0) == "ontrack"  # under ETA
     assert runelite.review_verdict("BUYING", 0.0, 99, float("inf")) == "ontrack"  # no ETA → no nag
+
+
+def test_holdings_split_bank_vs_ge():
+    def pos(iid, qty):
+        return types.SimpleNamespace(item_id=iid, name=f"item{iid}", qty=qty, avg_cost=10.0)
+
+    positions = [pos(1, 10_000), pos(2, 500)]
+    offers = [
+        Offer(slot=0, item_id=1, is_buy=False, state="SELLING", qty=6000, price=0, filled=2000),
+        Offer(slot=1, item_id=3, is_buy=True, state="BUYING", qty=1000, price=0, filled=300),
+    ]
+    s = holdings_split(positions, offers)
+    assert s[1]["bank"] == 4000 and s[1]["listed"] == 6000   # 10k owned, 6k listed → 4k in bank
+    assert s[2]["bank"] == 500 and s[2]["listed"] == 0        # not listed → all in bank
+    assert s[3]["incoming"] == 300 and s[3]["bank"] == 0      # being bought, not a position yet
+
+
+def test_holdings_split_flags_drift():
+    p = types.SimpleNamespace(item_id=1, name="x", qty=1000, avg_cost=10.0)
+    s = holdings_split([p], [Offer(slot=0, item_id=1, is_buy=False, state="SELLING", qty=1500, price=0)])
+    assert s[1]["bank"] < 0   # listed more than the journal tracks → drift signal
