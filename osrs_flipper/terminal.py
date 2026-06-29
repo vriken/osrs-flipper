@@ -477,11 +477,15 @@ class Terminal:
         Returns (possibly-downgraded verdict, indented hint line)."""
         if o.is_buy:
             from .quote import optimal_quote
+            from .tax import post_tax_received
             q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
             if not q:
                 return verdict, alert.color("         → no profitable spread now — cancel & redeploy that cash", "yellow")
-            if q.buy_px == o.price:
-                return "ontrack", alert.color(f"         → quote still says buy {q.buy_px:,} — priced right, just slow; hold", "green")
+            # your bid is fine if it's at/above the competitive buy AND still profitable to sell
+            # into — only under-bidding (won't fill) or over-paying (no margin) needs a re-quote.
+            net_at_mine = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
+            if o.price >= q.buy_px and net_at_mine > 0:
+                return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green")
             return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
         # SELL: is your ask still at/under the current market ask? then it fills, just slowly.
         m = api.latest().get(o.item_id, {})

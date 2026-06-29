@@ -63,6 +63,26 @@ def test_refine_buy_same_price_downgrades_to_ontrack(monkeypatch):
     assert v == "ontrack" and "just slow" in hint
 
 
+def test_refine_buy_above_quote_but_profitable_downgrades(monkeypatch):
+    # the Redwood case: bid a hair above the quote's buy, still profitable → not mispriced
+    from osrs_flipper import quote as quote_mod
+    monkeypatch.setattr(quote_mod, "optimal_quote",
+                        lambda *a, **k: types.SimpleNamespace(buy_px=4215, sell_px=4447, net_unit=144))
+    o = Offer(slot=0, item_id=1234, is_buy=True, state="BUYING", qty=10, price=4216)
+    v, hint = Terminal._refine_verdict(o, "margin")
+    assert v == "ontrack" and "just slow" in hint
+
+
+def test_refine_buy_underbid_keeps_flag(monkeypatch):
+    # bidding below the competitive buy floor → genuinely needs to re-quote higher
+    from osrs_flipper import quote as quote_mod
+    monkeypatch.setattr(quote_mod, "optimal_quote",
+                        lambda *a, **k: types.SimpleNamespace(buy_px=5, sell_px=7, net_unit=2))
+    o = Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=100, price=4)
+    v, hint = Terminal._refine_verdict(o, "margin")
+    assert v == "margin" and "re-quote" in hint
+
+
 def _row(verdict, eta_h=1.0):
     return (None, verdict, 0.5, eta_h, 0.0)  # (offer, verdict, elapsed, eta, progress)
 
