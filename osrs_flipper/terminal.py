@@ -14,6 +14,8 @@ Commands (type `help`):
   sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
   buy <item> <quantity> <price>    log a buy fill
   sell <item> <quantity> <price>   log a sell fill (applies GE tax)
+  placed [item buy|sell qty price]  log a PLACED order (or the last quote) for fill calibration
+  calibrate | calib        measure empirical β + fill correction from your real attempts
   pos                      open positions + unrealised P&L (vs live bid)
   pnl                      realised P&L, cash, equity, bond progress
   recent [n]               recent trades
@@ -50,6 +52,7 @@ class Terminal:
         self._map: dict[str, dict] | None = None
         self._latest: dict[int, dict] = {}
         self._latest_ts = 0.0
+        self._last_quote: tuple | None = None  # (meta, Quote, qty) — used by `placed`
 
     # --- data helpers --------------------------------------------------------
     def mapping(self) -> dict[str, dict]:
@@ -112,6 +115,8 @@ class Terminal:
         if q:  # log the prediction so we can calibrate it against your real fills later
             self.j.log_prediction(meta["id"], meta["name"], q.qty, q.buy_px, q.sell_px,
                                   q.p_buy, q.p_sell, q.p_round, q.ev)
+            self._last_quote = (meta, q, qty)  # `placed` records this without re-typing
+            print("  → placed it? type `placed` to log it for fill calibration")
 
     def cmd_preds(self, args: list[str]) -> None:
         n = int(args[0]) if args and args[0].isdigit() else 10
@@ -148,6 +153,76 @@ class Terminal:
             print(f"  sold {qty:,} {meta['name']} @ {price} = +{proceeds:,.0f} "
                   f"(realised {realized:+,.0f}) | cash {self.j.cash():,.0f}")
 
+    def _snapshot(self, item_id: int) -> dict:
+        """Decision-time market snapshot for an attempt (1h averages + binding volume)."""
+        hr = api.one_hour().get(item_id, {})
+        low_vol, high_vol = hr.get("lowPriceVolume") or 0, hr.get("highPriceVolume") or 0
+        return {"avg_low": hr.get("avgLowPrice"), "avg_high": hr.get("avgHighPrice"),
+                "vol_1h_binding": min(low_vol, high_vol)}
+
+    def cmd_placed(self, args: list[str]) -> None:
+        """Record an order you just placed in-game, so its fill calibrates the model.
+          placed                              log the last `quote` (its BUY leg)
+          placed <item> <buy|sell> <qty> <price>"""
+        if not args:
+            if not self._last_quote:
+                print("  nothing to record — run `quote <item>` first, or: "
+                      "placed <item> <buy|sell> <qty> <price>")
+                return
+            meta, q, _ = self._last_quote
+            snap = self._snapshot(meta["id"])
+            aid = self.j.record_attempt(
+                meta["id"], meta["name"], "BUY", q.qty, q.buy_px, horizon_h=q.horizon_h,
+                avg_low=snap["avg_low"], avg_high=snap["avg_high"],
+                vol_1h_binding=snap["vol_1h_binding"], pred_p_fill=q.p_buy,
+                pred_eta_h=q.t_buy_h, pred_ev=q.ev)
+            print(f"  recorded BUY {q.qty:,} {meta['name']} @ {q.buy_px:,}  [attempt {aid}] — "
+                  f"auto-reconciled when it fills")
+            return
+        if len(args) < 4 or args[-3].lower() not in ("buy", "sell") \
+                or not args[-2].isdigit() or not args[-1].isdigit():
+            print("  usage: placed <item> <buy|sell> <qty> <price>")
+            return
+        side, qty, px = args[-3].lower(), int(args[-2]), int(args[-1])
+        meta = self.resolve(" ".join(args[:-3]))
+        if not meta:
+            print("  item not found")
+            return
+        snap = self._snapshot(meta["id"])
+        aid = self.j.record_attempt(
+            meta["id"], meta["name"], side, qty, px, horizon_h=1.0, avg_low=snap["avg_low"],
+            avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"])
+        print(f"  recorded {side.upper()} {qty:,} {meta['name']} @ {px:,}  [attempt {aid}]")
+
+    def cmd_calibrate(self, args: list[str]) -> None:
+        """Measure empirical β + fill correction from your real order attempts (report only)."""
+        from . import calibration
+        rows = self.j.calibration_rows()
+        n = len(rows)
+        if n < 10:
+            print(f"  only {n} resolved attempt(s) — need ~10+ for a meaningful read.")
+            print("  type `placed` after you place a recommended order; fills reconcile automatically.")
+            return
+        beta = calibration.calibrate_beta(rows, prior=config.BETA)
+        fill = calibration.calibrate_fill(rows)
+        print(f"  === calibration ({n} resolved attempts) ===")
+        gm = beta["global_measured"]
+        if gm is None:
+            print(f"  β (spread haircut): no in-spread fills yet (prior {config.BETA:.2f})")
+        else:
+            print(f"  β (spread haircut): prior {config.BETA:.2f} · measured {gm:.2f} "
+                  f"→ use {beta['global']:.2f}  (shrunk toward prior)")
+        for name in ("low", "med", "high"):
+            b = beta["buckets"].get(name)
+            if b:
+                print(f"    {name:>4} liquidity: measured {b['measured']:.2f} "
+                      f"→ {b['shrunk']:.2f}  (n={b['n']})")
+        if fill["correction"] is not None:
+            c = fill["correction"]
+            verdict = "too pessimistic" if c > 1.1 else "too optimistic" if c < 0.9 else "well-calibrated"
+            print(f"  fill rate: ×{c:.2f} ({verdict}, n={fill['n']})")
+        print("  report only — nothing applied. Update BETA in config.py if you trust the measured value.")
+
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
@@ -180,12 +255,20 @@ class Terminal:
         return runelite.limit_used(rl) if rl else self.j.buy_limit_used()
 
     def _autosync(self) -> int:
-        """Mirror RuneLite's completed fills into the journal. Idempotent → safe to call often."""
+        """Mirror RuneLite's completed fills into the journal and reconcile them against placed
+        attempts. Idempotent → safe to call often."""
         rl = runelite.read()
         if not rl:
+            self.j.expire_stale_attempts(int(time.time()))
             return 0
-        return sum(self.j.import_offer(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price)
-                   for f in runelite.completed_offers(rl))
+        n = 0
+        for f in runelite.completed_offers(rl):
+            if self.j.import_offer(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price):
+                n += 1
+                self.j.reconcile_fill(f.item_id, f.is_buy, f.qty, f.price,
+                                      int(f.t_ms / 1000) or int(time.time()))
+        self.j.expire_stale_attempts(int(time.time()))
+        return n
 
     def cmd_sync(self, args: list[str]) -> None:
         n = self._autosync()
@@ -480,6 +563,8 @@ class Terminal:
             "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
             "sellquote": lambda a: self.cmd_sellquote(a), "sq": lambda a: self.cmd_sellquote(a),
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
+            "placed": lambda a: self.cmd_placed(a),
+            "calibrate": lambda a: self.cmd_calibrate(a), "calib": lambda a: self.cmd_calibrate(a),
             "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
             "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
             "review": lambda a: self.cmd_review(a), "check": lambda a: self.cmd_review(a),

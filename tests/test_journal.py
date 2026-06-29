@@ -82,3 +82,41 @@ def test_predictions_logged_and_read_back(j):
     quote = next(p for p in preds if p["source"] == "quote")
     assert buy["qty"] == 100 and quote["qty"] == 2000
     assert quote["buy_px"] == 97 and quote["sell_px"] == 101
+
+
+def test_attempt_reconciles_with_a_matching_fill(j):
+    aid = j.record_attempt(GOLD_BAR, "Gold bar", "BUY", 2000, 97, horizon_h=2.0,
+                           avg_low=96, avg_high=101, vol_1h_binding=5000, pred_p_fill=0.8)
+    # a later buy fill for the same item closes the open attempt
+    matched = j.reconcile_fill(GOLD_BAR, is_buy=True, qty=2000, price=97, fill_ts=10**12)
+    assert matched == aid
+    row = j.calibration_rows()[0]
+    assert row["status"] == "filled" and row["filled_qty"] == 2000 and row["fill_px"] == 97
+
+
+def test_partial_fill_then_completion_vwaps_price(j):
+    j.record_attempt(GOLD_BAR, "Gold bar", "BUY", 1000, 100, horizon_h=2.0,
+                     avg_low=96, avg_high=104, vol_1h_binding=5000)
+    j.reconcile_fill(GOLD_BAR, is_buy=True, qty=400, price=100, fill_ts=10**12)
+    j.reconcile_fill(GOLD_BAR, is_buy=True, qty=600, price=105, fill_ts=10**12 + 1)
+    row = j.calibration_rows()[0]
+    assert row["status"] == "filled" and row["filled_qty"] == 1000
+    assert row["fill_px"] == (400 * 100 + 600 * 105) / 1000  # VWAP = 103
+
+
+def test_reconcile_ignores_fill_placed_before_the_attempt(j):
+    j.record_attempt(GOLD_BAR, "Gold bar", "BUY", 100, 97, horizon_h=2.0,
+                     avg_low=96, avg_high=101, vol_1h_binding=5000)
+    # fill timestamped before the attempt was placed → not a match
+    assert j.reconcile_fill(GOLD_BAR, is_buy=True, qty=100, price=97, fill_ts=1) is None
+
+
+def test_stale_attempt_expires_and_enters_calibration_set(j):
+    j.record_attempt(GOLD_BAR, "Gold bar", "BUY", 100, 97, horizon_h=1.0,
+                     avg_low=96, avg_high=101, vol_1h_binding=5000, pred_p_fill=0.8)
+    assert j.open_attempts()  # open until it ages out
+    expired = j.expire_stale_attempts(10**12)  # far future → past its 1h horizon
+    assert expired == 1
+    assert not j.open_attempts()
+    row = j.calibration_rows()[0]
+    assert row["status"] == "expired" and row["filled_qty"] == 0  # a counted miss
