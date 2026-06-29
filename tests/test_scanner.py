@@ -105,7 +105,7 @@ def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, lim
     return {"item_id": iid, "name": name, "buy_px": buy, "sell_px": sell,
             "margin_abs": margin_abs, "margin_pct": margin_abs / buy, "margin_fast": margin_fast,
             "p_complete": 0.9, "liq_units": min(vol, limit), "buy_limit_eff": limit,
-            "buy_rate": 5000.0}
+            "hold_units": min(vol, limit), "buy_rate": 5000.0}
 
 
 def test_penny_spread_staple_still_qualifies_as_a_hold(monkeypatch):

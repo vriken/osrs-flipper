@@ -70,6 +70,9 @@ ALPHA = 0.10  # capacity capture as fraction of window volume
 ADVERSE_GATE = True  # only fill in bars where price moved against you (flat-or-worse)
 WINDOW_BARS_5M = 24  # holding window = 24×5m = 2h (reset-bounded to 4h buy-limit window)
 BUY_LIMIT_WINDOW_H = 4  # rolling buy-limit window
+# A HOLD accumulates and sells back over ~this many hours; caps hold qty by realizable volume
+# (ALPHA × vol × HOLD_WINDOW_H) so the plan never tells you to hoard more than the market clears.
+HOLD_WINDOW_H = 8
 
 # --- Strategy parameters -----------------------------------------------------
 Z_ENTRY = 2.0  # mean-reversion: enter when z < −Z_ENTRY
@@ -84,6 +87,15 @@ STALENESS_MAX_S = 3600  # exclude items whose last trade is older than this (1h)
 V_MIN_1H = int(os.environ.get("OSRS_FLIPPER_V_MIN_1H", 500))  # min 1h volume (binding side) to recommend;
 # thin items (low two-sided volume) are easily pumped and you can't reliably fill at the quoted price
 V_SUSPICIOUS_1H = 100  # below this + wide spread => flag manipulation-suspect
+# Spread sanity: a wide bid-ask is only real if volume trades across it. Above REL_SPREAD_SUSPECT,
+# require vol_binding ≥ SPREAD_VOL_K × rel_spread — a wide spread on thin volume is an illiquidity/
+# manipulation artifact you can't capture (e.g. Curry leaf 47% spread @ ~900/h). Penny staples
+# (fat % spread, huge volume — Air rune 4→5) pass because the volume backs them.
+REL_SPREAD_SUSPECT = float(os.environ.get("OSRS_FLIPPER_REL_SPREAD_SUSPECT", 0.20))
+SPREAD_VOL_K = int(os.environ.get("OSRS_FLIPPER_SPREAD_VOL_K", 50_000))
+# A wide spread measured with one trade leg this stale spans two price regimes (a phantom margin,
+# e.g. a 37-min-old low paired with a fresh high) — treat as suspect, not a flip.
+STALE_LEG_MAX_S = int(os.environ.get("OSRS_FLIPPER_STALE_LEG_MAX_S", 1800))
 
 # --- Spread persistence (see persistence.py) ---------------------------------
 PERSIST_TIMESTEP = "1h"  # recent history to judge spread stability against
