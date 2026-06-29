@@ -107,6 +107,33 @@ def active_offers(data: dict) -> list[Offer]:
     return out
 
 
+def holdings_split(positions, offers) -> dict[int, dict]:
+    """Split each owned item into BANK (collected, sellable now) vs IN-GE, from journal positions
+    (net completed fills) + live offers:
+      listed   = units tied up in active SELL offers (not yet sold → still in the position)
+      incoming = units already bought in active BUY offers but not yet collected (NOT in positions
+                 yet — the journal imports them on completion)
+      bank     = position − listed  (negative ⇒ journal/RuneLite drift)
+    `positions` is a list of objects with .item_id/.name/.qty/.avg_cost; `offers` a list of Offer."""
+    listed: dict[int, int] = {}
+    incoming: dict[int, int] = {}
+    for o in offers:
+        if o.is_buy and o.state == "BUYING":
+            incoming[o.item_id] = incoming.get(o.item_id, 0) + o.filled
+        elif not o.is_buy and o.state == "SELLING":
+            listed[o.item_id] = listed.get(o.item_id, 0) + o.qty
+    out: dict[int, dict] = {}
+    for p in positions:
+        ln = listed.get(p.item_id, 0)
+        out[p.item_id] = {"name": p.name, "total": p.qty, "bank": p.qty - ln, "listed": ln,
+                          "incoming": incoming.get(p.item_id, 0), "avg_cost": p.avg_cost}
+    seen = {p.item_id for p in positions}
+    for iid, q in incoming.items():  # being bought, nothing in the bank yet
+        if iid not in seen:
+            out[iid] = {"name": None, "total": 0, "bank": 0, "listed": 0, "incoming": q, "avg_cost": 0.0}
+    return out
+
+
 def margin_collapsed(live_net: float, avg_net: float | None) -> bool:
     """True if the currently-achievable flip margin has gone (≤0) or collapsed to a
     fraction of its recent-average — the market moved against the open offer."""
