@@ -161,7 +161,7 @@ def optimal_quote(
     results.sort(key=lambda r: -r["ev"])
     best = results[0]
     return Quote(
-        item_id=item_id, name=name or str(item_id), qty=qty, bid=bid, ask=ask, horizon_h=horizon_h,
+        item_id=item_id, name=name or str(item_id), qty=qty, bid=buy_lo, ask=ask, horizon_h=horizon_h,
         buy_px=best["buy"], sell_px=best["sell"], net_unit=best["net_unit"],
         p_buy=best["p_buy"], p_sell=best["p_sell"], p_round=best["p_round"], ev=best["ev"],
         t_buy_h=best["t_buy_h"], t_sell_h=best["t_sell_h"], frontier=_frontier(results),

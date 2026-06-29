@@ -274,7 +274,34 @@ class Terminal:
                 n += 1
                 self.j.reconcile_fill(f.item_id, f.is_buy, f.qty, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
+        self._autodetect_placements(rl)
         self.j.expire_stale_attempts(int(time.time()))
+        return n
+
+    def _autodetect_placements(self, rl: dict) -> int:
+        """Record any live pending offer not already tracked as an open attempt — so placing in
+        game auto-logs it for calibration without typing `placed`. Only BUYING/SELLING (pending)
+        offers: a BOUGHT/SOLD offer is a completed fill, already imported above. Idempotent —
+        keyed on (item_id, side), so re-running never double-records."""
+        open_keys = {(a["item_id"], a["side"]) for a in self.j.open_attempts()}
+        names = None
+        n = 0
+        for o in runelite.active_offers(rl):
+            if o.state not in ("BUYING", "SELLING"):
+                continue
+            side = "BUY" if o.is_buy else "SELL"
+            if (o.item_id, side) in open_keys:
+                continue
+            if names is None:
+                names = {r["id"]: r["name"] for r in api.mapping()}
+            snap = self._snapshot(o.item_id)
+            self.j.record_attempt(o.item_id, names.get(o.item_id, str(o.item_id)), side, o.qty,
+                                  o.price, horizon_h=1.0, avg_low=snap["avg_low"],
+                                  avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"])
+            open_keys.add((o.item_id, side))
+            n += 1
+        if n:
+            print(f"  (auto-logged {n} placed order(s) from RuneLite — no need to type `placed`)")
         return n
 
     def cmd_sync(self, args: list[str]) -> None:
@@ -322,11 +349,14 @@ class Terminal:
             be = breakeven_sell(p.avg_cost, item_id=p.item_id)
             market_px = int(round(ask))
             sell_px = max(market_px, be)
+            underwater = market_px < be
             net = post_tax_received(sell_px, item_id=p.item_id) - p.avg_cost
             hv = h.get("highPriceVolume") or 0
-            eta_h = p.qty / (config.ALPHA * hv) if hv > 0 else float("inf")
+            # a break-even listing sits ABOVE market, so it won't fill at market volume — show
+            # "won't fill (yet)" rather than an ETA computed as if it were priced at the market.
+            eta_h = float("inf") if underwater else (p.qty / (config.ALPHA * hv) if hv > 0 else float("inf"))
             rows.append({"name": p.name, "qty": p.qty, "avg_cost": p.avg_cost, "sell_px": sell_px,
-                         "profit": net * p.qty, "eta_h": eta_h, "underwater": market_px < be})
+                         "profit": net * p.qty, "eta_h": eta_h, "underwater": underwater})
         return rows
 
     def _attention_nudge(self) -> str:
@@ -424,7 +454,7 @@ class Terminal:
             if n_now:
                 actions.append(f"place buy #1–#{n_now}")
             if actions:
-                return " + ".join(actions) + " now — then `placed` so the fills calibrate the model"
+                return " + ".join(actions) + " now (auto-logged from RuneLite — no `placed` needed)"
         if sell_rows:
             return "list your holdings for sale (see SELL above)"
         if review_rows:
@@ -507,6 +537,13 @@ class Terminal:
         free = runelite.free_slots(rl, config.GE_SLOTS) if rl is not None else max(0, config.GE_SLOTS - len(held))
         if free <= 0:
             print("  no free slots — collect or cancel an offer first, then `overnight`")
+            return
+        # reserve a slot for each holding still needing a sell listing — a sell occupies a slot too
+        active_sell_ids = {o.item_id for o in offers if not o.is_buy}
+        pending_sells = sum(1 for h in held if h.item_id not in active_sell_ids)
+        free = max(0, free - pending_sells)
+        if free <= 0:
+            print(f"  all free slot(s) reserved for {pending_sells} sell listing(s) — list those first")
             return
         exclude = {h.item_id for h in held} | {o.item_id for o in offers}
         limit_used = self._limit_used(rl)

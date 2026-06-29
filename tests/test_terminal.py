@@ -1,8 +1,42 @@
 """The unified `go` screen's NEXT-action synthesis prioritises the right thing to do."""
 
+import types
+
+from osrs_flipper import terminal as term_mod
+from osrs_flipper.journal import Journal
+from osrs_flipper.runelite import Offer
 from osrs_flipper.terminal import Terminal
 
 na = Terminal._next_action
+
+
+def _stub(j):
+    return types.SimpleNamespace(
+        j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000})
+
+
+def test_autodetect_logs_pending_offer_once(tmp_path, monkeypatch):
+    j = Journal(path=str(tmp_path / "j.duckdb"))
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
+    monkeypatch.setattr(term_mod.runelite, "active_offers",
+                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=4)])
+    stub = _stub(j)
+    assert Terminal._autodetect_placements(stub, {}) == 1   # first sync logs it
+    assert Terminal._autodetect_placements(stub, {}) == 0   # idempotent — already an open attempt
+    assert (561, "BUY") in {(a["item_id"], a["side"]) for a in j.open_attempts()}
+    j.con.close()
+
+
+def test_autodetect_skips_completed_offers(tmp_path, monkeypatch):
+    # a BOUGHT offer is a completed fill (imported via completed_offers) — re-logging it would
+    # double-count, so detection only records still-pending BUYING/SELLING offers.
+    j = Journal(path=str(tmp_path / "j2.duckdb"))
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
+    monkeypatch.setattr(term_mod.runelite, "active_offers",
+                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BOUGHT", qty=1000, price=4)])
+    assert Terminal._autodetect_placements(_stub(j), {}) == 0
+    assert not j.open_attempts()
+    j.con.close()
 
 
 def _row(verdict, eta_h=1.0):

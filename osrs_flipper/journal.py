@@ -230,10 +230,10 @@ class Journal:
 
     def open_attempts(self) -> list[dict[str, Any]]:
         rows = self.con.execute(
-            "SELECT attempt_id,name,side,qty,limit_px,filled_qty FROM attempts WHERE status='open' "
-            "ORDER BY ts").fetchall()
-        return [{"attempt_id": r[0], "name": r[1], "side": r[2], "qty": r[3],
-                 "limit_px": r[4], "filled_qty": r[5]} for r in rows]
+            "SELECT attempt_id,item_id,name,side,qty,limit_px,filled_qty FROM attempts "
+            "WHERE status='open' ORDER BY ts").fetchall()
+        return [{"attempt_id": r[0], "item_id": r[1], "name": r[2], "side": r[3], "qty": r[4],
+                 "limit_px": r[5], "filled_qty": r[6]} for r in rows]
 
     def calibration_rows(self) -> list[dict[str, Any]]:
         """Resolved attempts (filled / partial / expired) with snapshot + outcome for calibration."""
