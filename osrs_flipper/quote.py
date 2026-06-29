@@ -104,6 +104,11 @@ def optimal_quote(
     ask = int(round(ask)) if ask is not None else cur.get("high")
     if bid is None or ask is None:
         return None
+    # reject when the live book and the 1h average wildly disagree (deflating pump / stale)
+    if clow is not None and chigh is not None:
+        avg_mid, live_mid = (bid + ask) / 2, (clow + chigh) / 2
+        if avg_mid > 0 and abs(live_mid - avg_mid) / avg_mid > config.PRICE_DIVERGENCE_MAX:
+            return None
 
     # Only quote marketable prices: a buy must sit in [bid, ask) and a sell in (bid, ask].
     # Quoting below the bid or above the ask isn't a fast fill — you'd just sit out of market.

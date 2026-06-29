@@ -57,6 +57,11 @@ def build_features(
         al = avg_low if avg_low is not None else low
         if ah is None or al is None or al <= 0:
             continue
+        # reject when the live book and the 1h average wildly disagree (stale/pumped data)
+        if high is not None and low is not None:
+            avg_mid, live_mid = (ah + al) / 2, (high + low) / 2
+            if avg_mid > 0 and abs(live_mid - avg_mid) / avg_mid > config.PRICE_DIVERGENCE_MAX:
+                continue
 
         spread = ah - al
         mid = (ah + al) / 2
