@@ -24,6 +24,7 @@ Commands (type `help`):
   reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
   forget <item>            untrack a holding traded elsewhere (stays gone through reconcile)
   hold <item> <qty> [avg]  track a holding acquired elsewhere (adds it, no cash spent)
+  recover | recovery       underwater holdings: bounce-likely (hold/double down) vs re-rating (cut)
   pnl                      realised P&L, cash, equity, bond progress
   progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
@@ -260,6 +261,7 @@ class Terminal:
         buy_slots = max(0, free - len(sell_rows))  # reserve a slot per pending sell listing
         if sell_rows:
             print(alert.format_sell_plan(sell_rows))
+            self._explain_recovery(sell_rows)
         print(f"  building portfolio for {buy_slots} free slot(s)"
               + (f" ({len(sell_rows)} reserved for sells)…" if sell_rows else "…"))
         picks, idle = scanner.build_portfolio(
@@ -382,8 +384,9 @@ class Terminal:
             # a break-even listing sits ABOVE market, so it won't fill at market volume — show
             # "won't fill (yet)" rather than an ETA computed as if it were priced at the market.
             eta_h = float("inf") if underwater else (p.qty / (config.ALPHA * hv) if hv > 0 else float("inf"))
-            rows.append({"name": p.name, "qty": p.qty, "avg_cost": p.avg_cost, "sell_px": sell_px,
-                         "profit": net * p.qty, "eta_h": eta_h, "underwater": underwater})
+            rows.append({"item_id": p.item_id, "name": p.name, "qty": p.qty, "avg_cost": p.avg_cost,
+                         "sell_px": sell_px, "profit": net * p.qty, "eta_h": eta_h,
+                         "underwater": underwater})
         return rows
 
     def _attention_nudge(self) -> str:
@@ -458,6 +461,7 @@ class Terminal:
         sell_rows = self._sell_plan(held, active_sell_ids)
         if sell_rows:
             print(alert.format_sell_plan(sell_rows))
+            self._explain_recovery(sell_rows)  # underwater → bounce-likely (hold/double) vs cut
 
         picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
         # reserve a slot for each pending sell listing — a sell occupies a GE slot too, so buys
@@ -496,6 +500,34 @@ class Terminal:
                 shown += 1
             except Exception:  # noqa: BLE001 — explanation is best-effort, never fatal
                 pass
+
+    def _explain_recovery(self, sell_rows: list) -> None:
+        """Inline bounce-vs-cut read for each underwater sell candidate (recovery, baked into go).
+        One /timeseries fetch per underwater holding; silent on error."""
+        from . import recovery
+        from .tax import post_tax_received
+        lat = self.latest()
+        for r in sell_rows:
+            if not r.get("underwater") or not r.get("item_id"):
+                continue
+            bid = lat.get(r["item_id"], {}).get("low")
+            if not bid:
+                continue
+            try:
+                a = recovery.assess_recovery(r["avg_cost"], post_tax_received(int(bid), item_id=r["item_id"]),
+                                             recovery.week_mids(api.timeseries(r["item_id"], "1h")))
+            except Exception:  # noqa: BLE001 — best-effort
+                continue
+            if not a:
+                continue
+            if a["recover"]:
+                up = (a["median"] / a["cur"] - 1) * 100 if a["cur"] else 0
+                tail = "hold for the bounce" if a["median"] >= r["avg_cost"] else "hold / double down (`recover`)"
+                print(alert.color(f"       ↩ {str(r['name'])[:18]}: bounce likely — week median "
+                                  f"{a['median']:,.0f} ({up:+.0f}% up), z={a['z']:+.1f} → {tail}", "green"))
+            else:
+                print(alert.color(f"       ✂ {str(r['name'])[:18]}: no bounce signal "
+                                  "(re-rating/downtrend) — sell or break-even hold", "yellow"))
 
     @staticmethod
     def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
@@ -746,6 +778,56 @@ class Terminal:
         print(f"  realised P&L:{self.j.realized_pnl():>+14,.0f}")
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
+
+    def cmd_recover(self, args: list[str]) -> None:
+        """For each underwater holding, read the past week: is the dip likely to bounce (hold /
+        double down to lower your average) or a re-rating to cut? Stats-based mean-reversion read —
+        a dip can still be a permanent markdown, so verify before doubling down."""
+        from . import recovery
+        from .tax import post_tax_received
+        lat = self.latest()
+        mapping = {r["id"]: r for r in api.mapping()}
+        limit_used = self._limit_used()
+        cash = int(self.j.cash())
+        any_uw = False
+        for p in self.j.positions():
+            bid = lat.get(p.item_id, {}).get("low")
+            if not bid:
+                continue
+            bail = post_tax_received(int(bid), item_id=p.item_id)
+            if bail >= p.avg_cost:
+                continue  # in the green — nothing to recover
+            any_uw = True
+            a = recovery.assess_recovery(p.avg_cost, bail, recovery.week_mids(api.timeseries(p.item_id, "1h")))
+            if not a:
+                print(f"  {p.name}: underwater, not enough week history to judge")
+                continue
+            up = (a["median"] / a["cur"] - 1) * 100 if a["cur"] else 0
+            if not a["recover"]:
+                why = ("still trending down (looks like a re-rating)" if a["rerating"]
+                       else "didn't trade above your cost this week" if not a["was_green"]
+                       else "not statistically low yet")
+                print(alert.color(f"  ✂ {p.name}: now {a['cur']:,.0f} vs cost {p.avg_cost:,.0f} — NOT a clear "
+                                  f"bounce ({why}); hold at break-even, don't double down", "yellow"))
+                continue
+            print(alert.color(f"  ↩ {p.name}: HOLD for recovery — week median {a['median']:,.0f} "
+                              f"({up:+.0f}% vs now {a['cur']:,.0f}), high {a['high']:,.0f}; cost "
+                              f"{p.avg_cost:,.0f}. z={a['z']:+.1f}, no downtrend.", "green"))
+            if a["median"] >= p.avg_cost:
+                print("       just hold — the week median is at/above your cost; a revert clears you in profit")
+            else:
+                qty, new_avg = recovery.double_down(p.qty, p.avg_cost, a["cur"], a["median"])
+                lim = max(0, (mapping.get(p.item_id, {}).get("limit") or 0) - limit_used.get(p.item_id, 0))
+                qty = min(qty, lim, (cash // int(a["cur"])) if a["cur"] else 0)
+                if qty > 0:
+                    print(f"       double down ~{qty:,} @ {a['cur']:,.0f} → avg {new_avg:,.0f} "
+                          "(break-even on a bounce back to the week median)")
+                else:
+                    print("       (no buy-limit/cash room to double down — just hold)")
+        if not any_uw:
+            print("  no underwater holdings — nothing to recover")
+        else:
+            print("  mean-reversion read, not a guarantee — a dip can be a permanent markdown; verify first")
 
     def cmd_hold(self, args: list[str]) -> None:
         """Tell the journal you hold an item acquired elsewhere (another device) — adds the position
@@ -999,6 +1081,7 @@ class Terminal:
             "reconcile": lambda a: self.cmd_reconcile(a),
             "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
             "hold": lambda a: self.cmd_hold(a), "own": lambda a: self.cmd_hold(a),
+            "recover": lambda a: self.cmd_recover(a), "recovery": lambda a: self.cmd_recover(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),

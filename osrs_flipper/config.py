@@ -168,6 +168,17 @@ OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN",
 # buffer. With AWAKE_END=23 and 3h, `go` flips to night trades at 20:00.
 NIGHT_SWITCH_H = float(os.environ.get("OSRS_FLIPPER_NIGHT_SWITCH_H", 3))
 
+# --- Recovery hold (see recovery.py) -----------------------------------------
+# For an underwater holding: hold for a bounce (and maybe double down) only if it traded ≥
+# RECOVERY_MIN_GREEN above your cost in the past week, is now ≥ RECOVERY_MIN_DIP below its week
+# median (or z ≤ RECOVERY_Z below the week mean), and isn't in a steady week-long decline (which
+# reads as a re-rating, not a dip). Conservative on purpose — doubling down on a falling knife
+# is how a paper loss becomes a real one.
+RECOVERY_LOOKBACK_BARS = int(os.environ.get("OSRS_FLIPPER_RECOVERY_LOOKBACK_BARS", 168))  # ~1wk of 1h bars
+RECOVERY_MIN_GREEN = float(os.environ.get("OSRS_FLIPPER_RECOVERY_MIN_GREEN", 0.02))
+RECOVERY_MIN_DIP = float(os.environ.get("OSRS_FLIPPER_RECOVERY_MIN_DIP", 0.03))
+RECOVERY_Z = float(os.environ.get("OSRS_FLIPPER_RECOVERY_Z", -1.0))
+
 # `review` margin-gone guard. The live book is a single noisy last-trade tick; on a thin
 # spread it flickers to 0 constantly, so two guards stop false "cancel/re-quote" alarms:
 #  - MIN_AGE_H: a real adverse move takes longer than seconds — don't judge a just-placed
