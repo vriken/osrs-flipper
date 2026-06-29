@@ -33,6 +33,7 @@ class Offer:
     price: int
     started_ms: int = 0
     filled: int = 0
+    uuid: str = ""
 
 
 @dataclass
@@ -103,8 +104,36 @@ def active_offers(data: dict) -> list[Offer]:
             price=off.get("p", 0),
             started_ms=off.get("tradeStartedAt", 0),
             filled=off.get("cQIT", 0),
+            uuid=off.get("uuid", ""),
         ))
     return out
+
+
+def all_fills(data: dict, names: dict[int, str]) -> list[Fill]:
+    """Every fill the journal should account for, deduped by uuid:
+      - completed offers (full filled qty), and
+      - active SELL offers' PARTIAL fills (cQIT > 0) — so gold from a partially-sold listing is
+        credited as it sells, not only when the whole offer completes.
+    The same offer appears in slotTimers while filling and in trades once done; cQIT grows
+    monotonically, so keeping the larger-cQIT record per uuid is correct. Active offers carry no
+    name, so it's resolved from `names`. (Active BUY partials are intentionally left to complete —
+    buys debit cash on completion, and the holdings split treats them as 'incoming'.)"""
+    by_uuid: dict[str, Fill] = {f.uuid: f for f in completed_offers(data)}
+    for timer in data.get("slotTimers", []):
+        off = timer.get("currentOffer")
+        if not off or off.get("b") or off.get("st") != "SELLING":
+            continue  # active SELL only
+        u, cqit = off.get("uuid"), off.get("cQIT", 0)
+        if not u or cqit <= 0:
+            continue
+        prior = by_uuid.get(u)
+        if prior and prior.qty >= cqit:
+            continue
+        iid = off.get("id", 0)
+        by_uuid[u] = Fill(uuid=u, item_id=iid, name=names.get(iid, str(iid)), is_buy=False,
+                          qty=int(cqit), price=int(off.get("p", 0)), state="SELLING",
+                          t_ms=int(off.get("t", 0)))
+    return list(by_uuid.values())
 
 
 def holdings_split(positions, offers) -> dict[int, dict]:
@@ -121,7 +150,8 @@ def holdings_split(positions, offers) -> dict[int, dict]:
         if o.is_buy and o.state == "BUYING":
             incoming[o.item_id] = incoming.get(o.item_id, 0) + o.filled
         elif not o.is_buy and o.state == "SELLING":
-            listed[o.item_id] = listed.get(o.item_id, 0) + o.qty
+            listed[o.item_id] = listed.get(o.item_id, 0) + max(0, o.qty - o.filled)  # UNSOLD portion
+            # (the sold part is already accounted out of the position via incremental fills)
     out: dict[int, dict] = {}
     for p in positions:
         ln = listed.get(p.item_id, 0)

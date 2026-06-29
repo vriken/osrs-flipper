@@ -288,12 +288,15 @@ class Terminal:
         if not rl:
             self.j.expire_stale_attempts(int(time.time()))
             return 0
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        fills = runelite.all_fills(rl, names)            # completed offers + active partial sells
+        self.j.migrate_fill_accounting_if_needed(fills)  # one-time baseline to current state; no-op after
         n = 0
-        fills = runelite.completed_offers(rl)
-        for f in fills:
-            if self.j.import_offer(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price):
+        for f in fills:                                  # credit only the NEW units filled per offer
+            delta = self.j.account_fill_delta(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price)
+            if delta > 0:
                 n += 1
-                self.j.reconcile_fill(f.item_id, f.is_buy, f.qty, f.price,
+                self.j.reconcile_fill(f.item_id, f.is_buy, delta, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
         self._autodetect_placements(rl)
         # authoritative position re-sync from the full offer history — heals phantoms left by
