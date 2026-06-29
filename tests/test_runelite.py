@@ -30,6 +30,18 @@ def test_read_missing_file_returns_none(tmp_path):
     assert runelite.read(tmp_path / "nope.json") is None
 
 
+def test_schema_health_passes_on_valid_data():
+    assert runelite.schema_health(SAMPLE) == []
+    assert runelite.schema_health(None) == []  # no data is not a schema problem
+    assert runelite.schema_health({"slotTimers": [], "trades": []}) == []  # idle account is healthy
+
+
+def test_schema_health_flags_missing_keys():
+    # plugin renamed/dropped the keys we depend on → must warn (fail loud, not open)
+    assert len(runelite.schema_health({"trades": []})) == 1  # no slotTimers
+    assert len(runelite.schema_health({"foo": "bar"})) == 2  # neither key
+
+
 TRADES = {
     "trades": [{
         "id": 2297, "name": "Anchovy pizza", "tGL": 10000,

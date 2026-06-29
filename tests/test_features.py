@@ -91,6 +91,23 @@ def test_buy_limit_used_reduces_capacity():
     assert partial.loc[0, "buy_limit_eff"] == 400
 
 
+def test_adverse_downward_move_relative_to_margin_drops():
+    # 1h-avg mid 1000 (spread 950/1050 → ~3% modeled margin), but live has fallen to mid 970
+    # (960/980): a 3% adverse drop > 50% of the ~3% margin → falling knife, dropped.
+    m = [_mapping(1, "Falling")]
+    df = build_features({1: _latest(980, 960, 60)}, {1: _hourly(1050, 950, 5000, 5000)}, m, now_ts=NOW)
+    assert df.empty
+
+
+def test_small_adverse_move_within_margin_survives():
+    # fat spread (~7% margin): a small live dip to mid 1080 (~1.8% drop) stays under the
+    # margin-relative threshold (~3.7%) → kept.
+    m = [_mapping(1, "Fat")]
+    df = build_features({1: _latest(1085, 1075, 60)}, {1: _hourly(1200, 1000, 5000, 5000)}, m, now_ts=NOW)
+    assert not df.empty
+    assert df.loc[0, "tradeable"]
+
+
 def test_now_default_runs():
     m = [_mapping(1, "X")]
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}, m,
