@@ -171,3 +171,13 @@ def test_forget_is_reconcile_proof(j):
     j.reconcile_positions(  # RuneLite still shows the buy, but the forget offsets it
         [Fill(uuid="b", item_id=5, name="Black knife", is_buy=True, qty=814, price=200, state="BOUGHT", t_ms=0)])
     assert all(p.item_id != 5 for p in j.positions())          # NOT re-added by reconcile
+
+
+def test_hold_position_adds_without_cash_and_survives_reconcile(j):
+    cash0 = j.cash()
+    j.hold_position(7, "Mud rune", 5000, 98.0)            # acquired on another device
+    p = j.position(7)
+    assert p.qty == 5000 and p.avg_cost == 98.0
+    assert j.cash() == cash0                               # cash untouched
+    j.reconcile_positions([])                              # no RuneLite buys, but the manual buy keeps it
+    assert j.position(7).qty == 5000                       # not wiped by reconcile

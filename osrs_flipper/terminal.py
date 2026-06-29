@@ -23,6 +23,7 @@ Commands (type `help`):
   inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
   reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
   forget <item>            untrack a holding traded elsewhere (stays gone through reconcile)
+  hold <item> <qty> [avg]  track a holding acquired elsewhere (adds it, no cash spent)
   pnl                      realised P&L, cash, equity, bond progress
   progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
@@ -746,6 +747,27 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_hold(self, args: list[str]) -> None:
+        """Tell the journal you hold an item acquired elsewhere (another device) — adds the position
+        WITHOUT spending cash, and it sticks through reconcile. Inverse of `forget`.
+          hold <item> <qty> [avg_cost]   (avg_cost defaults to the live price)"""
+        nums = []
+        while args and args[-1].replace(".", "", 1).isdigit():
+            nums.insert(0, args.pop())
+        if not args or not nums:
+            print("  usage: hold <item> <qty> [avg_cost]")
+            return
+        meta = self.resolve(" ".join(args))
+        if not meta:
+            print("  item not found")
+            return
+        iid, name = meta["id"], meta.get("name", str(meta["id"]))
+        qty = int(float(nums[0]))
+        avg = float(nums[1]) if len(nums) > 1 else float((api.latest().get(iid, {}) or {}).get("high") or 0)
+        self.j.hold_position(iid, name, qty, avg)
+        print(f"  now holding {qty:,} {name} @ {avg:,.0f} (acquired elsewhere; cash unchanged) — "
+              "`pos` shows it and reconcile keeps it")
+
     def cmd_forget(self, args: list[str]) -> None:
         """Untrack a held position you disposed of elsewhere (e.g. traded on another device) — removes
         it without recording a sale, and it stays gone through reconcile. Use `sell <item> <qty>
@@ -976,6 +998,7 @@ class Terminal:
             "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
             "reconcile": lambda a: self.cmd_reconcile(a),
             "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
+            "hold": lambda a: self.cmd_hold(a), "own": lambda a: self.cmd_hold(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),
