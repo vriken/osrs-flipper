@@ -121,6 +121,12 @@ QUOTE_RECENT_BARS = 72
 # --- Scanner filters ---------------------------------------------------------
 MIN_MARGIN_PCT = 0.02  # must clear the 2% tax to be worth listing
 MIN_PRICE = 50  # ignore sub-tax-threshold junk
+# Minimum after-tax margin PER UNIT (gp). A 1gp integer-tick flip on a cheap item shows a huge
+# ROI% (Feather 2→3 reads "50%") but doesn't fill — you sit behind a wall of identical 1gp bids
+# (the fill-rate calibration measured ≈0 on exactly these). The % floors can't catch it because
+# the % is inflated by the tiny price; gate on absolute margin instead. FUTURE: replace this
+# static floor by auto-applying the (shrunk) measured fill calibration so the model self-corrects.
+MIN_NET_MARGIN = int(os.environ.get("OSRS_FLIPPER_MIN_NET_MARGIN", 2))
 MAX_PRICE = None  # set to cap by item price; None = no cap
 HIGH_VALUE_THRESHOLD = 250_000_000  # above this, effective tax dips below 2%
 
