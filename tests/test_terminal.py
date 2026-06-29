@@ -27,6 +27,18 @@ def test_autodetect_logs_pending_offer_once(tmp_path, monkeypatch):
     j.con.close()
 
 
+def test_autodetect_skips_unknown_price(tmp_path, monkeypatch):
+    # a fully-unfilled offer has price 0 in RuneLite — don't log a price-0 attempt (poisons β);
+    # it gets logged at its real price once it starts filling.
+    j = Journal(path=str(tmp_path / "j3.duckdb"))
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
+    monkeypatch.setattr(term_mod.runelite, "active_offers",
+                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=0)])
+    assert Terminal._autodetect_placements(_stub(j), {}) == 0
+    assert not j.open_attempts()
+    j.con.close()
+
+
 def test_autodetect_skips_completed_offers(tmp_path, monkeypatch):
     # a BOUGHT offer is a completed fill (imported via completed_offers) — re-logging it would
     # double-count, so detection only records still-pending BUYING/SELLING offers.
@@ -74,13 +86,31 @@ def test_refine_buy_above_quote_but_profitable_downgrades(monkeypatch):
 
 
 def test_refine_buy_underbid_keeps_flag(monkeypatch):
-    # bidding below the competitive buy floor → genuinely needs to re-quote higher
+    # known price, but bidding below the competitive buy floor → genuinely needs to re-quote up
     from osrs_flipper import quote as quote_mod
     monkeypatch.setattr(quote_mod, "optimal_quote",
                         lambda *a, **k: types.SimpleNamespace(buy_px=5, sell_px=7, net_unit=2))
     o = Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=100, price=4)
     v, hint = Terminal._refine_verdict(o, "margin")
     assert v == "margin" and "re-quote" in hint
+
+
+def test_refine_buy_unknown_price_shows_market_not_mispriced(monkeypatch):
+    # 0%-filled offer (price 0): we can't judge the bid, so don't keep "margin"/"mispriced" —
+    # downgrade to slow and show the live market to compare against.
+    from osrs_flipper import quote as quote_mod
+    monkeypatch.setattr(quote_mod, "optimal_quote",
+                        lambda *a, **k: types.SimpleNamespace(buy_px=4215, sell_px=4447, net_unit=144))
+    o = Offer(slot=0, item_id=19672, is_buy=True, state="BUYING", qty=31, price=0)
+    v, hint = Terminal._refine_verdict(o, "margin")
+    assert v == "slow" and "market now" in hint and "4,215" in hint
+
+
+def test_refine_sell_unknown_price_shows_market_ask(monkeypatch):
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {554: {"high": 6}})
+    o = Offer(slot=0, item_id=554, is_buy=False, state="SELLING", qty=50000, price=0)
+    v, hint = Terminal._refine_verdict(o, "stale")
+    assert v == "slow" and "market ask 6" in hint
 
 
 def _row(verdict, eta_h=1.0):
