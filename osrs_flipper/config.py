@@ -97,6 +97,16 @@ SPREAD_VOL_K = int(os.environ.get("OSRS_FLIPPER_SPREAD_VOL_K", 50_000))
 # e.g. a 37-min-old low paired with a fresh high) — treat as suspect, not a flip.
 STALE_LEG_MAX_S = int(os.environ.get("OSRS_FLIPPER_STALE_LEG_MAX_S", 1800))
 
+# --- Anomaly / manipulation detector (see anomaly.py) ------------------------
+# Flag items whose live price has dislocated from their recent baseline ON REAL VOLUME — pumps
+# (avoid) and over-dumps (mean-revert buy). The scanner filters these out; the `anomaly` command
+# surfaces them. Need both a sizable divergence AND an abnormal-volume z-score to call it
+# manipulation rather than ordinary drift or thin-item noise.
+ANOMALY_DIV_MIN = float(os.environ.get("OSRS_FLIPPER_ANOMALY_DIV_MIN", 0.15))   # live vs 1h-avg gap
+ANOMALY_MIN_VOL = int(os.environ.get("OSRS_FLIPPER_ANOMALY_MIN_VOL", 1000))     # real volume floor
+ANOMALY_VOL_Z_MIN = float(os.environ.get("OSRS_FLIPPER_ANOMALY_VOL_Z_MIN", 2.0))  # abnormal-volume z
+ANOMALY_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_ANOMALY_CANDIDATES", 30))   # deep-check cap
+
 # --- Spread persistence (see persistence.py) ---------------------------------
 PERSIST_TIMESTEP = "1h"  # recent history to judge spread stability against
 PERSIST_CANDIDATES = 40  # only deep-check the top snapshot candidates (1 API call each)
