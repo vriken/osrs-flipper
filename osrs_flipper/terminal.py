@@ -287,7 +287,10 @@ class Terminal:
         names = None
         n = 0
         for o in runelite.active_offers(rl):
-            if o.state not in ("BUYING", "SELLING"):
+            # only pending offers with a real price: RuneLite reports price 0 until an offer
+            # starts filling, so we log it (at its true price) once it does — a price-0 attempt
+            # would poison β calibration. BOUGHT/SOLD are completed fills, imported above.
+            if o.state not in ("BUYING", "SELLING") or o.price <= 0:
                 continue
             side = "BUY" if o.is_buy else "SELL"
             if (o.item_id, side) in open_keys:
@@ -475,24 +478,30 @@ class Terminal:
           - genuinely mispriced        → keep the flag, show the price to move to
           - no profitable spread (buy) → keep the flag, say cancel & redeploy
         Returns (possibly-downgraded verdict, indented hint line)."""
+        # RuneLite reports the offer price as 0 until it starts filling — for an unfilled offer
+        # we genuinely don't know your price, so we can't say it's mispriced, only show the market.
+        known = o.price > 0
         if o.is_buy:
             from .quote import optimal_quote
             from .tax import post_tax_received
             q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
             if not q:
                 return verdict, alert.color("         → no profitable spread now — cancel & redeploy that cash", "yellow")
-            # your bid is fine if it's at/above the competitive buy AND still profitable to sell
-            # into — only under-bidding (won't fill) or over-paying (no margin) needs a re-quote.
+            if not known:  # market spread exists → most likely just slow; show it to compare against
+                return "slow", alert.color(f"         → market now: buy {q.buy_px:,} / sell {q.sell_px:,} (net {q.net_unit}/ea) — fine if your bid ≥ {q.buy_px:,}", "yellow")
+            # known price: fine if at/above the competitive buy AND still profitable to sell into;
+            # only under-bidding (won't fill) or over-paying (no margin) needs a re-quote.
             net_at_mine = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
             if o.price >= q.buy_px and net_at_mine > 0:
                 return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green")
             return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
-        # SELL: is your ask still at/under the current market ask? then it fills, just slowly.
-        m = api.latest().get(o.item_id, {})
-        ask = m.get("high") or api.one_hour().get(o.item_id, {}).get("avgHighPrice")
+        # SELL: compare against the current market ask.
+        ask = api.latest().get(o.item_id, {}).get("high") or api.one_hour().get(o.item_id, {}).get("avgHighPrice")
         if not ask:
             return verdict, ""
         ask = int(round(ask))
+        if not known:
+            return "slow", alert.color(f"         → market ask {ask:,} — fine if you're listed ≤ {ask:,}", "yellow")
         if o.price <= ask:
             return "ontrack", alert.color(f"         → listed {o.price:,} ≤ market {ask:,} — priced to sell, just slow; hold", "green")
         return verdict, alert.color(f"         → re-list nearer {ask:,} — you're above market", "bold")
