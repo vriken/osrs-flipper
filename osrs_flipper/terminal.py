@@ -383,6 +383,8 @@ class Terminal:
                 print(f"    {o.slot:<2} {str(names.get(o.item_id, o.item_id))[:18]:18} "
                       f"{'BUY' if o.is_buy else 'SELL':4} {prog:>4.0%} {elapsed_h:>5.1f}h "
                       f"{eta_s:>6}  {alert.color(text, c) if c else text}")
+                if v in ("margin", "stale", "slow") and (hint := self._reprice_hint(o)):
+                    print(hint)
 
         active_sell_ids = {o.item_id for o in offers if not o.is_buy}  # SELL holdings (the old port tail)
         sell_rows = self._sell_plan(held, active_sell_ids)
@@ -430,6 +432,20 @@ class Terminal:
             wait = f"~{min(etas) * 60:.0f}m" if etas else "a while"
             return f"all slots working — nothing to do; check back in {wait}"
         return "idle — set cash with `bank <gp>`, or `scan` for ideas"
+
+    @staticmethod
+    def _reprice_hint(o) -> str:
+        """Fresh marketable price for a flagged offer, so 'cancel/re-quote' says what to re-quote
+        TO — not just that you should. Returns '' if there's nothing useful to add."""
+        from .quote import optimal_quote
+        q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
+        if not q:
+            return alert.color("         → no profitable spread right now — cancel & redeploy that cash", "yellow")
+        if o.is_buy:
+            if q.buy_px == o.price:
+                return alert.color(f"         → quote still says buy {q.buy_px:,} — it's just slow, not mispriced; hold", "yellow")
+            return alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
+        return alert.color(f"         → re-list at {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
 
     # --- background Discord alerts -------------------------------------------
     def _alerts_running(self) -> bool:
