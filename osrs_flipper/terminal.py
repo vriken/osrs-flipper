@@ -19,6 +19,7 @@ Commands (type `help`):
   calibrate | calib        measure empirical β + fill correction from your real attempts
   pos                      open positions + unrealised P&L (vs live bid)
   pnl                      realised P&L, cash, equity, bond progress
+  progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
   recent [n]               recent trades
   preds [n]                logged model predictions (for calibration)
   bank <amount>            set your current cash balance
@@ -693,6 +694,45 @@ class Terminal:
         if bond:
             print(f"  bond:        {bond:>14,.0f}  ({equity / bond * 100:.1f}% — {bond - equity:,.0f} to go)")
 
+    def cmd_progress(self, args: list[str]) -> None:
+        """Net-worth progress chart: realized history + live (marked-to-market) equity, projected
+        to 10M/100M at a growth rate re-fit from your own trade history. Saves + opens a PNG."""
+        from . import progress
+        rows = self.j.con.execute("SELECT ts, cash_delta, realized_pnl FROM ledger ORDER BY ts").fetchall()
+        if len(rows) < 2:
+            print("  not enough trade history yet — flip a bit, then `progress`")
+            return
+        lat = self.latest()
+        bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
+        equity_now = self.j.equity(bids)
+        initial, times, nw = progress.build_history(rows, self.j.cash())
+        rate, span_days = progress.fit_daily_rate(rows, initial)
+        out = "/tmp/osrs_progress.png"
+        if not progress.render(out, initial=initial, times=times, networth=nw, equity_now=equity_now,
+                               daily_rate=rate, span_days=span_days):
+            print("  matplotlib not installed — run `pip install matplotlib`, then `reload`")
+            return
+        print(f"  realized +{nw[-1] - initial:,.0f} over {span_days * 24:.1f}h · "
+              f"live equity {equity_now:,.0f} (unrealised {equity_now - nw[-1]:+,.0f})")
+        if rate:
+            for tgt, lbl in ((10e6, "10M"), (100e6, "100M")):
+                d = progress.eta_days(equity_now, tgt, rate)
+                if d:
+                    print(f"  {lbl}: ~{d:.0f} days at the fitted {rate:.1%}/day (optimistic — decays at scale)")
+        print(f"  saved {out}")
+        self._open(out)
+
+    @staticmethod
+    def _open(path: str) -> None:
+        """Open a file in the OS default viewer (best-effort, never raises)."""
+        import subprocess
+        import sys
+        cmd = {"darwin": "open"}.get(sys.platform, "xdg-open")
+        try:
+            subprocess.Popen([cmd, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
     def cmd_recent(self, args: list[str]) -> None:
         n = int(args[0]) if args and args[0].isdigit() else 10
         for t in self.j.recent(n):
@@ -763,6 +803,7 @@ class Terminal:
             "brief": lambda a: self.cmd_go(a), "now": lambda a: self.cmd_go(a),
             "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
             "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
+            "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
             "preds": lambda a: self.cmd_preds(a),
             "bank": lambda a: self.cmd_bank(a),
             "alerts": lambda a: self.cmd_alerts(a),
