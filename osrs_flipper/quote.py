@@ -95,6 +95,9 @@ def optimal_quote(
     # null/collapsed while the scanner (on 1h averages) still showed the item.
     cur = api.latest().get(item_id, {})
     hr = api.one_hour().get(item_id, {})
+    clow, chigh = cur.get("low"), cur.get("high")
+    if clow is not None and chigh is not None and clow > chigh:
+        return None  # crossed/inverted live book → prices unreliable
     bid = hr.get("avgLowPrice")
     bid = int(round(bid)) if bid is not None else cur.get("low")
     ask = hr.get("avgHighPrice")

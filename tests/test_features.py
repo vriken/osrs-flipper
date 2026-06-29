@@ -65,6 +65,13 @@ def test_fast_margin_collapses_on_thin_spread():
     assert df.loc[0, "margin_fast"] <= 0     # fast-fill (queue-jump) does not
 
 
+def test_crossed_live_book_is_dropped():
+    # live bid 407 > ask 258 (inverted, illiquid) → item excluded even if 1h avg looks fat
+    m = [_mapping(1, "Mithril warhammer")]
+    df = build_features({1: _latest(258, 407, 60)}, {1: _hourly(963, 694, 900, 200)}, m, now_ts=NOW)
+    assert df.empty
+
+
 def test_buy_limit_used_reduces_capacity():
     m = [_mapping(1, "Pricey", limit=1000)]
     lat, h1 = {1: _latest(2000, 1900, 60)}, {1: _hourly(2000, 1900, 100_000, 100_000)}

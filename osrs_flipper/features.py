@@ -46,6 +46,8 @@ def build_features(
             continue
 
         high, low = lp.get("high"), lp.get("low")
+        if high is not None and low is not None and low > high:
+            continue  # crossed/inverted live book (bid > ask) → prices unreliable, skip
         avg_high, avg_low = hp.get("avgHighPrice"), hp.get("avgLowPrice")
         high_vol = hp.get("highPriceVolume") or 0
         low_vol = hp.get("lowPriceVolume") or 0
