@@ -73,6 +73,68 @@ def classify(div_now: float, slope: float, *, div_min: float) -> tuple[str, str]
     return ("", "")
 
 
+def _mids_vols(bars: list[dict]) -> tuple[list[float], list[float]]:
+    mids, vols = [], []
+    for b in bars:
+        ah, al = b.get("avgHighPrice"), b.get("avgLowPrice")
+        if ah is None or al is None:
+            continue
+        mids.append((ah + al) / 2)
+        vols.append((b.get("highPriceVolume") or 0) + (b.get("lowPriceVolume") or 0))
+    return mids, vols
+
+
+def assess(iid: int, latest: dict[int, dict], hourly: dict[int, dict],
+           ts_fn: Callable[..., list[dict]], *, deep: bool = False) -> dict[str, Any]:
+    """Single-item 'why': live price vs recent baselines + volume z + slope + phase. `deep` adds the
+    multi-timeframe baseline table for the `why` command; the lean path (one 1h fetch) feeds `go`."""
+    lp, hp = latest.get(iid) or {}, hourly.get(iid) or {}
+    high, low = lp.get("high"), lp.get("low")
+    live_mid = (high + low) / 2 if (high and low) else None
+    res: dict[str, Any] = {"live_bid": low, "live_ask": high, "live_mid": live_mid,
+                           "avg_low": hp.get("avgLowPrice"), "avg_high": hp.get("avgHighPrice"),
+                           "baselines": {}, "ref_baseline": None, "div": 0.0, "vol_z": 0.0,
+                           "slope": 0.0, "phase": "", "verdict": ""}
+    steps = ([("5m", "1d"), ("1h", "2wk"), ("6h", "3mo"), ("24h", "30d")] if deep else [("1h", "2wk")])
+    ref_mids, ref_vols = [], []
+    for step, label in steps:
+        mids, vols = _mids_vols(ts_fn(iid, step))
+        if not mids:
+            continue
+        res["baselines"][label] = statistics.median(mids[-30:] if step == "24h" else mids)
+        if label == "2wk" or not ref_mids:  # the 2wk window is the reference for "below usual"
+            ref_mids, ref_vols = mids, vols
+    if live_mid is None or not res["baselines"]:
+        return res
+    ref_label = "2wk" if "2wk" in res["baselines"] else next(iter(res["baselines"]))
+    ref = res["baselines"][ref_label]
+    res["ref_label"], res["ref_baseline"] = ref_label, ref
+    res["div"] = (live_mid - ref) / ref if ref else 0.0
+    if ref_vols:
+        vstd = statistics.pstdev(ref_vols) or 1.0
+        res["vol_z"] = (ref_vols[-1] - statistics.median(ref_vols)) / vstd
+        res["slope"] = ref_mids[-1] - statistics.median(ref_mids[-4:-1]) if len(ref_mids) >= 4 else 0.0
+    res["phase"], res["verdict"] = classify(res["div"], res["slope"], div_min=config.ANOMALY_DIV_MIN)
+    return res
+
+
+def summary_line(a: dict[str, Any]) -> str:
+    """One-line 'why' for a `go` pick — is the price normal, a real dip to buy, or a falling knife?"""
+    if a.get("ref_baseline") is None or a.get("live_mid") is None:
+        return "no baseline data"
+    div, ref, lbl = a["div"], a["ref_baseline"], a["ref_label"]
+    if abs(div) < config.ANOMALY_DIV_MIN:
+        return f"price normal (~{ref:,.0f} {lbl} norm)"
+    spike = abs(a.get("vol_z", 0)) >= config.ANOMALY_VOL_Z_MIN
+    if div < 0:
+        if spike and a["slope"] > 0:
+            return f"⚡ {div*100:+.0f}% vs {lbl} norm {ref:,.0f} — dumped on volume & recovering; revert-buy"
+        if spike:
+            return f"⚡ {div*100:+.0f}% vs {lbl} norm {ref:,.0f} — dumped on volume; wait for the floor"
+        return f"⚠ {div*100:+.0f}% below {lbl} norm {ref:,.0f} on normal volume — re-rating, not a dip (falling knife)"
+    return f"⚡ {div*100:+.0f}% above {lbl} norm {ref:,.0f} — elevated; don't chase"
+
+
 def detect(latest: dict[int, dict], hourly: dict[int, dict], names: dict[int, str],
            timeseries_fn: Callable[[int], list[dict]], *, div_min: float | None = None,
            vol_min: int | None = None, vol_z_min: float | None = None,

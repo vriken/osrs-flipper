@@ -56,6 +56,32 @@ def test_detect_requires_volume_signature():
                           div_min=0.15, vol_min=1000, vol_z_min=2.0) == []
 
 
+def _bars(mids, vols):
+    return [{"avgHighPrice": m + 1, "avgLowPrice": m - 1,
+             "highPriceVolume": v // 2, "lowPriceVolume": v // 2} for m, v in zip(mids, vols, strict=True)]
+
+
+def test_assess_price_normal():
+    bars = _bars([100] * 20, [200] * 20)
+    a = anomaly.assess(1, {1: {"high": 101, "low": 99}}, {1: {}}, lambda i, s: bars)
+    assert abs(a["div"]) < 0.15 and "normal" in anomaly.summary_line(a)
+
+
+def test_assess_falling_knife_on_normal_volume():
+    # drifted ~45% below baseline on FLAT volume → re-rating, not a dip (swamp-paste case)
+    bars = _bars([100] * 17 + [80, 70, 55], [200] * 20)
+    a = anomaly.assess(1, {1: {"high": 56, "low": 54}}, {1: {}}, lambda i, s: bars)
+    assert a["div"] < -0.15
+    assert "falling knife" in anomaly.summary_line(a)
+
+
+def test_assess_overdump_recovering_on_volume_is_revert_buy():
+    bars = _bars([100] * 17 + [60, 55, 68], [200] * 19 + [9000])  # dumped, volume spike, turning up
+    a = anomaly.assess(1, {1: {"high": 69, "low": 67}}, {1: {}}, lambda i, s: bars)
+    assert a["div"] < -0.15 and a["vol_z"] >= 2
+    assert "revert-buy" in anomaly.summary_line(a)
+
+
 def test_detect_flags_overdump_with_revert_ev():
     # live ~70 dumped below a ~100 baseline, on a volume spike, still falling → DUMP↓, positive EV.
     # the 1h-avg lags at the old baseline (~100) — that's what makes the screen flag the dislocation
