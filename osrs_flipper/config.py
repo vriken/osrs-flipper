@@ -140,11 +140,13 @@ MIN_NET_MARGIN = int(os.environ.get("OSRS_FLIPPER_MIN_NET_MARGIN", 2))
 MAX_PRICE = None  # set to cap by item price; None = no cap
 HIGH_VALUE_THRESHOLD = 250_000_000  # above this, effective tax dips below 2%
 
-# Ranking blend: the composite score is gp/cycle ÷ fill_eta^time_weight, tilted toward
-# capital efficiency by × margin_pct^SCORE_ROI_WEIGHT. 0 = pure gp (old behaviour); higher =
-# prefer high-ROI flips even when they tie up less capital, so the gold works in *quality*
-# spreads rather than fat-but-thin-margin commodity churn.
-SCORE_ROI_WEIGHT = float(os.environ.get("OSRS_FLIPPER_SCORE_ROI_WEIGHT", 0.5))
+# Ranking blend: the composite score is gp/cycle ÷ fill_eta^time_weight, tilted toward capital
+# efficiency by × margin_pct^SCORE_ROI_WEIGHT. 0 = pure gp/throughput — ranks by total gold per
+# cycle (margin × quantity), so big-volume, high-quantity, thin-margin commodity flips rise to the
+# top; with a small bankroll, capacity is capital-capped, which naturally favours cheap high-volume
+# items you can buy in bulk. Higher (e.g. 0.5) prefers fat-margin% flips even at lower volume. Set to
+# 0 for the high-volume/quantity focus; raise it to chase margin% instead.
+SCORE_ROI_WEIGHT = float(os.environ.get("OSRS_FLIPPER_SCORE_ROI_WEIGHT", 0.0))
 # Daytime HOLD (accumulate) quality floor: don't park overflow cash in a slow hold unless it
 # clears this ROI. Stricter than the 1% active floor — a hold ties capital up for hours, so it
 # must earn its keep; below this, leave the cash liquid to recycle through the active slots.
