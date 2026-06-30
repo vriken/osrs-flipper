@@ -53,6 +53,21 @@ def test_coins_includes_platinum_tokens():
     assert local_export.coins(data) == 40_147 + 3_000
 
 
+def test_active_offers_map_to_offer_with_real_price():
+    offers = {o.slot: o for o in local_export.active_offers(FRESH)}
+    assert set(offers) == {0, 1}
+    buy = offers[0]
+    assert buy.is_buy and buy.item_id == 561 and buy.price == 100  # real listedPrice, not 0
+    assert buy.qty == 1000 and buy.filled == 300
+    sell = offers[1]
+    assert not sell.is_buy and sell.state == "SELLING" and sell.price == 533
+
+
+def test_active_offers_empty_without_data():
+    assert local_export.active_offers(None) == []
+    assert local_export.active_offers({"grandExchange": {"loaded": False}}) == []
+
+
 def test_open_offers_gated_on_loaded():
     assert len(local_export.open_offers(FRESH)) == 2
     assert local_export.open_offers({"grandExchange": {"loaded": False, "offers": {"0": {}}}}) == []

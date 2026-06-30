@@ -10,31 +10,29 @@ from osrs_flipper.terminal import Terminal
 na = Terminal._next_action
 
 
-def _stub(j):
+def _stub(j, offers=()):
     return types.SimpleNamespace(
-        j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000})
+        j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000},
+        _active_offers=lambda: list(offers))
 
 
 def test_autodetect_logs_pending_offer_once(tmp_path, monkeypatch):
     j = Journal(path=str(tmp_path / "j.duckdb"))
     monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
-    monkeypatch.setattr(term_mod.runelite, "active_offers",
-                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=4)])
-    stub = _stub(j)
-    assert Terminal._autodetect_placements(stub, {}) == 1   # first sync logs it
-    assert Terminal._autodetect_placements(stub, {}) == 0   # idempotent — already an open attempt
+    stub = _stub(j, [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=4)])
+    assert Terminal._autodetect_placements(stub) == 1   # first sync logs it
+    assert Terminal._autodetect_placements(stub) == 0   # idempotent — already an open attempt
     assert (561, "BUY") in {(a["item_id"], a["side"]) for a in j.open_attempts()}
     j.con.close()
 
 
 def test_autodetect_skips_unknown_price(tmp_path, monkeypatch):
-    # a fully-unfilled offer has price 0 in RuneLite — don't log a price-0 attempt (poisons β);
-    # it gets logged at its real price once it starts filling.
+    # a fallback FU offer with price 0 (unfilled) — don't log a price-0 attempt (poisons β); the
+    # exporter normally carries the real price, so this only guards the FU-only fallback path.
     j = Journal(path=str(tmp_path / "j3.duckdb"))
     monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
-    monkeypatch.setattr(term_mod.runelite, "active_offers",
-                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=0)])
-    assert Terminal._autodetect_placements(_stub(j), {}) == 0
+    stub = _stub(j, [Offer(slot=0, item_id=561, is_buy=True, state="BUYING", qty=1000, price=0)])
+    assert Terminal._autodetect_placements(stub) == 0
     assert not j.open_attempts()
     j.con.close()
 
@@ -44,9 +42,8 @@ def test_autodetect_skips_completed_offers(tmp_path, monkeypatch):
     # double-count, so detection only records still-pending BUYING/SELLING offers.
     j = Journal(path=str(tmp_path / "j2.duckdb"))
     monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 561, "name": "Air rune"}])
-    monkeypatch.setattr(term_mod.runelite, "active_offers",
-                        lambda rl: [Offer(slot=0, item_id=561, is_buy=True, state="BOUGHT", qty=1000, price=4)])
-    assert Terminal._autodetect_placements(_stub(j), {}) == 0
+    stub = _stub(j, [Offer(slot=0, item_id=561, is_buy=True, state="BOUGHT", qty=1000, price=4)])
+    assert Terminal._autodetect_placements(stub) == 0
     assert not j.open_attempts()
     j.con.close()
 

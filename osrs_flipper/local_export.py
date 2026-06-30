@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .runelite import Offer
+
 EXPORT_DIR = Path.home() / ".runelite" / "local-data-exporter"
 LATEST = EXPORT_DIR / "latest.json"
 COINS_ID = 995
@@ -78,6 +80,31 @@ def open_offers(data: dict | None) -> list[dict]:
     if not ge.get("loaded"):
         return []
     return list((ge.get("offers") or {}).values())
+
+
+def active_offers(data: dict | None) -> list[Offer]:
+    """Active GE offers as runelite.Offer objects, read from client.getGrandExchangeOffers().
+
+    Two advantages over the Flipping Utilities slotTimers: it carries the REAL listed price (FU
+    reports 0 until an offer starts filling), and it survives a relog — the client repopulates your
+    GE offers on login, whereas FU's slotTimers don't come back cleanly in a new session (which is
+    why active orders 'disappear' after a restart). `started_ms` isn't exported, so it's 0 (= unknown
+    age); the caller enriches it from FU when both are present."""
+    out = []
+    for o in open_offers(data):
+        state = o.get("state") or ""
+        out.append(Offer(
+            slot=int(o.get("slot", -1)),
+            item_id=int(o.get("itemId", 0)),
+            is_buy="BUY" in state,
+            state=state,
+            qty=int(o.get("totalQuantity", 0)),
+            price=int(o.get("listedPrice", 0)),
+            started_ms=0,
+            filled=int(o.get("completedQuantity", 0)),
+            uuid="",
+        ))
+    return out
 
 
 def tied_gold(data: dict | None) -> int:

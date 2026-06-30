@@ -246,12 +246,12 @@ class Terminal:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
         rl = runelite.read()
-        offers = runelite.active_offers(rl) if rl else []
+        offers = self._active_offers()  # relog-proof active offers
         active_ids = [o.item_id for o in offers]
         if args and args[0].isdigit():
             free, source = int(args[0]), "specified"
-        elif rl is not None:
-            free, source = runelite.free_slots(rl, config.GE_SLOTS), "runelite"
+        elif offers or rl is not None:
+            free, source = self._free_slots(offers), "live"
         else:
             free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
         # don't recommend what you already hold OR already have an offer on
@@ -294,6 +294,31 @@ class Terminal:
             self.j.set_cash(float(c))
         return c, local_export.tied_gold(le)
 
+    def _active_offers(self) -> list:
+        """Authoritative live GE offers, robust across game restarts. The Local Data Exporter is
+        primary — it reads the client's real GE offers (true listed prices, and they repopulate on
+        login), so active orders no longer vanish after you close and reopen the game (Flipping
+        Utilities' slotTimers don't come back cleanly in a new session). Each offer is enriched with
+        FU's placement time per slot for age/ETA, and we fall back to FU entirely if the exporter
+        isn't running."""
+        leo = local_export.active_offers(local_export.read())
+        rl = runelite.read()
+        fu = runelite.active_offers(rl) if rl else []
+        if not leo:
+            return fu
+        by_slot = {o.slot: o for o in fu}
+        for o in leo:  # FU knows when each offer was placed; the exporter doesn't
+            f = by_slot.get(o.slot)
+            if f and f.item_id == o.item_id:
+                o.started_ms = f.started_ms or o.started_ms
+                o.uuid = f.uuid or o.uuid
+        return leo
+
+    def _free_slots(self, offers: list | None = None) -> int:
+        """Observed free GE slots from the relog-proof offer source."""
+        offers = self._active_offers() if offers is None else offers
+        return max(0, config.GE_SLOTS - len(offers))
+
     def _autosync(self) -> int:
         """Mirror RuneLite's completed fills into the journal and reconcile them against placed
         attempts. Idempotent → safe to call often."""
@@ -311,7 +336,7 @@ class Terminal:
                 n += 1
                 self.j.reconcile_fill(f.item_id, f.is_buy, delta, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
-        self._autodetect_placements(rl)
+        self._autodetect_placements()
         # authoritative position re-sync from the full offer history — heals phantoms left by
         # out-of-order incremental imports (the silent-cap bug).
         for name, old, new in self.j.reconcile_positions(fills):
@@ -320,7 +345,7 @@ class Terminal:
         self.j.expire_stale_attempts(int(time.time()))
         return n
 
-    def _autodetect_placements(self, rl: dict) -> int:
+    def _autodetect_placements(self) -> int:
         """Record any live pending offer not already tracked as an open attempt — so placing in
         game auto-logs it for calibration without typing `placed`. Only BUYING/SELLING (pending)
         offers: a BOUGHT/SOLD offer is a completed fill, already imported above. Idempotent —
@@ -328,10 +353,11 @@ class Terminal:
         open_keys = {(a["item_id"], a["side"]) for a in self.j.open_attempts()}
         names = None
         n = 0
-        for o in runelite.active_offers(rl):
-            # only pending offers with a real price: RuneLite reports price 0 until an offer
-            # starts filling, so we log it (at its true price) once it does — a price-0 attempt
-            # would poison β calibration. BOUGHT/SOLD are completed fills, imported above.
+        for o in self._active_offers():
+            # only pending offers with a real price. The Local Data Exporter carries the true listed
+            # price even at 0% fill, so a placement is logged the moment you make it (Flipping
+            # Utilities reports 0 until it fills); the price>0 guard still skips any FU-only fallback
+            # offer whose price isn't known yet, which would poison β calibration.
             if o.state not in ("BUYING", "SELLING") or o.price <= 0:
                 continue
             side = "BUY" if o.is_buy else "SELL"
@@ -357,8 +383,7 @@ class Terminal:
     def _review_offers(self) -> list[tuple]:
         """For each live offer: (offer, verdict, elapsed_h, eta_h, progress). Shares the pure
         verdict logic with the background alert watcher (monitor.review_offers)."""
-        rl = runelite.read()
-        offers = runelite.active_offers(rl) if rl else []
+        offers = self._active_offers()
         if not offers:
             return []
         return monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
@@ -432,9 +457,8 @@ class Terminal:
         cash = int(self.j.cash()) or config.BANKROLL
         held = self.j.positions()
         rl = runelite.read()
-        offers = runelite.active_offers(rl) if rl else []
-        free = (runelite.free_slots(rl, config.GE_SLOTS) if rl is not None
-                else max(0, config.GE_SLOTS - len(held)))
+        offers = self._active_offers()  # relog-proof: real GE offers, survives a restart
+        free = self._free_slots(offers)
         bp = scanner.bond_progress(cash) if not config.MEMBERS else {}
         pct = f" · {bp['pct']:.0f}% to bond" if bp.get("pct") else ""
         # runway to bed picks the plan: a flip placed now must round-trip (buy + sell) before
@@ -452,7 +476,7 @@ class Terminal:
         cash_str = f"cash {cash:,}" + (f" (+{tied:,} in offers)" if coins is not None and tied else "")
         print(f"  === {hour:02d}:00 · {cash_str} · {len(held)} held · "
               f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
-        if held and rl is not None:  # split holdings into bank (sellable) vs tied up in GE
+        if held and offers:  # split holdings into bank (sellable) vs tied up in GE
             sp = runelite.holdings_split(held, offers)
             nb = sum(1 for h in sp.values() if h["bank"] > 0)
             nl = sum(1 for h in sp.values() if h["listed"] > 0)
@@ -494,7 +518,7 @@ class Terminal:
             fcal = self._fill_cal()
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
                                                   limit_used=self._limit_used(rl), fill_cal=fcal)
-            src = "runelite" if rl is not None else "assumed"
+            src = "live" if offers else ("runelite" if rl is not None else "assumed")
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
             if fcal.get("global_measured") is not None:
                 print(f"  (fills auto-calibrated ×{fcal['global']:.2f} from {fcal['n']} attempts — "
@@ -667,9 +691,9 @@ class Terminal:
         cushioned, sized to fill over ~8h. Splits the whole pile across the free slots."""
         from .quote import optimal_quote
         held = self.j.positions()
-        rl = runelite.read()
-        offers = runelite.active_offers(rl) if rl else []
-        free = runelite.free_slots(rl, config.GE_SLOTS) if rl is not None else max(0, config.GE_SLOTS - len(held))
+        rl = runelite.read()  # for the FU buy-limit counter (limit_used)
+        offers = self._active_offers()  # relog-proof active offers
+        free = self._free_slots(offers)
         if free <= 0:
             print("  no free slots — collect or cancel an offer first, then `overnight`")
             return
@@ -742,12 +766,11 @@ class Terminal:
             print(alert.color(f"    ⚠ thin margin ({margin_pct:.1%}) — risky to leave overnight; a small dip could go red", "red"))
 
     def cmd_orders(self, args: list[str]) -> None:
-        rl = runelite.read()
-        if not rl:
-            print("  no RuneLite data found (~/.runelite/flipping/) — is Flipping Utilities tracking?")
+        offers = self._active_offers()
+        if not offers:
+            print("  no active offers found — logged in, with Local Data Exporter or Flipping Utilities running?")
             return
-        offers = runelite.active_offers(rl)
-        occ, free = runelite.occupied_slots(rl), runelite.free_slots(rl, config.GE_SLOTS)
+        occ, free = len(offers), self._free_slots(offers)
         names = {r["id"]: r["name"] for r in api.mapping()}
         print(f"  GE slots: {occ} occupied, {free} free (of {config.GE_SLOTS})")
         for o in sorted(offers, key=lambda x: x.slot):
@@ -914,11 +937,7 @@ class Terminal:
     def cmd_inventory(self, args: list[str]) -> None:
         """What you actually hold, split BANK (sellable now) vs IN-GE (listed for sale / being
         bought), reconciled from your transactions against live RuneLite offers. Alias: inv."""
-        rl = runelite.read()
-        if rl is None:
-            print("  no RuneLite data — `pos` shows total holdings; can't split bank vs GE without it")
-            return
-        split = runelite.holdings_split(self.j.positions(), runelite.active_offers(rl))
+        split = runelite.holdings_split(self.j.positions(), self._active_offers())
         if not split:
             print("  nothing held or in GE")
             return
