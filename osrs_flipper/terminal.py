@@ -341,6 +341,14 @@ class Terminal:
         # out-of-order incremental imports (the silent-cap bug).
         for name, old, new in self.j.reconcile_positions(fills):
             print(f"  reconciled {name}: {old:,} → {new:,} held (matched to RuneLite's offer history)")
+        # bag is the final word: drop/trim positions not in your bag or GE (sells that never reached
+        # this device's RuneLite). Only when the inventory + GE snapshot is live, so a blank read
+        # can't wrongly clear real stock. Bank excluded — you keep stock in your bag.
+        held = local_export.holdings(local_export.read())
+        if held is not None:
+            for name, old, new in self.j.reconcile_to_holdings(held):
+                tag = "dropped (not in bag or GE)" if new == 0 else "trimmed to bag + GE"
+                print(f"  {name}: {old:,} → {new:,} — {tag}")
         self._sync_cash()  # authoritative cash from live coins, if the exporter is running
         self.j.expire_stale_attempts(int(time.time()))
         return n
@@ -926,13 +934,20 @@ class Terminal:
             print("  no RuneLite data — can't reconcile against the offer history")
             return
         drift = self.j.reconcile_positions(runelite.completed_offers(rl))
-        if not drift:
-            print("  positions already match RuneLite's offer history — nothing to correct")
+        # bag is the final word: clear/trim positions not in your bag or GE (sells RuneLite's window
+        # missed, or off-device sells). Reduce-only, only when the live snapshot is present.
+        held = local_export.holdings(local_export.read())
+        bag_drift = self.j.reconcile_to_holdings(held) if held is not None else []
+        if not drift and not bag_drift:
+            print("  positions already match your offer history + bag — nothing to correct")
             return
         for name, old, new in drift:
-            print(f"  {name}: {old:,} → {new:,} held  (corrected)")
-        print(f"  reconciled {len(drift)} position(s). Cash/P&L from a historically mis-recorded sell "
-              "aren't auto-rewritten — run `bank <gp>` to resync cash if it looks off.")
+            print(f"  {name}: {old:,} → {new:,} held  (offer history)")
+        for name, old, new in bag_drift:
+            tag = "dropped (not in bag or GE)" if new == 0 else "trimmed to bag + GE"
+            print(f"  {name}: {old:,} → {new:,} held  ({tag})")
+        print(f"  reconciled {len(drift) + len(bag_drift)} position(s). Cash/P&L from a historically "
+              "mis-recorded sell aren't auto-rewritten — cash is read live from your coins.")
 
     def cmd_inventory(self, args: list[str]) -> None:
         """What you actually hold, split BANK (sellable now) vs IN-GE (listed for sale / being
