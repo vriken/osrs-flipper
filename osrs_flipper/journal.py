@@ -155,6 +155,49 @@ class Journal:
         self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
                          [item_id, name, qty, float(avg_cost)])
 
+    def sync_positions_to_bag(self, holdings: dict[int, int], fills) -> list[tuple[str, int, int]]:
+        """Bag = ground truth for held QUANTITY (you keep flip stock in your bag). Set each position's
+        qty to the bag amount, with avg_cost from the existing position (else from buy history, else
+        0). Drop positions not in the bag. Idempotent and SELF-HEALING: it replaces the fragile
+        manual_fills / dual-reconcile mechanism, so a momentarily-stale snapshot corrects on the next
+        sync instead of corrupting permanently. Call ONLY with a live bag snapshot.
+
+        Cash/realised P&L are untouched (cash is read live from coins; P&L from the sell ledger).
+        Clears manual_fills — with the bag authoritative, the old forget/hold/reconcile-drop
+        adjustments are obsolete and were the source of the suppression bug.
+
+        `holdings` maps tradeable item_id → units held (local_export.holdings, noted-folded).
+        `fills` is RuneLite's offer history (for the cost basis). Returns [(name, old, new)]."""
+        bought: dict[int, int] = {}
+        cost: dict[int, int] = {}
+        name_of: dict[int, str] = {}
+        for f in fills:
+            name_of[f.item_id] = f.name
+            if f.is_buy:
+                bought[f.item_id] = bought.get(f.item_id, 0) + f.qty
+                cost[f.item_id] = cost.get(f.item_id, 0) + f.qty * f.price
+        cur = {p.item_id: p for p in self.positions()}
+        changes = []
+        for iid, qty in holdings.items():
+            if qty <= 0:
+                continue
+            p = cur.get(iid)
+            if p and p.qty == qty:
+                continue  # already correct
+            if not p and not bought.get(iid):
+                continue  # in the bag but never bought through this journal — incidental junk
+                          # (a stray vial, an off-device item); use `hold <item> <qty> <avg>` to track
+            avg = p.avg_cost if p else cost[iid] / bought[iid]
+            nm = (p.name if p else name_of.get(iid)) or str(iid)
+            self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [iid, nm, qty, avg])
+            changes.append((nm, p.qty if p else 0, qty))
+        for iid, p in cur.items():
+            if holdings.get(iid, 0) <= 0:
+                self.con.execute("DELETE FROM positions WHERE item_id=?", [iid])
+                changes.append((p.name, p.qty, 0))
+        self.con.execute("DELETE FROM manual_fills")  # bag is authoritative now; drop stale adjustments
+        return changes
+
     def reconcile_to_holdings(self, holdings: dict[int, int]) -> list[tuple[str, int, int]]:
         """Reduce each tracked position to what you ACTUALLY hold (bag + GE, from local_export), so
         positions left over from sells that never reached this device's RuneLite (window rolled over,

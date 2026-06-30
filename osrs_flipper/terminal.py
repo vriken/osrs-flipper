@@ -23,6 +23,7 @@ Commands (type `help`):
   pos                      open positions + unrealised P&L (vs live bid)
   inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
   reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
+  audit                    full reconciliation: buy/sell history + live bag, per-item P&L (inspect only)
   forget <item>            untrack a holding traded elsewhere (stays gone through reconcile)
   hold <item> <qty> [avg]  track a holding acquired elsewhere (adds it, no cash spent)
   recover | recovery       underwater holdings: bounce-likely (hold/double down) vs re-rating (cut)
@@ -338,18 +339,17 @@ class Terminal:
                 self.j.reconcile_fill(f.item_id, f.is_buy, delta, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
         self._autodetect_placements()
-        # authoritative position re-sync from the full offer history — heals phantoms left by
-        # out-of-order incremental imports (the silent-cap bug).
-        for name, old, new in self.j.reconcile_positions(fills):
-            print(f"  reconciled {name}: {old:,} → {new:,} held (matched to RuneLite's offer history)")
-        # bag is the final word: drop/trim positions not in your bag or GE (sells that never reached
-        # this device's RuneLite). Only when the inventory + GE snapshot is live, so a blank read
-        # can't wrongly clear real stock. Bank excluded — you keep stock in your bag.
+        # POSITIONS: the live bag is ground truth for held quantity (you keep flip stock in your
+        # bag), with cost from your buy history — one idempotent, self-healing pass. Falls back to
+        # the offer-history net only when the bag snapshot isn't live (exporter off / logged out).
         held = local_export.holdings(local_export.read(), {r["id"] for r in api.mapping()})
         if held is not None:
-            for name, old, new in self.j.reconcile_to_holdings(held):
-                tag = "dropped (not in bag or GE)" if new == 0 else "trimmed to bag + GE"
+            for name, old, new in self.j.sync_positions_to_bag(held, fills):
+                tag = "dropped (not in bag/GE)" if new == 0 else "matched to bag"
                 print(f"  {name}: {old:,} → {new:,} — {tag}")
+        else:
+            for name, old, new in self.j.reconcile_positions(fills):
+                print(f"  reconciled {name}: {old:,} → {new:,} held (offer history)")
         self._sync_cash()  # authoritative cash from live coins, if the exporter is running
         self.j.expire_stale_attempts(int(time.time()))
         return n
@@ -969,6 +969,51 @@ class Terminal:
         print("  qty = realizable over ~8h at a passive share of volume; post at the bid/ask and "
               "leave it. Slow to fill — don't expect day-flip turnover.")
 
+    def cmd_audit(self, args: list[str]) -> None:
+        """Full reconciliation from the authoritative sources — RuneLite's complete buy/sell history
+        (the trades file) + your live bag. Per item: total bought, total sold, history net, what you
+        ACTUALLY hold, avg cost, and realised P&L (avg-cost basis). Flags any discrepancy (a sell that
+        rolled out of RuneLite's retained window or happened on another device). Read-only."""
+        from collections import defaultdict
+
+        from .tax import post_tax_received
+        rl = runelite.read()
+        if not rl:
+            print("  no RuneLite data — can't audit without the trade history")
+            return
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        bag = local_export.holdings(local_export.read(), set(names)) or {}
+        agg: dict[int, dict] = defaultdict(lambda: {"bq": 0, "bc": 0, "sq": 0, "sp": 0})
+        for f in runelite.completed_offers(rl):  # authoritative completed buys + sells
+            a = agg[f.item_id]
+            if f.is_buy:
+                a["bq"] += f.qty
+                a["bc"] += f.qty * f.price
+            else:
+                a["sq"] += f.qty
+                a["sp"] += f.qty * post_tax_received(f.price, item_id=f.item_id)
+        items = sorted(set(agg) | set(bag), key=lambda i: -(agg[i]["sp"] + bag.get(i, 0)))
+        tot_real = tot_hold = 0.0
+        print(f"  {'item':22}{'bought':>8}{'sold':>8}{'net':>7}{'held':>7}{'avg':>7}{'realP&L':>10}  flag")
+        for iid in items:
+            a = agg[iid]
+            held = bag.get(iid, 0)
+            if a["bq"] == 0 and held == 0:
+                continue
+            avg = a["bc"] / a["bq"] if a["bq"] else 0.0
+            realized = a["sp"] - a["sq"] * avg
+            net = a["bq"] - a["sq"]
+            tot_real += realized
+            tot_hold += held * avg
+            flag = "" if net == held else f"Δ{held - net:+,} (off-device/rolled out)"
+            print(f"  {names.get(iid, str(iid))[:22]:22}{a['bq']:>8,}{a['sq']:>8,}{net:>7,}{held:>7,}"
+                  f"{avg:>7,.0f}{realized:>+10,.0f}  {flag}")
+        print(f"  {'TOTAL':22}{'':>8}{'':>8}{'':>7}{'':>7}{'':>7}{tot_real:>+10,.0f}  (history, avg-cost)")
+        print(f"  journal realised P&L: {self.j.realized_pnl():>+,.0f} (live ledger) · "
+              f"holdings cost basis: {tot_hold:,.0f}")
+        print("  net = bought − sold (history). held = your live bag + open offers. a Δ flag means "
+              "the bag and the retained history disagree — bag wins (it's what you actually have).")
+
     def cmd_reconcile(self, args: list[str]) -> None:
         """Recompute every held position from RuneLite's full completed-offer history (authoritative,
         order-independent), correcting phantoms from out-of-order imports. Runs automatically on each
@@ -1182,7 +1227,7 @@ class Terminal:
             "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
             "gear": lambda a: self.cmd_gear(a), "big": lambda a: self.cmd_gear(a),
             "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
-            "reconcile": lambda a: self.cmd_reconcile(a),
+            "reconcile": lambda a: self.cmd_reconcile(a), "audit": lambda a: self.cmd_audit(a),
             "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
             "hold": lambda a: self.cmd_hold(a), "own": lambda a: self.cmd_hold(a),
             "recover": lambda a: self.cmd_recover(a), "recovery": lambda a: self.cmd_recover(a),

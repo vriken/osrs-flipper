@@ -162,6 +162,21 @@ def test_reconcile_to_holdings_drops_phantom_and_trims(j):
     assert j.position(1) is None and j.position(2).qty == 327 and j.position(3).qty == 100
 
 
+def test_sync_positions_to_bag_sets_qty_and_cost_and_clears_junk(j):
+    from osrs_flipper.runelite import Fill
+    # an erroneous old manual SELL + a leftover phantom; the bag is the truth
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [9, "Phantom", 5000, 10.0])
+    j.record_manual_fill(2114, "Pineapple", is_buy=False, qty=1500)  # bad drop
+    fills = [Fill(uuid="b", item_id=2114, name="Pineapple", is_buy=True, qty=1630, price=202, state="BOUGHT", t_ms=0)]
+    changes = j.sync_positions_to_bag({2114: 1500, 229: 1}, fills)   # bag holds Pineapple 1500 + a junk Vial
+    p = j.position(2114)
+    assert p.qty == 1500 and round(p.avg_cost) == 202        # qty from bag, cost from buy history
+    assert j.position(9) is None                              # phantom not in bag → dropped
+    assert j.position(229) is None                            # in bag but never bought here → skipped as junk
+    assert j.con.execute("SELECT COUNT(*) FROM manual_fills").fetchone()[0] == 0  # corruption cleared
+    assert ("Pineapple", 0, 1500) in changes
+
+
 def test_reconcile_to_holdings_is_reduce_only(j):
     # bag shows MORE than the journal tracks (e.g. bought off-device) → never inflate, unknown cost
     j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [1, "X", 50, 10.0])
