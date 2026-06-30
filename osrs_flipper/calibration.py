@@ -113,6 +113,16 @@ def calibrate_fill(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict
     return out
 
 
+def effective_beta(cal: dict | None, fallback: float, *, lo: float = 0.0, hi: float = 0.5) -> float:
+    """The β to actually use = the calibrated (shrunk) global spread-haircut, clamped to a sane
+    range. Falls back to the config prior when there's no calibration yet (the shrink already keeps
+    it near the prior with little data, so this is mostly belt-and-suspenders)."""
+    if not cal:
+        return fallback
+    g = cal.get("global")
+    return max(lo, min(hi, g if g is not None else fallback))
+
+
 def fill_multiplier(cal: dict | None, turnover: float, *, lo: float = 0.1, hi: float = 1.5) -> float:
     """Per-item EV correction: the item's turnover-bucket shrunk fill factor (else global, else
     1.0), clamped so a thin/degenerate sample can't zero out or balloon the estimate."""

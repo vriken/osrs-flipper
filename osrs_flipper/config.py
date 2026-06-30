@@ -64,7 +64,10 @@ TAX_MIN_PRICE = 50  # items below this are effectively exempt (tax floors to 0)
 EXEMPT_ITEM_IDS: frozenset[int] = frozenset({13190})  # Old school bond
 
 # --- Fill model parameters (see fills.py) ------------------------------------
-BETA = 0.25  # spread haircut: buy at low+β·spread, sell at high−β·spread
+BETA = 0.25  # spread haircut PRIOR: buy at low+β·spread, sell at high−β·spread. The live value is
+# auto-calibrated from your real fills (shrunk toward this prior) and refreshed every
+# CALIBRATE_EVERY_TRADES resolved attempts — this is just the starting point / fallback.
+CALIBRATE_EVERY_TRADES = int(os.environ.get("OSRS_FLIPPER_CALIBRATE_EVERY_TRADES", 10))
 GAMMA = 0.15  # per-bar fill capture as fraction of contra-volume
 ALPHA = 0.10  # capacity capture as fraction of window volume
 ADVERSE_GATE = True  # only fill in bars where price moved against you (flat-or-worse)
