@@ -735,11 +735,17 @@ class Terminal:
             q = optimal_quote(iid, qty, name=r["name"], horizon_h=8.0) if qty > 0 else None
             if not q:
                 continue
-            filled = int(q.qty * q.p_buy)
-            rows.append({"name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": q.qty,
-                         "deploy": q.qty * q.buy_px, "fill8h": q.p_buy, "profit": q.net_unit * filled})
+            # the quote posts INSIDE the spread, so buy_px > bid — re-cap qty to what the remaining
+            # cash actually affords at that price, or the plan deploys more than you have.
+            aqty = min(int(q.qty), int(remaining // q.buy_px))
+            if aqty <= 0:
+                continue
+            deploy = aqty * q.buy_px
+            filled = int(aqty * q.p_buy)
+            rows.append({"name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": aqty,
+                         "deploy": deploy, "fill8h": q.p_buy, "profit": q.net_unit * filled})
             exclude.add(iid)
-            remaining -= q.qty * q.buy_px
+            remaining -= deploy
             slots_left -= 1
         print(f"  OVERNIGHT plan — ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion, sized to fill over ~8h:")
         print(alert.format_overnight(rows, cash, free))
@@ -766,10 +772,15 @@ class Terminal:
         if not q:
             print(f"  {name}: no profitable overnight quote")
             return
-        filled = int(q.qty * q.p_buy)
+        # the quote posts inside the spread (buy_px > bid), so re-cap to what cash affords at buy_px
+        aqty = min(int(q.qty), cash // int(q.buy_px))
+        if aqty <= 0:
+            print(f"  {name}: not enough cash at the quote price")
+            return
+        filled = int(aqty * q.p_buy)
         margin_pct = q.net_unit / q.buy_px if q.buy_px else 0
         print(f"  OVERNIGHT (~8h) — {name}")
-        print(f"    BUY  {q.qty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} ≈ {filled:,} fill overnight, ties up ~{q.qty * q.buy_px:,} gp)")
+        print(f"    BUY  {aqty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} ≈ {filled:,} fill overnight, ties up ~{aqty * q.buy_px:,} gp)")
         print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{q.net_unit * filled:,} gp profit (net {q.net_unit}/unit, {margin_pct:.1%})")
         if margin_pct < config.OVERNIGHT_MIN_MARGIN:
             print(alert.color(f"    ⚠ thin margin ({margin_pct:.1%}) — risky to leave overnight; a small dip could go red", "red"))
