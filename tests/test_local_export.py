@@ -75,6 +75,20 @@ def test_holdings_bag_plus_sells_plus_bought_uncollected():
     assert 995 not in h  # coins excluded
 
 
+def test_holdings_folds_noted_items_onto_tradeable_id():
+    # GE-collected stock lands in the bag NOTED (id = tradeable+1, not in the mapping). It must fold
+    # onto the tradeable id (561) so it matches the journal position, not vanish as id 562.
+    data = {
+        "gameState": "LOGGED_IN", "inventoryLoaded": True, "inventoryFromCache": False,
+        "inventory": {"items": {"0": {"id": 562, "quantity": 200}}},   # 562 = noted Nature rune
+        "grandExchange": {"loaded": True, "offers": {}},
+    }
+    h = local_export.holdings(data, tradeable_ids={561})
+    assert h == {561: 200}              # folded onto the tradeable id
+    assert local_export.canonical_id(562, {561}) == 561
+    assert local_export.canonical_id(561, {561}) == 561   # already tradeable → unchanged
+
+
 def test_holdings_none_unless_inventory_and_ge_live():
     assert local_export.holdings(None) is None
     assert local_export.holdings({**FRESH, "inventoryLoaded": False}) is None

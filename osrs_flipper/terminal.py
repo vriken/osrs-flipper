@@ -345,7 +345,7 @@ class Terminal:
         # bag is the final word: drop/trim positions not in your bag or GE (sells that never reached
         # this device's RuneLite). Only when the inventory + GE snapshot is live, so a blank read
         # can't wrongly clear real stock. Bank excluded — you keep stock in your bag.
-        held = local_export.holdings(local_export.read())
+        held = local_export.holdings(local_export.read(), {r["id"] for r in api.mapping()})
         if held is not None:
             for name, old, new in self.j.reconcile_to_holdings(held):
                 tag = "dropped (not in bag or GE)" if new == 0 else "trimmed to bag + GE"
@@ -980,7 +980,7 @@ class Terminal:
         drift = self.j.reconcile_positions(runelite.completed_offers(rl))
         # bag is the final word: clear/trim positions not in your bag or GE (sells RuneLite's window
         # missed, or off-device sells). Reduce-only, only when the live snapshot is present.
-        held = local_export.holdings(local_export.read())
+        held = local_export.holdings(local_export.read(), {r["id"] for r in api.mapping()})
         bag_drift = self.j.reconcile_to_holdings(held) if held is not None else []
         if not drift and not bag_drift:
             print("  positions already match your offer history + bag — nothing to correct")
