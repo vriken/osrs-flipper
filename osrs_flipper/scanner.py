@@ -13,8 +13,17 @@ from .persistence import fetch_persistence
 RANK_COL = "score"
 # snapshot (--no-persistence) quick path: composite = gp/cycle ÷ fill_eta^w
 MODE_WEIGHTS = {"online": 1.0, "balanced": 0.5, "offline": 0.0}
+# Per-mode ROI tilt: active/day modes rank on pure throughput (volume × margin); the overnight
+# (offline) mode ranks on margin% so slow capital sits in fat-margin holds worth leaving overnight.
+MODE_ROI_WEIGHT = {"online": config.ROI_WEIGHT_FAST, "balanced": config.ROI_WEIGHT_FAST,
+                   "offline": config.ROI_WEIGHT_SLOW}
 # deep path: mode sets the quote horizon — short = fill-now (online), long = patient (offline)
 MODE_HORIZON = {"online": 0.5, "balanced": 2.0, "offline": 8.0}
+
+
+def _mode_roi_weight(mode: str) -> float:
+    """ROI tilt for a scan mode: volume/throughput by day (online/balanced), margin% overnight."""
+    return MODE_ROI_WEIGHT.get(mode, config.SCORE_ROI_WEIGHT)
 
 
 def _roi_mult(margin_pct: float | None, roi_weight: float) -> float:
@@ -105,7 +114,8 @@ def scan(
     df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"]
     df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"]
 
-    df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=config.SCORE_ROI_WEIGHT)
+    roi_weight = _mode_roi_weight(mode)  # volume by day (online/balanced), margin overnight (offline)
+    df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=roi_weight)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
     df = df[df["score"] > 0]
     if df.empty:
@@ -153,7 +163,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
             "exp_gp_cycle_adj": q.ev * mult, "reliability": reliability, "fill_mult": mult,
             "raw_score": q.ev / horizon * mult * _roi_mult(
-                q.net_unit / q.buy_px if q.buy_px else None, config.SCORE_ROI_WEIGHT),
+                q.net_unit / q.buy_px if q.buy_px else None, _mode_roi_weight(mode)),
         })
     if not rows:
         return pd.DataFrame()
@@ -208,7 +218,8 @@ def _place_score(p: dict) -> float:
     high-ROI slow flips under fat-but-thin-margin churn."""
     eta = p["buy_eta_h"] if p.get("buy_eta_h", float("inf")) < 100 else 100.0
     roi = p["margin_abs"] / p["buy_px"] if p.get("buy_px") else 0.0
-    return p["gp"] / max(eta, 1e-9) * _roi_mult(roi, config.SCORE_ROI_WEIGHT)
+    # build_portfolio is the active/day plan → throughput order (the overnight plan ranks separately)
+    return p["gp"] / max(eta, 1e-9) * _roi_mult(roi, config.ROI_WEIGHT_FAST)
 
 
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,

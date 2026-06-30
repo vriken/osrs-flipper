@@ -2,8 +2,16 @@
 
 import pandas as pd
 
-from osrs_flipper import scanner
+from osrs_flipper import config, scanner
 from osrs_flipper.scanner import MODE_WEIGHTS, _allocate, _composite, _schedule, _shrink, _worth_gp
+
+
+def test_mode_roi_weight_volume_by_day_margin_overnight():
+    # active/day modes rank on throughput (roi weight 0); overnight ranks on margin%
+    assert scanner._mode_roi_weight("online") == config.ROI_WEIGHT_FAST
+    assert scanner._mode_roi_weight("balanced") == config.ROI_WEIGHT_FAST
+    assert scanner._mode_roi_weight("offline") == config.ROI_WEIGHT_SLOW
+    assert config.ROI_WEIGHT_FAST < config.ROI_WEIGHT_SLOW   # day = volume, night = margin
 
 
 def test_offline_ignores_fill_time():
