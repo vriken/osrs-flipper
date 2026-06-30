@@ -797,7 +797,7 @@ class Terminal:
         print(f"  cash:        {self.j.cash():>14,.0f}")
         if tied:
             print(f"  in offers:   {tied:>14,.0f}  (reserved in open buys + uncollected sells)")
-        print(f"  inventory:   {self.j.inventory_value(bids):>14,.0f}")
+        print(f"  stock:       {self.j.inventory_value(bids):>14,.0f}  (bought stock in bank + sell offers, not your bag)")
         print(f"  equity:      {equity:>14,.0f}")
         print(f"  realised P&L:{self.j.realized_pnl():>+14,.0f}")
         if bond:
