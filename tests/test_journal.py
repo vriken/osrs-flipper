@@ -152,6 +152,23 @@ def test_reconcile_positions_sets_correct_remaining(j):
     assert p.qty == 400 and p.avg_cost == 100              # 1000 bought − 600 sold; avg from buys
 
 
+def test_reconcile_to_holdings_drops_phantom_and_trims(j):
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [1, "Lava rune", 5000, 30.0])
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [2, "Unicorn horn dust", 528, 498.0])
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [3, "Real", 100, 10.0])
+    drift = j.reconcile_to_holdings({2: 327, 3: 100})  # 1 absent → drop ; 2 → trim 327 ; 3 matches
+    assert ("Lava rune", 5000, 0) in drift and ("Unicorn horn dust", 528, 327) in drift
+    assert all(d[0] != "Real" for d in drift)
+    assert j.position(1) is None and j.position(2).qty == 327 and j.position(3).qty == 100
+
+
+def test_reconcile_to_holdings_is_reduce_only(j):
+    # bag shows MORE than the journal tracks (e.g. bought off-device) → never inflate, unknown cost
+    j.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [1, "X", 50, 10.0])
+    assert j.reconcile_to_holdings({1: 500}) == []
+    assert j.position(1).qty == 50
+
+
 def test_reconcile_skips_items_with_no_buy_in_history(j):
     # a position whose buy predates RuneLite's window (only a sell shows up) must NOT be cleared
     from osrs_flipper.runelite import Fill

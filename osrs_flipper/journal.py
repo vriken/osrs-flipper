@@ -155,6 +155,30 @@ class Journal:
         self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
                          [item_id, name, qty, float(avg_cost)])
 
+    def reconcile_to_holdings(self, holdings: dict[int, int]) -> list[tuple[str, int, int]]:
+        """Reduce each tracked position to what you ACTUALLY hold (bag + GE, from local_export), so
+        positions left over from sells that never reached this device's RuneLite (window rolled over,
+        or sold elsewhere) are cleared. The shortfall is logged as a manual SELL so the fills-reconcile
+        keeps it gone rather than re-adding it. REDUCE-ONLY — never invents stock the journal doesn't
+        know the cost of. Cash/P&L untouched (the gold is already reflected in your live coin balance).
+        Returns [(name, old, new)] for the positions it corrected.
+
+        Assumes flip stock lives in your bag, not the bank (bank is excluded). If you ever bank a
+        holding, re-declare it with `own`."""
+        drift = []
+        for p in self.positions():
+            real = holdings.get(p.item_id, 0)
+            if real >= p.qty:
+                continue
+            drift.append((p.name, p.qty, real))
+            self.record_manual_fill(p.item_id, p.name, is_buy=False, qty=p.qty - real)
+            if real > 0:
+                self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
+                                 [p.item_id, p.name, real, p.avg_cost])
+            else:
+                self.con.execute("DELETE FROM positions WHERE item_id=?", [p.item_id])
+        return drift
+
     def reconcile_positions(self, fills) -> list[tuple[str, int, int]]:
         """Recompute each held position from the authoritative offer history — Σbought − Σsold per
         item, which is ORDER-INDEPENDENT, so out-of-order incremental imports can't leave a phantom.

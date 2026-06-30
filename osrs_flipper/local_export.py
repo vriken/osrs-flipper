@@ -82,6 +82,38 @@ def open_offers(data: dict | None) -> list[dict]:
     return list((ge.get("offers") or {}).values())
 
 
+def holdings(data: dict | None) -> dict[int, int] | None:
+    """Units you ACTUALLY hold per item, the ground truth to reconcile journal positions against:
+        bag (non-coin inventory) + unsold units in SELL offers + bought-but-uncollected units in
+        BUY offers (the collect box).
+    Bank is intentionally excluded — you keep flip stock in your bag, not the bank. Returns None
+    unless BOTH the inventory snapshot is live AND the GE offers are loaded, so the caller never
+    reconciles against a blank/stale read and wrongly drops real stock. Coins/platinum are skipped.
+
+    The buy/sell legs may double-count a partially-collected offer (its completedQuantity stays while
+    the collected units also sit in the bag) — harmless here: this is only used to find what's NOT
+    held at all, and an over-count errs toward keeping a position, never dropping a real one."""
+    if not data or not _inventory_fresh(data):
+        return None
+    ge = data.get("grandExchange") or {}
+    if not ge.get("loaded"):
+        return None
+    have: dict[int, int] = {}
+    for it in _items(data.get("inventory")):
+        iid = it.get("id")
+        if iid in (COINS_ID, PLATINUM_ID):
+            continue
+        have[iid] = have.get(iid, 0) + int(it.get("quantity", 0))
+    for o in open_offers(data):
+        state = o.get("state") or ""
+        iid = o.get("itemId")
+        if "SELL" in state:
+            have[iid] = have.get(iid, 0) + int(o.get("remainingQuantity", 0))  # unsold, still yours
+        elif "BUY" in state:
+            have[iid] = have.get(iid, 0) + int(o.get("completedQuantity", 0))  # bought, not yet collected
+    return have
+
+
 def active_offers(data: dict | None) -> list[Offer]:
     """Active GE offers as runelite.Offer objects, read from client.getGrandExchangeOffers().
 

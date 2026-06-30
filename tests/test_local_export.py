@@ -68,6 +68,19 @@ def test_active_offers_empty_without_data():
     assert local_export.active_offers({"grandExchange": {"loaded": False}}) == []
 
 
+def test_holdings_bag_plus_sells_plus_bought_uncollected():
+    h = local_export.holdings(FRESH)
+    # 561: 200 in bag + 300 bought-uncollected on the BUY offer = 500 ; 235: 600 unsold on the SELL
+    assert h[561] == 500 and h[235] == 600
+    assert 995 not in h  # coins excluded
+
+
+def test_holdings_none_unless_inventory_and_ge_live():
+    assert local_export.holdings(None) is None
+    assert local_export.holdings({**FRESH, "inventoryLoaded": False}) is None
+    assert local_export.holdings({**FRESH, "grandExchange": {"loaded": False}}) is None
+
+
 def test_open_offers_gated_on_loaded():
     assert len(local_export.open_offers(FRESH)) == 2
     assert local_export.open_offers({"grandExchange": {"loaded": False, "offers": {"0": {}}}}) == []
