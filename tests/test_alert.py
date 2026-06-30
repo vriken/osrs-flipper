@@ -2,7 +2,13 @@
 
 import pandas as pd
 
-from osrs_flipper.alert import format_portfolio_summary, format_sell_plan
+from osrs_flipper.alert import format_portfolio, format_portfolio_summary, format_sell_plan
+
+
+def test_format_portfolio_labels_live_source_not_assumed():
+    # offers read from the live exporter/RuneLite → label LIVE, never the misleading ASSUMED text
+    out = format_portfolio([], bankroll=100_000, held=[], free_slots=1, slot_source="live")
+    assert "LIVE" in out and "ASSUMED" not in out
 
 
 def test_format_sell_plan():
