@@ -118,8 +118,8 @@ def format_portfolio(picks: list[dict], bankroll: int, held=None, idle: float = 
     n_active = sum(p["tier"] != "hold" for p in picks)
     lines = [f"=== portfolio · cash {bankroll:,} · {len(held)} held · {n_active} active + "
              f"{len(picks) - n_active} accumulate ==="]
-    if slot_source == "runelite":
-        lines.append(f"  free slots = {free_slots} (LIVE from RuneLite)")
+    if slot_source in ("live", "runelite"):
+        lines.append(f"  free slots = {free_slots} (LIVE — read from your open GE offers)")
     elif slot_source == "specified":
         lines.append(f"  free slots = {free_slots} (you specified)")
     else:
