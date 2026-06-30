@@ -42,7 +42,7 @@ def test_thin_cheap_volume_is_not_tradeable():
 
 
 def test_expensive_low_volume_item_tradeable_via_turnover():
-    # Karil's-like: ~522k each, only 3 buys/h → fails the 500-unit floor, but 3 × 522k ≈ 1.57M gp/h
+    # Karil's-like: ~522k each, ~16 two-sided trades/h → fails the 500-unit floor, but ~8.4M gp/h
     # turnover clears the turnover branch, and it sizes to ≥1 unit despite α·vol flooring to 0.
     m = [_mapping(1, "Karil's leatherskirt", limit=15)]
     df = build_features({1: _latest(530_000, 515_000, 60)}, {1: _hourly(530_000, 515_000, 13, 3)},
@@ -158,6 +158,33 @@ def test_hold_units_capped_by_realizable_volume():
     # liquid item: the buy limit binds instead of volume
     big = build_features({1: _latest(33, 30, 60)}, {1: _hourly(33, 30, 500_000, 500_000)}, m, now_ts=NOW)
     assert big.loc[0, "hold_units"] == 10_000
+
+
+def test_patient_beta_captures_more_of_the_spread():
+    # at beta 0 you post AT the bid/ask → margin is the whole spread minus tax, not the inside-haircut
+    m = [_mapping(1, "Karil's leatherskirt", limit=15)]
+    lat, h1 = {1: _latest(530_000, 506_000, 60)}, {1: _hourly(530_000, 506_000, 13, 3)}
+    default = build_features(lat, h1, m, bankroll=10**9, now_ts=NOW)
+    patient = build_features(lat, h1, m, bankroll=10**9, now_ts=NOW, beta=0.0)
+    assert patient.loc[0, "margin_abs"] > default.loc[0, "margin_abs"]   # full spread > inside-haircut
+
+
+def test_one_sided_volume_still_tradeable_via_total_turnover():
+    # a low-frequency item that traded only the high side this hour (low_vol 0) → binding min is 0,
+    # but ~13 × ~518k of value moved, so the both-side turnover gate still admits it and sizes ≥1
+    m = [_mapping(1, "Karil's leatherskirt", limit=15)]
+    df = build_features({1: _latest(530_000, 506_000, 60)}, {1: _hourly(530_000, 506_000, 13, 0)},
+                        m, bankroll=10**9, now_ts=NOW)
+    assert df.loc[0, "vol_1h_binding"] == 0   # thin/min leg empty this hour
+    assert df.loc[0, "tradeable"] and df.loc[0, "hold_units"] >= 1
+
+
+def test_relaxed_staleness_keeps_low_frequency_item():
+    # a 90-min-old trade is dropped by the default 1h ghost gate, kept when staleness is relaxed
+    m = [_mapping(1, "Karil's leatherskirt", limit=15)]
+    lat, h1 = {1: _latest(530_000, 506_000, 5400)}, {1: _hourly(530_000, 506_000, 13, 3)}
+    assert not build_features(lat, h1, m, bankroll=10**9, now_ts=NOW).loc[0, "tradeable"]
+    assert build_features(lat, h1, m, bankroll=10**9, now_ts=NOW, staleness_max=21_600).loc[0, "tradeable"]
 
 
 def test_now_default_runs():
