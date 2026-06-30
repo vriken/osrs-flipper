@@ -741,9 +741,11 @@ class Terminal:
             if aqty <= 0:
                 continue
             deploy = aqty * q.buy_px
-            filled = int(aqty * q.p_buy)
+            # expected overnight profit = net/unit × qty × P(fill). Don't floor a single unit's
+            # fractional expected fill to 0 — int(1 × 0.73) = 0 made a fat-spread ring show +0.
+            profit = round(q.net_unit * aqty * q.p_buy)
             rows.append({"name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": aqty,
-                         "deploy": deploy, "fill8h": q.p_buy, "profit": q.net_unit * filled})
+                         "deploy": deploy, "fill8h": q.p_buy, "profit": profit})
             exclude.add(iid)
             remaining -= deploy
             slots_left -= 1
@@ -777,11 +779,12 @@ class Terminal:
         if aqty <= 0:
             print(f"  {name}: not enough cash at the quote price")
             return
-        filled = int(aqty * q.p_buy)
+        exp_filled = round(aqty * q.p_buy)            # expected units filled overnight (don't floor 1×0.73→0)
+        profit = round(q.net_unit * aqty * q.p_buy)   # expected profit = net/unit × qty × P(fill)
         margin_pct = q.net_unit / q.buy_px if q.buy_px else 0
         print(f"  OVERNIGHT (~8h) — {name}")
-        print(f"    BUY  {aqty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} ≈ {filled:,} fill overnight, ties up ~{aqty * q.buy_px:,} gp)")
-        print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{q.net_unit * filled:,} gp profit (net {q.net_unit}/unit, {margin_pct:.1%})")
+        print(f"    BUY  {aqty:,} @ {q.buy_px:,}   (~{q.p_buy:.0%} fill ≈ {exp_filled:,} units overnight, ties up ~{aqty * q.buy_px:,} gp)")
+        print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{profit:,} gp profit (net {q.net_unit}/unit, {margin_pct:.1%})")
         if margin_pct < config.OVERNIGHT_MIN_MARGIN:
             print(alert.color(f"    ⚠ thin margin ({margin_pct:.1%}) — risky to leave overnight; a small dip could go red", "red"))
 
