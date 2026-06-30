@@ -150,6 +150,20 @@ SCORE_ROI_WEIGHT = float(os.environ.get("OSRS_FLIPPER_SCORE_ROI_WEIGHT", 0.5))
 # must earn its keep; below this, leave the cash liquid to recycle through the active slots.
 HOLD_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_HOLD_MIN_MARGIN", 0.03))
 
+# --- Patient / big-ticket "gear" mode (see cmd_gear) -------------------------
+# Low-frequency, high-value items (Barrows, GWD gear) are flipped by posting AT the bid/ask and
+# waiting, not by queue-jumping — so they capture close to the FULL spread. PATIENT_BETA models that
+# (0 = full spread; the default 0.25 haircut assumes you post inside the spread to fill fast, which
+# eats almost all of a tight-% big-ticket margin). Optimistic by design: whether you actually fill at
+# the extremes is exactly what live calibration measures. Staleness is relaxed too — a slow item
+# legitimately trades less than once an hour, so the 1h ghost gate would wrongly hide it.
+PATIENT_BETA = float(os.environ.get("OSRS_FLIPPER_PATIENT_BETA", 0.0))
+PATIENT_STALENESS_S = int(os.environ.get("OSRS_FLIPPER_PATIENT_STALENESS_S", 21600))  # 6h
+# `gear` lists only items at/above this unit price — the genuinely big-ticket, bought-one-at-a-time
+# stuff (Barrows, GWD, weapons). Below it, a sub-500-binding hour is just a normal item having a
+# quiet leg, not a gear flip, and belongs in `scan`.
+GEAR_MIN_PRICE = int(os.environ.get("OSRS_FLIPPER_GEAR_MIN_PRICE", 50_000))
+
 # --- Account type ------------------------------------------------------------
 # Members account (bond redeemed): full market + 8 GE slots. Set OSRS_FLIPPER_MEMBERS=0
 # to simulate F2P (non-members items only, 3 slots) — e.g. for testing the F2P path.

@@ -27,15 +27,20 @@ def build_features(
     bankroll: int | None = None,
     now_ts: int | None = None,
     limit_used: dict[int, int] | None = None,
+    beta: float | None = None,
+    staleness_max: int | None = None,
 ) -> pd.DataFrame:
     """Return a feature DataFrame (one row per item that has a /mapping entry).
 
     `limit_used` maps item_id -> units already bought in the rolling 4h window; the
     effective buy limit is reduced accordingly so maxed-out items drop out.
+    `beta` overrides the spread haircut (patient/gear mode posts at the bid/ask → beta 0 →
+    full spread); `staleness_max` overrides the ghost-gate trade-age cap (relaxed for slow items).
     """
     bankroll = config.BANKROLL if bankroll is None else bankroll
     now_ts = int(time.time()) if now_ts is None else now_ts
     limit_used = limit_used or {}
+    beta = config.BETA if beta is None else beta
     rows: list[dict[str, Any]] = []
 
     for meta in mapping:
@@ -68,7 +73,7 @@ def build_features(
         rel_spread = spread / mid if mid else 0.0
         vol_binding = min(high_vol, low_vol)
 
-        buy_px, sell_px = haircut_prices(ah, al)
+        buy_px, sell_px = haircut_prices(ah, al, beta)
         margin_abs = post_tax_received(sell_px, item_id=iid) - buy_px
         margin_pct = margin_abs / buy_px if buy_px else 0.0
         # margin-aware adverse-move gate: if the live mid has already fallen below the 1h-avg
@@ -84,11 +89,14 @@ def build_features(
 
         buy_limit = meta.get("limit") or 0
         buy_limit_eff = max(0, buy_limit - limit_used.get(iid, 0))  # remaining 4h buy-limit room
-        # gp turnover on the binding side — the liquidity measure that treats a few high-value trades
-        # the same as many cheap ones. Big-ticket gear (high turnover, thin units) gets a 1-unit
-        # liquidity floor so it isn't sized to 0 by α·vol; buy-limit and bankroll still bind.
-        turnover_1h = vol_binding * mid
-        is_gear = turnover_1h >= config.TURNOVER_MIN_1H and vol_binding >= config.V_FLOOR_1H
+        # gp turnover = BOTH-side value traded per hour. Liquidity by value, not unit count — and
+        # using the two-side total (not the binding min) means it doesn't collapse to 0 when a
+        # low-frequency item happens to trade only one side this hour (the min is 0 but real money
+        # still moved). Big-ticket gear (high turnover, thin units) gets a 1-unit liquidity floor so
+        # it isn't sized to 0 by α·vol; buy-limit and bankroll still bind.
+        vol_total = high_vol + low_vol
+        turnover_1h = vol_total * mid
+        is_gear = turnover_1h >= config.TURNOVER_MIN_1H and vol_total >= config.V_FLOOR_1H
         cap = capacity_units(buy_limit_eff, vol_binding, bankroll, buy_px,
                              liquidity_floor=1 if is_gear else 0)
         p_complete = completion_probability(cap, low_vol, high_vol) if cap > 0 else 0.0
@@ -137,14 +145,16 @@ def build_features(
             "spread": spread,
             "rel_spread": rel_spread,
             "vol_1h_binding": vol_binding,
-            "turnover_1h": turnover_1h,  # binding-side gp/hour — liquidity by value, not unit count
+            "vol_1h_total": vol_total,   # both-side units/hour — robust when one side is quiet
+            "turnover_1h": turnover_1h,  # both-side gp/hour — liquidity by value, not unit count
             "capacity": cap,
             "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
             "buy_limit_eff": buy_limit_eff,  # remaining buy-limit room (4h)
             "liq_units": min(buy_limit_eff, int(math.floor(config.ALPHA * vol_binding))),  # cash-independent absorb cap
             # realizable hold size: what the market clears at an ALPHA share over the hold window,
             # capped by buy limit — stops "hoard 4k of a 900/hr item" phantom-spread holds.
-            "hold_units": min(buy_limit_eff, int(math.floor(config.ALPHA * vol_binding * config.HOLD_WINDOW_H))),
+            "hold_units": min(buy_limit_eff, max(1 if is_gear else 0,
+                          int(math.floor(config.ALPHA * vol_binding * config.HOLD_WINDOW_H)))),
             "bound_by": bound_by,
             "p_complete": p_complete,
             "exp_gp_cycle": exp_gp_cycle,
@@ -162,7 +172,7 @@ def build_features(
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    df["tradeable"] = is_tradeable(df, now_ts)
+    df["tradeable"] = is_tradeable(df, now_ts, staleness_max=staleness_max)
     # spread sanity: thin-and-wide, wide-but-unbacked-by-volume, or wide-across-a-stale-leg → the
     # spread is an illiquidity/staleness artifact you can't actually capture, not a real flip.
     rel, vol = df["rel_spread"], df["vol_1h_binding"]
@@ -176,12 +186,14 @@ def build_features(
     return df
 
 
-def is_tradeable(df: pd.DataFrame, now_ts: int) -> pd.Series:
+def is_tradeable(df: pd.DataFrame, now_ts: int, *, staleness_max: int | None = None) -> pd.Series:
     """Gate out ghosts: need both live prices, a recent trade, and enough liquidity — by UNITS
     (bulk commodities) OR by gp TURNOVER (big-ticket gear, which trades few units/hour but clears
     your small position fast). The turnover branch keeps a tiny units floor so a 1-trade/hour item
-    can't qualify on price alone."""
-    fresh = df["staleness_s"].notna() & (df["staleness_s"] < config.STALENESS_MAX_S)
+    can't qualify on price alone. `staleness_max` overrides the trade-age cap (relaxed for slow
+    big-ticket items, which legitimately trade less than once an hour)."""
+    staleness_max = config.STALENESS_MAX_S if staleness_max is None else staleness_max
+    fresh = df["staleness_s"].notna() & (df["staleness_s"] < staleness_max)
     liquid = (df["vol_1h_binding"] >= config.V_MIN_1H) | (
-        (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & (df["vol_1h_binding"] >= config.V_FLOOR_1H))
+        (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & (df["vol_1h_total"] >= config.V_FLOOR_1H))
     return fresh & liquid

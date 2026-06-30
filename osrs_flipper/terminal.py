@@ -11,6 +11,7 @@ Commands (type `help`):
   port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
   overnight [item]         plan one big ~8h buy to leave while you sleep
   scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
+  gear | big [n]           big-ticket / low-frequency items at their full spread (patient, best-case)
   anomaly | manip          price dislocations on abnormal volume (pumps to avoid / dumps to revert-buy)
   why <item>               explain an item's price: live vs recent baselines, volume z, falling-knife check
   quote <item> [qty]       solve optimal buy/sell prices for an item
@@ -925,6 +926,49 @@ class Terminal:
         print(f"  forgot {pos.qty:,} {name} — untracked (recorded as disposed elsewhere; stays gone "
               "through reconcile). Cash unchanged — `bank <gp>` if your gold drifted.")
 
+    def cmd_gear(self, args: list[str]) -> None:
+        """Big-ticket / low-frequency items (Barrows, GWD gear) at their FULL spread — patient flips
+        you post at the bid/ask and leave for hours. These are excluded from `scan`/`go` by the unit-
+        volume and 1h-staleness gates; here both are relaxed and the spread is taken whole (BETA→0,
+        since you wait rather than queue-jump). OPTIMISTIC by design: it assumes you capture the full
+        bid-ask, so treat it as best-case — calibration tells you what actually fills. `gear <n>`
+        shows n rows (default 15)."""
+        from .features import build_features
+        cash = int(self.j.cash()) or config.BANKROLL
+        df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=cash,
+                            limit_used=self._limit_used(runelite.read()),
+                            beta=config.PATIENT_BETA, staleness_max=config.PATIENT_STALENESS_S)
+        if df.empty:
+            print("  no market data")
+            return
+        if not config.MEMBERS:
+            df = df[~df["members"]]
+        # the gear set: genuinely big-ticket items (≥ GEAR_MIN_PRICE) the normal scan drops on unit
+        # volume but that clear on gp turnover, with a real full-spread margin, not a manip artifact.
+        g = df[(df["buy_px"] >= config.GEAR_MIN_PRICE) & (df["vol_1h_binding"] < config.V_MIN_1H)
+               & (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & df["tradeable"]
+               & (df["hold_units"] > 0) & (df["margin_abs"] > 0) & ~df["suspect"]].copy()
+        if g.empty:
+            print("  no big-ticket flips clear tax + the full spread right now (most have <2% spreads "
+                  "the 2% tax eats — see `scan` for the liquid stuff)")
+            return
+        g["gp"] = g["margin_abs"] * g["hold_units"]
+        n = int(args[0]) if args and args[0].isdigit() else 15
+        g = g.sort_values("gp", ascending=False).head(n)
+        print(f"  PATIENT / GEAR · full spread (β={config.PATIENT_BETA:g}, tax netted) · cash {cash:,}"
+              f"  ⚠ best-case: assumes you fill AT the bid/ask")
+        print(f"  {'item':22}{'buy':>13}{'sell':>13}{'margin':>11}{'pct':>6}{'qty':>4}{'gp':>11}{'  fill'}")
+        for _, r in g.iterrows():
+            qty = int(r["hold_units"])
+            eta = r["fill_eta_h"]
+            fill = f"{eta:.1f}h" if eta and eta < 100 else "—"
+            flag = "" if int(r["buy_px"]) * qty <= cash else " ⟵ need cash"
+            print(f"  {str(r['name'])[:22]:22}{int(r['buy_px']):>13,}{int(r['sell_px']):>13,}"
+                  f"{int(r['margin_abs']):>11,}{r['margin_pct'] * 100:>5.1f}%{qty:>4}"
+                  f"{int(r['gp']):>11,}  {fill}{flag}")
+        print("  qty = realizable over ~8h at a passive share of volume; post at the bid/ask and "
+              "leave it. Slow to fill — don't expect day-flip turnover.")
+
     def cmd_reconcile(self, args: list[str]) -> None:
         """Recompute every held position from RuneLite's full completed-offer history (authoritative,
         order-independent), correcting phantoms from out-of-order imports. Runs automatically on each
@@ -1136,6 +1180,7 @@ class Terminal:
             "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
             "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
             "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
+            "gear": lambda a: self.cmd_gear(a), "big": lambda a: self.cmd_gear(a),
             "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
             "reconcile": lambda a: self.cmd_reconcile(a),
             "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
