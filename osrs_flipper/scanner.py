@@ -70,6 +70,7 @@ def scan(
     min_gp: int = 0,
     limit_used: dict[int, int] | None = None,
     fill_cal: dict | None = None,
+    beta: float | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -78,7 +79,8 @@ def scan(
     gated out by the tradeable + spread-persistence checks first.
     """
     time_weight = MODE_WEIGHTS.get(mode, 0.5)
-    df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=bankroll, limit_used=limit_used)
+    df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=bankroll,
+                        limit_used=limit_used, beta=beta)  # beta None → config prior (build_features default)
     if df.empty:
         return df
 
@@ -225,7 +227,7 @@ def _place_score(p: dict) -> float:
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
                     max_accumulate: int = 6, min_gp: int | None = None, min_margin: float = 0.01,
                     limit_used: dict[int, int] | None = None,
-                    fill_cal: dict | None = None) -> tuple[list[dict], float]:
+                    fill_cal: dict | None = None, beta: float | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
                 fast-fill liquidity — what you work in your slots right now and cycle.
@@ -245,7 +247,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
-                        fill_cal=fill_cal)
+                        fill_cal=fill_cal, beta=beta)
                 for m in modes}
     taken = {int(i) for i in held_ids}
 

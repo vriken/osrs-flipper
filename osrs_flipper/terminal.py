@@ -66,6 +66,11 @@ class Terminal:
         self._latest: dict[int, dict] = {}
         self._latest_ts = 0.0
         self._last_quote: tuple | None = None  # (meta, Quote, qty) — used by `placed`
+        # auto-calibration cache: β + fill correction, recomputed every CALIBRATE_EVERY_TRADES
+        # resolved attempts (not every command) so recommendations don't wiggle on each fill.
+        self._cal_at = -1             # resolved-attempt count at last calibration (-1 = never)
+        self._cal_beta = config.BETA   # live spread haircut, auto-applied
+        self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
         self._alert_stop = threading.Event()
         self._alert_thread: threading.Thread | None = None
 
@@ -101,7 +106,7 @@ class Terminal:
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
         df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal())
+                          fill_cal=self._fill_cal(), beta=self._beta())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -241,8 +246,8 @@ class Terminal:
                 b = fill["buckets"].get(name)
                 if b:
                     print(f"    {name:>4} liquidity: measured ×{b['measured']:.2f} → ×{b['shrunk']:.2f}  (n={b['n']})")
-        print("  fill correction is AUTO-APPLIED to EV/ranking (go/scan/port). β is report-only — "
-              "update BETA in config.py if you trust the measured value.")
+        print(f"  both β and the fill correction are AUTO-APPLIED to EV/ranking/prices (go/scan/port), "
+              f"refreshed every {config.CALIBRATE_EVERY_TRADES} resolved trades. config.BETA is just the prior.")
 
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL
@@ -267,7 +272,7 @@ class Terminal:
               + (f" ({len(sell_rows)} reserved for sells)…" if sell_rows else "…"))
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(rl),
-            fill_cal=self._fill_cal())
+            fill_cal=self._fill_cal(), beta=self._beta())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -278,10 +283,33 @@ class Terminal:
         rl = rl if rl is not None else runelite.read()
         return runelite.limit_used(rl) if rl else self.j.buy_limit_used()
 
+    def _ensure_calibration(self) -> None:
+        """Recompute β + fill correction every CALIBRATE_EVERY_TRADES resolved attempts (and on first
+        use), caching them so recommendations stay stable between refreshes. Both are AUTO-APPLIED to
+        EV/ranking/prices; the spread haircut β and the fill rate are measured from your real fills and
+        shrunk toward the config priors. Announces each refresh after the initial (startup) one."""
+        rows = self.j.calibration_rows()
+        n = len(rows)
+        if self._cal_at >= 0 and n - self._cal_at < config.CALIBRATE_EVERY_TRADES:
+            return
+        new_beta = calibration.effective_beta(calibration.calibrate_beta(rows, prior=config.BETA), config.BETA)
+        self._cal_fill = calibration.calibrate_fill(rows)
+        if self._cal_at >= 0:  # not the first (silent) computation → announce the refresh
+            fg = self._cal_fill.get("global") or 1.0
+            print(f"  🔧 recalibrated ({n} resolved trades): β {self._cal_beta:.2f}→{new_beta:.2f} · "
+                  f"fill ×{fg:.2f} (auto-applied)")
+        self._cal_beta = new_beta
+        self._cal_at = n
+
     def _fill_cal(self) -> dict:
-        """Fill-rate calibration from your resolved attempts, auto-applied to the EV/ranking so the
-        model self-corrects from real fills. Stays near 1.0 (shrunk) until enough fills accumulate."""
-        return calibration.calibrate_fill(self.j.calibration_rows())
+        """Live (cached) fill-rate calibration, auto-applied to EV/ranking."""
+        self._ensure_calibration()
+        return self._cal_fill
+
+    def _beta(self) -> float:
+        """Live (cached) spread-haircut β, auto-calibrated from your fills and auto-applied."""
+        self._ensure_calibration()
+        return self._cal_beta
 
     def _sync_cash(self) -> tuple[int | None, int]:
         """Refresh journal cash from live coins (Local Data Exporter, item 995) and return
@@ -351,6 +379,7 @@ class Terminal:
             for name, old, new in self.j.reconcile_positions(fills):
                 print(f"  reconciled {name}: {old:,} → {new:,} held (offer history)")
         self._sync_cash()  # authoritative cash from live coins, if the exporter is running
+        self._ensure_calibration()  # refresh β + fill correction every N resolved trades (+ announce)
         self.j.expire_stale_attempts(int(time.time()))
         return n
 
@@ -526,12 +555,13 @@ class Terminal:
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             fcal = self._fill_cal()
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
-                                                  limit_used=self._limit_used(rl), fill_cal=fcal)
+                                                  limit_used=self._limit_used(rl), fill_cal=fcal,
+                                                  beta=self._beta())
             src = "live" if offers else ("runelite" if rl is not None else "assumed")
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
             if fcal.get("global_measured") is not None:
-                print(f"  (fills auto-calibrated ×{fcal['global']:.2f} from {fcal['n']} attempts — "
-                      "applied to gp & ranking)")
+                print(f"  (auto-calibrated from {fcal['n']} attempts: β {self._beta():.2f} · "
+                      f"fill ×{fcal['global']:.2f} — applied to prices, gp & ranking)")
             self._explain_picks(picks)  # one-line "why" for each buy you're about to place
         elif buy_slots > 0:
             self._overnight_plan(cash)
@@ -717,7 +747,7 @@ class Terminal:
         exclude = {h.item_id for h in held} | {o.item_id for o in offers}
         limit_used = self._limit_used(rl)
         mapping = {r["id"]: r for r in api.mapping()}
-        df = scanner.scan(mode="offline", bankroll=cash, top=40, limit_used=limit_used)
+        df = scanner.scan(mode="offline", bankroll=cash, top=40, limit_used=limit_used, beta=self._beta())
         rows, remaining, slots_left = [], float(cash), free
         for _, r in df.iterrows():
             if slots_left <= 0:

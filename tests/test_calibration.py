@@ -49,6 +49,14 @@ def test_expired_attempts_drag_fill_correction_down():
     assert out["global_measured"] == 1.0  # median(2.0, 0.0) — the miss is counted, not dropped
 
 
+def test_effective_beta_uses_shrunk_global_clamped_else_prior():
+    assert calibration.effective_beta(None, 0.25) == 0.25                 # no calibration → prior
+    assert calibration.effective_beta({"global": 0.05}, 0.25) == 0.05      # calibrated value applied
+    assert calibration.effective_beta({"global": None}, 0.25) == 0.25      # no measure → prior
+    assert calibration.effective_beta({"global": 0.9}, 0.25) == 0.5        # clamped to hi
+    assert calibration.effective_beta({"global": -0.3}, 0.25) == 0.0       # clamped to lo
+
+
 def test_fill_multiplier_demotes_overoptimistic_but_shrinks_and_clamps():
     # heavy over-optimism on a high-turnover item (all misses) → multiplier < 1 but shrunk off 0
     # 5000 units × ~5000 mid = 25M gp/h turnover → "high" bucket
