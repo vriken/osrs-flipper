@@ -21,14 +21,23 @@ import statistics
 _BUCKETS = ("low", "med", "high")
 
 
-def liquidity_bucket(vol: float) -> str:
-    """Coarse buckets on the binding (min buy/sell) 1h volume — fine buckets just split
-    scarce fills into noise."""
-    if vol < 2000:
+def liquidity_bucket(turnover: float) -> str:
+    """Coarse buckets on binding-side gp TURNOVER (units × mid), not unit count — so the fill
+    correction tracks liquidity by value and treats a few high-value trades like many cheap ones
+    (matching the scanner's gate). Fine buckets just split scarce fills into noise."""
+    if turnover < 2_000_000:
         return "low"
-    if vol < 10000:
+    if turnover < 20_000_000:
         return "med"
     return "high"
+
+
+def _turnover(row: dict) -> float:
+    """Binding-side gp turnover for a recorded attempt, from its decision-time snapshot."""
+    vol = row.get("vol_1h_binding") or 0
+    al, ah = row.get("avg_low"), row.get("avg_high")
+    mid = ((al or 0) + (ah or 0)) / 2 if (al is not None or ah is not None) else 0
+    return vol * mid
 
 
 def _beta_of(row: dict) -> float | None:
@@ -60,7 +69,7 @@ def shrink(measured: float, prior: float, n: int, k: int = 20) -> float:
 
 def calibrate_beta(rows: list[dict], prior: float, k: int = 20) -> dict:
     """Measured/shrunk β overall and per liquidity bucket, with sample counts."""
-    betas = [(liquidity_bucket(r.get("vol_1h_binding") or 0), b)
+    betas = [(liquidity_bucket(_turnover(r)), b)
              for r in rows if (b := _beta_of(r)) is not None]
     out: dict = {"n": len(betas), "prior": prior, "buckets": {}}
     if betas:
@@ -88,7 +97,7 @@ def calibrate_fill(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict
     for r in rows:
         ff, p = _fill_frac(r), r.get("pred_p_fill")
         if ff is not None and p and p > 0:
-            pairs.append((liquidity_bucket(r.get("vol_1h_binding") or 0), ff / p))
+            pairs.append((liquidity_bucket(_turnover(r)), ff / p))
     out: dict = {"n": len(pairs), "prior": prior, "buckets": {}}
     if pairs:
         g = statistics.median(f for _, f in pairs)
@@ -104,11 +113,11 @@ def calibrate_fill(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict
     return out
 
 
-def fill_multiplier(cal: dict | None, vol: float, *, lo: float = 0.1, hi: float = 1.5) -> float:
-    """Per-item EV correction: the item's liquidity-bucket shrunk fill factor (else global, else
+def fill_multiplier(cal: dict | None, turnover: float, *, lo: float = 0.1, hi: float = 1.5) -> float:
+    """Per-item EV correction: the item's turnover-bucket shrunk fill factor (else global, else
     1.0), clamped so a thin/degenerate sample can't zero out or balloon the estimate."""
     if not cal:
         return 1.0
-    bucket = cal.get("buckets", {}).get(liquidity_bucket(vol))
+    bucket = cal.get("buckets", {}).get(liquidity_bucket(turnover))
     c = bucket["shrunk"] if bucket else cal.get("global", 1.0)
     return max(lo, min(hi, c if c is not None else 1.0))

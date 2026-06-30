@@ -34,10 +34,27 @@ def test_stale_item_is_not_tradeable():
     assert not df.loc[0, "tradeable"]
 
 
-def test_thin_volume_is_not_tradeable():
+def test_thin_cheap_volume_is_not_tradeable():
+    # cheap + thin: 5/h at ~30gp = ~155 gp/h turnover → fails BOTH the units and the turnover branch
     m = [_mapping(1, "Thin")]
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5, 5)}, m, now_ts=NOW)
     assert not df.loc[0, "tradeable"]
+
+
+def test_expensive_low_volume_item_tradeable_via_turnover():
+    # Karil's-like: ~522k each, only 3 buys/h → fails the 500-unit floor, but 3 × 522k ≈ 1.57M gp/h
+    # turnover clears the turnover branch, and it sizes to ≥1 unit despite α·vol flooring to 0.
+    m = [_mapping(1, "Karil's leatherskirt", limit=15)]
+    df = build_features({1: _latest(530_000, 515_000, 60)}, {1: _hourly(530_000, 515_000, 13, 3)},
+                        m, bankroll=10**9, now_ts=NOW)
+    assert df.loc[0, "turnover_1h"] >= 1_000_000
+    assert df.loc[0, "tradeable"]      # admitted by gp turnover, not unit count
+    assert df.loc[0, "capacity"] >= 1  # not zeroed by α×vol; buy-limit/bankroll still bind
+
+    # but unaffordable on a small bankroll → capacity 0, so it never reaches the scan
+    broke = build_features({1: _latest(530_000, 515_000, 60)}, {1: _hourly(530_000, 515_000, 13, 3)},
+                           m, bankroll=200_000, now_ts=NOW)
+    assert broke.loc[0, "capacity"] == 0
 
 
 def test_null_price_ghost_is_dropped():

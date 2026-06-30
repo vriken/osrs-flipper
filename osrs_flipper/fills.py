@@ -73,12 +73,18 @@ def completion_probability(
 
 
 def capacity_units(buy_limit: int, volume_binding: float, bankroll: int, buy_px: int,
-                   *, alpha: float = ALPHA) -> int:
+                   *, alpha: float = ALPHA, liquidity_floor: int = 0) -> int:
     """Units you can realistically commit to a flip: the min of the legal buy limit,
-    a passive share (α) of market volume, and what your bankroll affords."""
+    a passive share (α) of market volume, and what your bankroll affords.
+
+    `liquidity_floor` lifts the volume-share cap to ≥ that many units for big-ticket gear, where
+    α·volume floors to 0 (a few trades/hour) yet the position is genuinely fillable, just slowly —
+    so fill ETA, not a units floor, decides if it's worth a slot. Buy-limit and bankroll still bind.
+    """
+    liq = int(math.floor(alpha * volume_binding)) if volume_binding > 0 else 0
     caps = [
         buy_limit if buy_limit else 0,
-        int(math.floor(alpha * volume_binding)) if volume_binding > 0 else 0,
+        max(liq, liquidity_floor),
         bankroll // buy_px if buy_px > 0 else 0,
     ]
     return max(0, min(caps))

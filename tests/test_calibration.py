@@ -4,9 +4,15 @@ from osrs_flipper import calibration
 
 
 def test_liquidity_buckets():
-    assert calibration.liquidity_bucket(500) == "low"
-    assert calibration.liquidity_bucket(5000) == "med"
-    assert calibration.liquidity_bucket(50_000) == "high"
+    # buckets are on gp TURNOVER (units × mid), not unit count
+    assert calibration.liquidity_bucket(500_000) == "low"
+    assert calibration.liquidity_bucket(5_000_000) == "med"
+    assert calibration.liquidity_bucket(50_000_000) == "high"
+
+
+def test_turnover_from_row():
+    # 3 units/h at a ~522k mid → ~1.57M gp/h (a Karil's-skirt-like big-ticket item)
+    assert calibration._turnover({"vol_1h_binding": 3, "avg_low": 515_000, "avg_high": 530_000}) == 1_567_500
 
 
 def test_beta_measures_where_in_the_spread_the_fill_landed():
@@ -44,13 +50,14 @@ def test_expired_attempts_drag_fill_correction_down():
 
 
 def test_fill_multiplier_demotes_overoptimistic_but_shrinks_and_clamps():
-    # heavy over-optimism on a high-liquidity item (all misses) → multiplier < 1 but shrunk off 0
-    rows = [{"qty": 10, "filled_qty": 0, "pred_p_fill": 0.8, "status": "expired", "vol_1h_binding": 50_000}
-            for _ in range(4)]
+    # heavy over-optimism on a high-turnover item (all misses) → multiplier < 1 but shrunk off 0
+    # 5000 units × ~5000 mid = 25M gp/h turnover → "high" bucket
+    rows = [{"qty": 10, "filled_qty": 0, "pred_p_fill": 0.8, "status": "expired",
+             "vol_1h_binding": 5000, "avg_low": 4900, "avg_high": 5100} for _ in range(4)]
     cal = calibration.calibrate_fill(rows)
-    m = calibration.fill_multiplier(cal, 50_000)
-    assert 0.1 <= m < 1.0                                   # demoted, shrunk toward 1.0, floored
-    assert calibration.fill_multiplier(None, 50_000) == 1.0  # no calibration → no change
+    m = calibration.fill_multiplier(cal, 25_000_000)
+    assert 0.1 <= m < 1.0                                       # demoted, shrunk toward 1.0, floored
+    assert calibration.fill_multiplier(None, 25_000_000) == 1.0  # no calibration → no change
 
 
 def test_beta_skips_rows_without_a_fill_price():
