@@ -121,7 +121,7 @@ def test_holdings_split_bank_vs_ge():
     s = holdings_split(positions, offers)
     assert s[1]["listed"] == 4000 and s[1]["bank"] == 4000   # 8k held, 4k still on the market → 4k bank
     assert s[2]["bank"] == 500 and s[2]["listed"] == 0        # not listed → all in bank
-    assert s[3]["incoming"] == 300 and s[3]["bank"] == 0      # being bought, not a position yet
+    assert s[3]["incoming"] == 700 and s[3]["bank"] == 0      # 1000 buy, 300 filled → 700 still incoming
 
 
 def test_all_fills_captures_active_partial_sell():
@@ -134,6 +134,20 @@ def test_all_fills_captures_active_partial_sell():
     fills = {f.uuid: f for f in all_fills(data, {2357: "Gold bar"})}
     assert fills["buy1"].is_buy and fills["buy1"].qty == 1000
     assert not fills["sell1"].is_buy and fills["sell1"].qty == 400   # active partial sell captured
+
+
+def test_all_fills_captures_active_partial_buy():
+    # units collected from a still-filling BUY become a tracked fill (so go shows what you hold);
+    # a 0-price (not-yet-filling) offer is skipped so we never book a phantom 0gp buy
+    data = {"trades": [], "slotTimers": [
+        {"slotIndex": 0, "currentOffer": {"id": 2114, "b": True, "st": "BUYING",
+                                          "cQIT": 1500, "tQIT": 1500, "p": 202, "uuid": "buyP"}},
+        {"slotIndex": 1, "currentOffer": {"id": 999, "b": True, "st": "BUYING",
+                                          "cQIT": 0, "tQIT": 50, "p": 0, "uuid": "unfilled"}},
+    ]}
+    fills = {f.uuid: f for f in all_fills(data, {2114: "Pineapple"})}
+    assert fills["buyP"].is_buy and fills["buyP"].qty == 1500 and fills["buyP"].price == 202
+    assert "unfilled" not in fills   # 0-filled / 0-price buy not booked
 
 
 def test_holdings_split_flags_drift():

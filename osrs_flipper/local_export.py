@@ -82,10 +82,21 @@ def open_offers(data: dict | None) -> list[dict]:
     return list((ge.get("offers") or {}).values())
 
 
-def holdings(data: dict | None) -> dict[int, int] | None:
-    """Units you ACTUALLY hold per item, the ground truth to reconcile journal positions against:
-        bag (non-coin inventory) + unsold units in SELL offers + bought-but-uncollected units in
-        BUY offers (the collect box).
+def canonical_id(iid: int, tradeable: set[int] | None) -> int:
+    """Normalise a NOTED item id to its tradeable (unnoted) form. GE-bought items are collected to
+    your bag as noted items, whose id is the unnoted id + 1 and is NOT in the tradeable mapping —
+    so without this the journal (which tracks tradeable ids) never recognises collected stock."""
+    if tradeable and iid not in tradeable and (iid - 1) in tradeable:
+        return iid - 1
+    return iid
+
+
+def holdings(data: dict | None, tradeable_ids: set[int] | None = None) -> dict[int, int] | None:
+    """Units you ACTUALLY hold per item (tradeable ids), the ground truth to reconcile journal
+    positions against: bag (non-coin inventory) + unsold units in SELL offers + bought-but-
+    uncollected units in BUY offers (the collect box). Noted bag items are folded onto their
+    tradeable id via `tradeable_ids` so collected stock matches the journal.
+
     Bank is intentionally excluded — you keep flip stock in your bag, not the bank. Returns None
     unless BOTH the inventory snapshot is live AND the GE offers are loaded, so the caller never
     reconciles against a blank/stale read and wrongly drops real stock. Coins/platinum are skipped.
@@ -103,10 +114,10 @@ def holdings(data: dict | None) -> dict[int, int] | None:
         iid = it.get("id")
         if iid in (COINS_ID, PLATINUM_ID):
             continue
-        have[iid] = have.get(iid, 0) + int(it.get("quantity", 0))
+        have[canonical_id(iid, tradeable_ids)] = have.get(canonical_id(iid, tradeable_ids), 0) + int(it.get("quantity", 0))
     for o in open_offers(data):
         state = o.get("state") or ""
-        iid = o.get("itemId")
+        iid = o.get("itemId")  # GE offers already carry the tradeable id
         if "SELL" in state:
             have[iid] = have.get(iid, 0) + int(o.get("remainingQuantity", 0))  # unsold, still yours
         elif "BUY" in state:
