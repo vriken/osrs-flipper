@@ -86,6 +86,16 @@ TAU_S = 1800  # staleness decay for liquidity score (30 min)
 STALENESS_MAX_S = 3600  # exclude items whose last trade is older than this (1h)
 V_MIN_1H = int(os.environ.get("OSRS_FLIPPER_V_MIN_1H", 500))  # min 1h volume (binding side) to recommend;
 # thin items (low two-sided volume) are easily pumped and you can't reliably fill at the quoted price
+# Liquidity is two-regime: bulk commodities trade in huge UNIT counts at tiny prices, while big-ticket
+# gear (Barrows, GWD) trades a few units/hour at high prices — a flat units floor (V_MIN_1H) wrongly
+# rejects the latter as illiquid, yet a handful of trades/hour clears your 1–8 unit position in minutes
+# (Karil's skirt: 3 buys/h × 523k = ~1.5M gp/h turnover, faster to clear than a 11k-unit dart limit).
+# So an item is liquid if EITHER side qualifies: enough UNITS (commodities, V_MIN_1H) OR enough gp
+# TURNOVER on the binding side (gear). A tiny units floor (V_FLOOR_1H) guards the turnover branch so a
+# 1-trade/hour item can't pass on price alone — you couldn't reliably fill even one unit. Manipulation
+# is then caught by VALUE (turnover) + the spread-persistence/divergence guards, not by raw unit count.
+TURNOVER_MIN_1H = int(os.environ.get("OSRS_FLIPPER_TURNOVER_MIN_1H", 1_000_000))  # gp/h, binding side
+V_FLOOR_1H = int(os.environ.get("OSRS_FLIPPER_V_FLOOR_1H", 2))  # min binding units/h on the turnover branch
 V_SUSPICIOUS_1H = 100  # below this + wide spread => flag manipulation-suspect
 # Spread sanity: a wide bid-ask is only real if volume trades across it. Above REL_SPREAD_SUSPECT,
 # require vol_binding ≥ SPREAD_VOL_K × rel_spread — a wide spread on thin volume is an illiquidity/

@@ -84,7 +84,13 @@ def build_features(
 
         buy_limit = meta.get("limit") or 0
         buy_limit_eff = max(0, buy_limit - limit_used.get(iid, 0))  # remaining 4h buy-limit room
-        cap = capacity_units(buy_limit_eff, vol_binding, bankroll, buy_px)
+        # gp turnover on the binding side — the liquidity measure that treats a few high-value trades
+        # the same as many cheap ones. Big-ticket gear (high turnover, thin units) gets a 1-unit
+        # liquidity floor so it isn't sized to 0 by α·vol; buy-limit and bankroll still bind.
+        turnover_1h = vol_binding * mid
+        is_gear = turnover_1h >= config.TURNOVER_MIN_1H and vol_binding >= config.V_FLOOR_1H
+        cap = capacity_units(buy_limit_eff, vol_binding, bankroll, buy_px,
+                             liquidity_floor=1 if is_gear else 0)
         p_complete = completion_probability(cap, low_vol, high_vol) if cap > 0 else 0.0
         exp_gp_cycle = margin_abs * cap * p_complete
 
@@ -131,6 +137,7 @@ def build_features(
             "spread": spread,
             "rel_spread": rel_spread,
             "vol_1h_binding": vol_binding,
+            "turnover_1h": turnover_1h,  # binding-side gp/hour — liquidity by value, not unit count
             "capacity": cap,
             "capital_deployed": cap * buy_px,  # how much of your pile this flip ties up
             "buy_limit_eff": buy_limit_eff,  # remaining buy-limit room (4h)
@@ -170,7 +177,11 @@ def build_features(
 
 
 def is_tradeable(df: pd.DataFrame, now_ts: int) -> pd.Series:
-    """Gate out ghosts: need both live prices, a recent trade, and enough volume."""
+    """Gate out ghosts: need both live prices, a recent trade, and enough liquidity — by UNITS
+    (bulk commodities) OR by gp TURNOVER (big-ticket gear, which trades few units/hour but clears
+    your small position fast). The turnover branch keeps a tiny units floor so a 1-trade/hour item
+    can't qualify on price alone."""
     fresh = df["staleness_s"].notna() & (df["staleness_s"] < config.STALENESS_MAX_S)
-    liquid = df["vol_1h_binding"] >= config.V_MIN_1H
+    liquid = (df["vol_1h_binding"] >= config.V_MIN_1H) | (
+        (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & (df["vol_1h_binding"] >= config.V_FLOOR_1H))
     return fresh & liquid

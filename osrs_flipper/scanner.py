@@ -101,7 +101,7 @@ def scan(
 
     # auto-applied fill calibration: deflate EV by the (shrunk, per-liquidity) measured fill rate,
     # so the model self-corrects from your real fills. 1.0 per item when there's no calibration yet.
-    df["fill_mult"] = [calibration.fill_multiplier(fill_cal, v) for v in df["vol_1h_binding"]]
+    df["fill_mult"] = [calibration.fill_multiplier(fill_cal, t) for t in df["turnover_1h"]]
     df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"]
     df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"]
 
@@ -143,7 +143,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
         if not q or q.ev <= 0 or q.net_unit < config.MIN_NET_MARGIN:
             continue  # integer-tick flip — fat ROI%, doesn't fill
         reliability = st["persist_factor"] * min(1.0, q.p_round / 0.5)
-        mult = calibration.fill_multiplier(fill_cal, row.get("vol_1h_binding") or 0)
+        mult = calibration.fill_multiplier(fill_cal, row.get("turnover_1h") or 0)
         rows.append({
             **row.to_dict(),
             "buy_px": q.buy_px, "sell_px": q.sell_px, "margin_abs": q.net_unit,
