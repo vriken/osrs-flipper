@@ -233,12 +233,20 @@ class Terminal:
         # don't recommend what you already hold OR already have an offer on
         exclude = [h.item_id for h in held] + active_ids
         sell_rows = self._sell_plan(held, set(active_ids))  # skip held items with any live offer
-        buy_slots = max(0, free - len(sell_rows))  # reserve a slot per pending sell listing
-        if sell_rows:
-            print(alert.format_sell_plan(sell_rows))
-            self._explain_recovery(sell_rows)
+        rec = self._recovery_reads(sell_rows)  # underwater → bounce-likely (hold) vs re-rating (cut)
+        to_sell, holds = self._split_sells(sell_rows, rec)  # bounce-holds don't list / don't take a slot
+        buy_slots = max(0, free - len(to_sell))  # reserve a slot per pending sell (not bounce-holds)
+        if to_sell:
+            print(alert.format_sell_plan(to_sell))
+            for r in to_sell:
+                if r["item_id"] in rec:
+                    print(self._recovery_note(r, rec[r["item_id"]]))
+        if holds:
+            print("  HOLDING for the bounce (not listing — no slot used):")
+            for r in holds:
+                print(self._recovery_note(r, rec[r["item_id"]]))
         print(f"  building portfolio for {buy_slots} free slot(s)"
-              + (f" ({len(sell_rows)} reserved for sells)…" if sell_rows else "…"))
+              + (f" ({len(to_sell)} reserved for sells)…" if to_sell else "…"))
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
             fill_cal=self._fill_cal(), beta=self._beta())
@@ -477,17 +485,26 @@ class Terminal:
 
         busy_ids = {o.item_id for o in offers}  # skip held items with ANY live offer (selling / accumulating)
         sell_rows = self._sell_plan(held, busy_ids)
-        if sell_rows:
-            print(alert.format_sell_plan(sell_rows))
-            self._explain_recovery(sell_rows)  # underwater → bounce-likely (hold/double) vs cut
+        rec = self._recovery_reads(sell_rows)  # underwater → bounce-likely (hold) vs re-rating (cut)
+        to_sell, holds = self._split_sells(sell_rows, rec)  # bounce-holds don't list / don't take a slot
+        if to_sell:
+            print(alert.format_sell_plan(to_sell))
+            for r in to_sell:
+                if r["item_id"] in rec:
+                    print(self._recovery_note(r, rec[r["item_id"]]))
+        if holds:
+            print("  HOLDING for the bounce (not listing — no slot used):")
+            for r in holds:
+                print(self._recovery_note(r, rec[r["item_id"]]))
 
         picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
         # reserve a slot for each pending sell listing — a sell occupies a GE slot too, so buys
-        # can't claim every free slot or you'd have nowhere to list what you're holding.
-        buy_slots = max(0, free - len(sell_rows))
+        # can't claim every free slot or you'd have nowhere to list what you're holding. Bounce-holds
+        # don't count: they stay in your bag, not the GE.
+        buy_slots = max(0, free - len(to_sell))
         if buy_slots > 0 and daytime:
-            if sell_rows:
-                print(f"  ({len(sell_rows)} slot(s) reserved for the sell listing(s) above)")
+            if to_sell:
+                print(f"  ({len(to_sell)} slot(s) reserved for the sell listing(s) above)")
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             fcal = self._fill_cal()
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
@@ -502,7 +519,7 @@ class Terminal:
         elif buy_slots > 0:
             self._overnight_plan(cash)
 
-        print("  " + alert.color("NEXT: " + self._next_action(refined, sell_rows, free, picks), "bold"))
+        print("  " + alert.color("NEXT: " + self._next_action(refined, to_sell, free, picks), "bold"))
 
     def _explain_picks(self, picks: list, limit: int = 5) -> None:
         """Print a one-line price-position 'why' for each buy being placed now (bounded — one
@@ -520,12 +537,13 @@ class Terminal:
             except Exception:  # noqa: BLE001 — explanation is best-effort, never fatal
                 pass
 
-    def _explain_recovery(self, sell_rows: list) -> None:
-        """Inline bounce-vs-cut read for each underwater sell candidate (recovery, baked into go).
-        One /timeseries fetch per underwater holding; silent on error."""
+    def _recovery_reads(self, sell_rows: list) -> dict:
+        """{item_id: recovery assessment} for each underwater sell candidate — bounce-likely (hold)
+        vs re-rating (cut). One /timeseries fetch per underwater holding; silent on error."""
         from . import recovery
         from .tax import post_tax_received
         lat = self.latest()
+        out: dict = {}
         for r in sell_rows:
             if not r.get("underwater") or not r.get("item_id"):
                 continue
@@ -537,16 +555,30 @@ class Terminal:
                                              recovery.week_mids(api.timeseries(r["item_id"], "1h")))
             except Exception:  # noqa: BLE001 — best-effort
                 continue
-            if not a:
-                continue
-            if a["recover"]:
-                up = (a["median"] / a["cur"] - 1) * 100 if a["cur"] else 0
-                tail = "hold for the bounce" if a["median"] >= r["avg_cost"] else "hold / double down (`recover`)"
-                print(alert.color(f"       ↩ {str(r['name'])[:18]}: bounce likely — week median "
-                                  f"{a['median']:,.0f} ({up:+.0f}% up), z={a['z']:+.1f} → {tail}", "green"))
-            else:
-                print(alert.color(f"       ✂ {str(r['name'])[:18]}: no bounce signal "
-                                  "(re-rating/downtrend) — sell or break-even hold", "yellow"))
+            if a:
+                out[r["item_id"]] = a
+        return out
+
+    @staticmethod
+    def _split_sells(sell_rows: list, rec: dict) -> tuple[list, list]:
+        """Split sells into (to_list, holds). An underwater holding the recovery read says will bounce
+        is a hold, not a sell: listing it at break-even sells into the dip and misses the bounce, and
+        ties up a slot for an offer that won't fill. Holds are kept in the bag — not listed, no slot."""
+        hold_ids = {r["item_id"] for r in sell_rows if rec.get(r["item_id"], {}).get("recover")}
+        to_list = [r for r in sell_rows if r["item_id"] not in hold_ids]
+        holds = [r for r in sell_rows if r["item_id"] in hold_ids]
+        return to_list, holds
+
+    @staticmethod
+    def _recovery_note(row: dict, a: dict) -> str:
+        """The ↩ bounce / ✂ cut one-liner for one underwater holding, given its recovery read."""
+        if a["recover"]:
+            up = (a["median"] / a["cur"] - 1) * 100 if a["cur"] else 0
+            tail = "hold for the bounce" if a["median"] >= row["avg_cost"] else "hold / double down (`recover`)"
+            return alert.color(f"       ↩ {str(row['name'])[:18]}: bounce likely — week median "
+                               f"{a['median']:,.0f} ({up:+.0f}% up), z={a['z']:+.1f} → {tail}", "green")
+        return alert.color(f"       ✂ {str(row['name'])[:18]}: no bounce signal "
+                           "(re-rating/downtrend) — sell or break-even hold", "yellow")
 
     @staticmethod
     def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
