@@ -10,6 +10,18 @@ from osrs_flipper.terminal import Terminal
 na = Terminal._next_action
 
 
+def test_split_sells_holds_back_bounce_items():
+    # an underwater holding the recovery read says will bounce is held (not listed, no slot); a
+    # re-rating (recover=False) and a non-underwater item stay in the list-now sells.
+    rows = [{"item_id": 1, "name": "NotUnderwater"},
+            {"item_id": 2, "name": "Bounces"},
+            {"item_id": 3, "name": "ReRating"}]
+    rec = {2: {"recover": True}, 3: {"recover": False}}  # item 1 not underwater → no recovery read
+    to_list, holds = Terminal._split_sells(rows, rec)
+    assert [r["item_id"] for r in to_list] == [1, 3]   # bounce (2) pulled out of the sell list
+    assert [r["item_id"] for r in holds] == [2]
+
+
 def _stub(j, offers=()):
     return types.SimpleNamespace(
         j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000},
