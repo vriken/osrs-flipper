@@ -135,6 +135,18 @@ def test_slot_worth_floor_is_dynamic_on_market_roi():
     assert scanner.slot_worth_floor(1_000_000, rich) > scanner.slot_worth_floor(1_000_000, lean)
 
 
+def test_rebalance_flags_slow_offer_but_spares_the_fast_and_near_done():
+    alt_roi_h = 0.30  # a 30%/h alternative
+    offers = [
+        {"slot": 0, "roi_h": 0.02, "fill_frac": 0.1},   # slow + early → swap (0.30 ≥ 2×0.02)
+        {"slot": 1, "roi_h": 0.20, "fill_frac": 0.1},   # already fast (0.30 < 2×0.20) → keep
+        {"slot": 2, "roi_h": 0.02, "fill_frac": 0.9},   # slow but ~done → keep progress
+        {"slot": 3, "roi_h": -0.05, "fill_frac": 0.0},  # underwater/stuck → swap
+    ]
+    got = {s["slot"] for s in scanner.rebalance_swaps(offers, alt_roi_h, ratio=2.0, max_fill=0.5)}
+    assert got == {0, 3}
+
+
 def test_one_gp_tick_flip_is_dropped(monkeypatch):
     # reversal (was "penny staple kept as hold"): a 1gp integer-tick staple (Air rune 4→5) shows
     # 25% ROI but doesn't fill — you're behind a wall of identical 1gp bids (fill calibration ≈0).

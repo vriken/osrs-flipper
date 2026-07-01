@@ -373,6 +373,49 @@ class Terminal:
             print(f"  (auto-logged {n} new order(s) from RuneLite)")
         return n
 
+    def _rebalance(self, offers: list) -> list[str]:
+        """Flag active BUYs whose slot + capital a better available flip would beat by SWAP_RATIO
+        in ROI-per-hour (margin% ÷ fill-time), while the buy is still early. Sells are excluded —
+        they're just waiting for a buyer. Uses a fast snapshot scan (no per-item timeseries)."""
+        from .tax import post_tax_received
+        buys = [o for o in offers if o.is_buy and o.qty and (o.filled / o.qty) < config.SWAP_MAX_FILL]
+        if not buys:
+            return []
+        cash = int(self.j.cash()) or config.BANKROLL
+        df = scanner.scan(mode="balanced", bankroll=cash, top=6, persistence=False,
+                          limit_used=self._limit_used(), fill_cal=self._fill_cal(), beta=self._beta())
+        held_active = {o.item_id for o in offers}
+        alt = next((r for _, r in df.iterrows()
+                    if int(r["item_id"]) not in held_active and float(r.get("fill_eta_h") or 0) > 0), None)
+        if alt is None:
+            return []
+        alt_roi_h = float(alt["margin_pct"]) / float(alt["fill_eta_h"])
+        lat, hr = self.latest(), api.one_hour()
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        rows = []
+        for o in buys:
+            ask = (lat.get(o.item_id) or {}).get("high")
+            if not ask or not o.price:
+                continue
+            roi = (post_tax_received(int(ask), item_id=o.item_id) - o.price) / o.price
+            v = hr.get(o.item_id, {})
+            lowv, highv = v.get("lowPriceVolume") or 0, v.get("highPriceVolume") or 0
+            eta = ((o.qty - o.filled) / (config.ALPHA * lowv) if lowv else float("inf")) \
+                + (o.qty / (config.ALPHA * highv) if highv else float("inf"))
+            roi_h = roi / eta if 0 < eta < float("inf") else 0.0
+            rows.append({"slot": o.slot, "name": str(names.get(o.item_id, o.item_id)),
+                         "roi": roi, "eta": eta, "roi_h": roi_h, "fill_frac": o.filled / o.qty})
+        swaps = scanner.rebalance_swaps(rows, alt_roi_h, ratio=config.SWAP_RATIO,
+                                        max_fill=config.SWAP_MAX_FILL)
+        out = []
+        for s in swaps:
+            eta_s = f"{s['eta']:.1f}h" if s["eta"] < 100 else "stuck"
+            edge = "stuck/underwater" if s["roi_h"] <= 0 else f"{alt_roi_h / s['roi_h']:.0f}× faster growth"
+            out.append(f"  slot {s['slot']}: cancel {s['name'][:18]} ({s['roi']:+.1%} in {eta_s}) → "
+                       f"{str(alt['name'])[:18]} ({float(alt['margin_pct']):.1%} in "
+                       f"{float(alt['fill_eta_h']):.1f}h) · {edge}")
+        return out
+
     def _review_offers(self) -> list[tuple]:
         """For each live offer: (offer, verdict, elapsed_h, eta_h, progress). Shares the pure
         verdict logic with the background alert watcher (monitor.review_offers)."""
@@ -488,6 +531,11 @@ class Terminal:
                 if hint:
                     print(hint)
                 refined.append((o, v, elapsed_h, eta_h, prog))
+            swaps = self._rebalance(offers)  # active buy a better flip would beat → suggest a swap
+            if swaps:
+                print("  REBALANCE (a better flip wants these slots):")
+                for s in swaps:
+                    print(alert.color(s, "yellow"))
 
         busy_ids = {o.item_id for o in offers}  # skip held items with ANY live offer (selling / accumulating)
         sell_rows = self._sell_plan(held, busy_ids)
