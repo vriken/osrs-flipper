@@ -375,21 +375,27 @@ class Terminal:
 
     def _rebalance(self, offers: list) -> list[str]:
         """Flag active BUYs whose slot + capital a better available flip would beat by SWAP_RATIO
-        in ROI-per-hour (margin% ÷ fill-time), while the buy is still early. Sells are excluded —
-        they're just waiting for a buyer. Uses a fast snapshot scan (no per-item timeseries)."""
+        in ROI-per-hour (margin% ÷ fill-time), while the buy is still EARLY and not just-placed.
+        Sells are excluded — they're just waiting for a buyer. Uses the SAME deep scan the deploy
+        plan uses (so it can't contradict what `port` just recommended), and floors every fill-time
+        so a near-instant flip can't dominate on a rounding artifact."""
         from .tax import post_tax_received
-        buys = [o for o in offers if o.is_buy and o.qty and (o.filled / o.qty) < config.SWAP_MAX_FILL]
+        now_ms = int(time.time() * 1000)
+        floor_eta = config.MIN_FILL_ETA_H
+        # eligible = early fill AND old enough that suggesting a cancel isn't churning a fresh order
+        buys = [o for o in offers if o.is_buy and o.qty and (o.filled / o.qty) < config.SWAP_MAX_FILL
+                and o.started_ms and (now_ms - o.started_ms) / 3_600_000 >= config.SWAP_MIN_AGE_H]
         if not buys:
             return []
         cash = int(self.j.cash()) or config.BANKROLL
-        df = scanner.scan(mode="balanced", bankroll=cash, top=6, persistence=False,
-                          limit_used=self._limit_used(), fill_cal=self._fill_cal(), beta=self._beta())
+        df = scanner.scan(mode="balanced", bankroll=cash, top=6, limit_used=self._limit_used(),
+                          fill_cal=self._fill_cal(), beta=self._beta())  # deep scan — same as the deploy plan
         held_active = {o.item_id for o in offers}
         alt = next((r for _, r in df.iterrows()
                     if int(r["item_id"]) not in held_active and float(r.get("fill_eta_h") or 0) > 0), None)
         if alt is None:
             return []
-        alt_roi_h = float(alt["margin_pct"]) / float(alt["fill_eta_h"])
+        alt_roi_h = scanner.roi_per_hour(float(alt["margin_pct"]), float(alt["fill_eta_h"]), floor_eta)
         lat, hr = self.latest(), api.one_hour()
         names = {r["id"]: r["name"] for r in api.mapping()}
         rows = []
@@ -402,7 +408,7 @@ class Terminal:
             lowv, highv = v.get("lowPriceVolume") or 0, v.get("highPriceVolume") or 0
             eta = ((o.qty - o.filled) / (config.ALPHA * lowv) if lowv else float("inf")) \
                 + (o.qty / (config.ALPHA * highv) if highv else float("inf"))
-            roi_h = roi / eta if 0 < eta < float("inf") else 0.0
+            roi_h = scanner.roi_per_hour(roi, eta, floor_eta)
             rows.append({"slot": o.slot, "name": str(names.get(o.item_id, o.item_id)),
                          "roi": roi, "eta": eta, "roi_h": roi_h, "fill_frac": o.filled / o.qty})
         swaps = scanner.rebalance_swaps(rows, alt_roi_h, ratio=config.SWAP_RATIO,

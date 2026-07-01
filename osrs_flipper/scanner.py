@@ -315,6 +315,15 @@ def slot_worth_floor(net_worth: int, ranking: pd.DataFrame, *, slots: int | None
     return max(250, int(fair_share * achievable_roi * lam))
 
 
+def roi_per_hour(roi: float, eta_h: float, floor_h: float) -> float:
+    """ROI-per-hour with the fill-time floored, so a high-volume flip whose estimated fill rounds
+    toward 0 can't explode the rate and dominate a fatter-margin flip on an artifact. Unrankable
+    (0.0) when there's no fill estimate at all (infinite time / no volume)."""
+    if not eta_h < float("inf"):
+        return 0.0
+    return roi / max(eta_h, floor_h)
+
+
 def rebalance_swaps(offers_roi: list[dict], alt_roi_h: float, *,
                     ratio: float, max_fill: float) -> list[dict]:
     """Which active buys are worth cancelling for a better flip. Each offer dict carries its

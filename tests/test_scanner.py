@@ -135,6 +135,14 @@ def test_slot_worth_floor_is_dynamic_on_market_roi():
     assert scanner.slot_worth_floor(1_000_000, rich) > scanner.slot_worth_floor(1_000_000, lean)
 
 
+def test_roi_per_hour_floors_fill_time_so_near_instant_flips_dont_explode():
+    # the reported bug: a 1.9% flip "in 0.0h" must NOT out-rate a 4% flip in 0.9h (was "1780× faster")
+    fast = scanner.roi_per_hour(0.019, 0.0, 0.25)   # 0.019 / max(0, 0.25) = 0.076
+    fat = scanner.roi_per_hour(0.040, 0.9, 0.25)    # 0.040 / 0.9        = 0.044
+    assert fast < 2 * fat                            # no longer a swap suggestion
+    assert scanner.roi_per_hour(0.05, float("inf"), 0.25) == 0.0  # no volume → unrankable
+
+
 def test_rebalance_flags_slow_offer_but_spares_the_fast_and_near_done():
     alt_roi_h = 0.30  # a 30%/h alternative
     offers = [
