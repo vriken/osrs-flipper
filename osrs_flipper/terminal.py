@@ -1069,8 +1069,8 @@ class Terminal:
             # gear skips the volume gate, so big-ticket + thin = the most corner-able class. Run the
             # SAME anomaly check scan/go use, so a manipulated spike (live ≫ 2wk baseline) is excluded
             # here too — a fat "spread" on a pumped tome is a trap, not a flip.
-            if not anomaly.is_buyable(anomaly.assess(int(r["item_id"]), lat, hr, api.timeseries)):
-                pumped += 1
+            if not anomaly.is_buyable(anomaly.assess(int(r["item_id"]), lat, hr, api.timeseries, long=True)):
+                pumped += 1  # sharp pump, falling knife, OR slow pump vs the 3mo baseline on a thin item
                 continue
             kept.append(r)
         if not kept:

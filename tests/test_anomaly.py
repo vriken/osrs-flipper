@@ -93,6 +93,37 @@ def test_pump_on_a_thin_high_value_item_is_not_buyable():
     assert not anomaly.is_buyable(a)
 
 
+def _long_ts(pumped_2wk, base_3mo, vol):
+    # step-aware timeseries: 1h series (2wk) sits at the pumped level, 6h series (3mo) at the old base
+    def ts(iid, step):
+        mid = pumped_2wk if step == "1h" else base_3mo
+        return _bars([mid] * 40, [vol] * 40)
+    return ts
+
+
+def test_slow_pump_caught_vs_3mo_baseline_on_a_thin_item():
+    # slow pump: the 2wk median already followed price up to ~1M (div vs 2wk ≈ 0), but the 3mo
+    # baseline is ~800k. On a THIN, valuable item that's a manipulated drift → not buyable.
+    live, hp = {1: {"high": 1_001_000, "low": 999_000}}, {1: {"highPriceVolume": 80, "lowPriceVolume": 80}}
+    a = anomaly.assess(1, live, hp, _long_ts(1_000_000, 800_000, 80), long=True)
+    assert a["manipulable"] and abs(a["div"]) < 0.15   # looks normal vs 2wk…
+    assert not anomaly.is_buyable(a)                    # …but caught vs the 3mo baseline
+    assert "slow pump" in anomaly.summary_line(a)
+
+
+def test_liquid_rerating_vs_3mo_is_not_blocked():
+    # SAME price shape but high volume → a genuine re-rating, not manipulation → still buyable.
+    live, hp = {1: {"high": 1_001_000, "low": 999_000}}, {1: {"highPriceVolume": 9000, "lowPriceVolume": 9000}}
+    a = anomaly.assess(1, live, hp, _long_ts(1_000_000, 800_000, 9000), long=True)
+    assert not a["manipulable"] and anomaly.is_buyable(a)
+
+
+def test_manipulable_flag_needs_thin_AND_valuable():
+    thin_cheap = anomaly.assess(1, {1: {"high": 11, "low": 9}}, {1: {"highPriceVolume": 5, "lowPriceVolume": 5}},
+                                lambda i, s: _bars([10] * 20, [5] * 20))
+    assert not thin_cheap["manipulable"]  # thin but a 10gp item isn't worth cornering
+
+
 def _assess(mids, vols, live):
     return anomaly.assess(1, {1: {"high": live + 1, "low": live - 1}}, {1: {}}, lambda i, s: _bars(mids, vols))
 
