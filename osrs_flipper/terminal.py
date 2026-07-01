@@ -32,7 +32,7 @@ from __future__ import annotations
 import threading
 import time
 
-from . import alert, api, calibration, config, datasource, monitor, runelite, scanner
+from . import alert, analysis, api, calibration, config, datasource, monitor, runelite, scanner
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -894,6 +894,10 @@ class Terminal:
             print(f"  {p.name[:20]:20} {p.qty:>8,} {p.avg_cost:>9,.1f} "
                   f"{(bid or 0):>9,} {unreal:>+11,.0f}")
 
+    def cmd_analyze(self, args: list[str]) -> None:
+        """Realized P&L, win rate, per-item winners/losers and churn across all trade history."""
+        print(analysis.report())
+
     def cmd_pnl(self) -> None:
         _, tied = self._sync_cash()  # live coins → cash; gold tied in open offers → kept in equity
         lat = self.latest()
@@ -1269,6 +1273,7 @@ class Terminal:
             "pnl": lambda a: self.cmd_pnl(), "progress": lambda a: self.cmd_progress(a),
             "pos": lambda a: self.cmd_pos(), "inv": lambda a: self.cmd_inventory(a),
             "recent": lambda a: self.cmd_recent(a), "recover": lambda a: self.cmd_recover(a),
+            "analyze": lambda a: self.cmd_analyze(a), "analysis": lambda a: self.cmd_analyze(a),
             # rare / maintenance (hidden from `help`; shown in `help all`)
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "hold": lambda a: self.cmd_hold(a), "forget": lambda a: self.cmd_forget(a),
