@@ -315,6 +315,21 @@ def slot_worth_floor(net_worth: int, ranking: pd.DataFrame, *, slots: int | None
     return max(250, int(fair_share * achievable_roi * lam))
 
 
+def rebalance_swaps(offers_roi: list[dict], alt_roi_h: float, *,
+                    ratio: float, max_fill: float) -> list[dict]:
+    """Which active buys are worth cancelling for a better flip. Each offer dict carries its
+    ROI-per-hour (`roi_h` = margin% ÷ fill-time) and `fill_frac`. Flag it when the alternative's
+    ROI/hour beats it by `ratio` AND it's still early (< max_fill filled) — a near-done buy keeps
+    its progress. A stuck/underwater buy (roi_h ≤ 0) is beaten by any positive alt."""
+    out = []
+    for o in offers_roi:
+        if o["fill_frac"] >= max_fill:
+            continue
+        if alt_roi_h >= ratio * max(o["roi_h"], 1e-9):
+            out.append(o)
+    return out
+
+
 def _finalize_gp(picks: list[dict]) -> None:
     """Set each pick's realised gp and buy ETA from its allocated qty. Active gp is the per-cycle
     spread × fill; a hold's is the full spread captured once it sells (no queue-jump discount)."""

@@ -206,6 +206,14 @@ SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 # liquid to consolidate rather than fragment into slot-unworthy flips.
 SLOT_WORTH_LAMBDA = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_LAMBDA", 0.5))
 
+# Rebalancing: an active BUY holds a slot + capital that a better flip could use. Suggest
+# cancelling it only when a candidate's ROI-per-hour (margin% ÷ fill-time — folds in margin,
+# speed and capital efficiency) beats the offer's by SWAP_RATIO, AND the offer is still early
+# (< SWAP_MAX_FILL filled) so we're not throwing away a nearly-done buy. Conservative on purpose:
+# cancelling costs your queue position + the re-place clicks, so only a wide edge is worth it.
+SWAP_RATIO = float(os.environ.get("OSRS_FLIPPER_SWAP_RATIO", 2.0))       # alt must be ≥2× the offer's ROI/h
+SWAP_MAX_FILL = float(os.environ.get("OSRS_FLIPPER_SWAP_MAX_FILL", 0.5))  # only swap buys under 50% filled
+
 # --- Schedule (drives the time-aware `brief`) --------------------------------
 # Active hours = fast online flips; outside them = overnight/patient plan.
 AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wake
