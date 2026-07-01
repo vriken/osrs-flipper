@@ -87,8 +87,13 @@ def optimal_quote(
     timestep: str = config.PERSIST_TIMESTEP,
     horizon_h: float = 1.0,
     recent_bars: int = config.QUOTE_RECENT_BARS,
+    target_fill_h: float | None = None,
 ) -> Quote | None:
-    """Solve for the EV-maximising (buy, sell) prices, with per-leg fill probabilities."""
+    """Solve for the EV-maximising (buy, sell) prices, with per-leg fill probabilities.
+
+    With `target_fill_h` (patient / overnight): instead of the EV-max price, bid the LOWEST price
+    whose buy leg still fills within that window — so an overnight buy fills near morning at the
+    best margin, not in 1-2h at a price you paid up for. Lets the bid drop BELOW the live bid."""
     if qty <= 0:
         return None
     bars = api.timeseries(item_id, timestep)
@@ -137,7 +142,14 @@ def optimal_quote(
     buy_lo = int(bid)
     if clow is not None and int(clow) > buy_lo:
         buy_lo = min(int(clow), int(ask) - 1)
-    buy_grid = range(buy_lo, int(ask), step)
+    # patient/overnight: let the bid drop BELOW the live bid, down to the recent floor (where sellers
+    # have actually dumped), so we can pick a low, fat-margin bid that still fills by morning.
+    grid_lo = buy_lo
+    if target_fill_h is not None:
+        lows = [b["avgLowPrice"] for b in bars if b.get("avgLowPrice")]
+        if lows:
+            grid_lo = max(1, min(int(min(lows)), buy_lo))
+    buy_grid = range(grid_lo, int(ask), step)
     sell_grid = range(int(bid) + 1, int(ask) + 1, step)
 
     results = []
@@ -167,7 +179,14 @@ def optimal_quote(
     if not results:
         return None
     results.sort(key=lambda r: -r["ev"])
-    best = results[0]
+    if target_fill_h is not None:
+        # patient: the LOWEST bid that still fills the buy leg within the window (fattest margin that
+        # completes by morning); ties broken by EV. If nothing fills in time, take the fastest bid.
+        fillable = [r for r in results if r["t_buy_h"] <= target_fill_h]
+        best = min(fillable, key=lambda r: (r["buy"], -r["ev"])) if fillable \
+            else min(results, key=lambda r: r["t_buy_h"])
+    else:
+        best = results[0]
     return Quote(
         item_id=item_id, name=name or str(item_id), qty=qty, bid=buy_lo, ask=ask, horizon_h=horizon_h,
         buy_px=best["buy"], sell_px=best["sell"], net_unit=best["net_unit"],
