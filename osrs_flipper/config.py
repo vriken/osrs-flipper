@@ -25,9 +25,11 @@ USER_AGENT = f"osrs-flipper (flip analysis, manual trading) - {_CONTACT}"
 # multiple large queries per second. The bulk endpoints return all items at once.
 MIN_REQUEST_INTERVAL_S = 1.0
 HTTP_TIMEOUT = int(os.environ.get("OSRS_FLIPPER_HTTP_TIMEOUT", 15))  # fail fast, don't freeze the REPL
-# Reject an item when its live book and 1h average disagree by more than this fraction —
-# the data is stale/pumped/manipulated and no price is trustworthy (e.g. a deflating pump).
-PRICE_DIVERGENCE_MAX = float(os.environ.get("OSRS_FLIPPER_PRICE_DIVERGENCE_MAX", 0.5))
+# Reject an item when its live book and its recent-bar median disagree by more than this fraction —
+# a glitchy tick, a deflating pump, or a price mid-swing where no point estimate is trustworthy. The
+# quote anchors to the live book, so this is the "don't flip while it's moving" guard. 0.5 was so
+# loose it never fired (a falling item 9% off its norm sailed through and got quoted at stale prices).
+PRICE_DIVERGENCE_MAX = float(os.environ.get("OSRS_FLIPPER_PRICE_DIVERGENCE_MAX", 0.15))
 # Tighter, margin-aware guard layered on top of the absolute gate above: reject a flip when
 # the recent DOWNWARD drift (1h-avg mid → live mid) has already eaten more than this fraction
 # of the modeled margin. A 50% absolute divergence is far too loose — a 2% adverse move wipes
@@ -119,6 +121,10 @@ ANOMALY_DIV_MIN = float(os.environ.get("OSRS_FLIPPER_ANOMALY_DIV_MIN", 0.15))   
 ANOMALY_MIN_VOL = int(os.environ.get("OSRS_FLIPPER_ANOMALY_MIN_VOL", 1000))     # real volume floor
 ANOMALY_VOL_Z_MIN = float(os.environ.get("OSRS_FLIPPER_ANOMALY_VOL_Z_MIN", 2.0))  # abnormal-volume z
 ANOMALY_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_ANOMALY_CANDIDATES", 30))   # deep-check cap
+# Even a "normally"-priced item (|div| < ANOMALY_DIV_MIN) is not buyable if it's actively falling this
+# fast: recent 1-bar slope as a fraction of the baseline. Catches a falling knife before it crosses
+# the divergence band — the exact case where 5-min-lagged aggregates mislead. More negative = stricter.
+ANOMALY_FALL_SLOPE = float(os.environ.get("OSRS_FLIPPER_ANOMALY_FALL_SLOPE", -0.03))
 
 # --- Spread persistence (see persistence.py) ---------------------------------
 PERSIST_TIMESTEP = "1h"  # recent history to judge spread stability against

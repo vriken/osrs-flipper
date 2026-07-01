@@ -124,11 +124,14 @@ def is_buyable(a: dict[str, Any]) -> bool:
     still falling after a volume dump (wait for the floor), or drifting down on normal volume (a
     re-rating / falling knife). This is the single rule behind both `summary_line` and the buy filter,
     so the scanner never recommends what the `why` warns against. No baseline → don't block."""
-    if a.get("ref_baseline") is None or a.get("live_mid") is None:
+    ref = a.get("ref_baseline")
+    if ref is None or a.get("live_mid") is None:
         return True
     div = a.get("div", 0.0)
     if abs(div) < config.ANOMALY_DIV_MIN:
-        return True  # price normal
+        # "normal"-priced UNLESS it's a steep active decline — a falling knife heading for the
+        # divergence band. slope is the recent 1-bar move; over the baseline it's the drop rate.
+        return not (ref and a.get("slope", 0.0) / ref <= config.ANOMALY_FALL_SLOPE)
     spike = abs(a.get("vol_z", 0.0)) >= config.ANOMALY_VOL_Z_MIN
     return div < 0 and spike and a.get("slope", 0.0) > 0  # dumped on volume & recovering → revert-buy
 
@@ -139,6 +142,8 @@ def summary_line(a: dict[str, Any]) -> str:
         return "no baseline data"
     div, ref, lbl = a["div"], a["ref_baseline"], a["ref_label"]
     if abs(div) < config.ANOMALY_DIV_MIN:
+        if ref and a.get("slope", 0.0) / ref <= config.ANOMALY_FALL_SLOPE:
+            return f"⚠ near {lbl} norm {ref:,.0f} but sliding {a['slope'] / ref * 100:+.0f}%/bar — don't catch it"
         return f"price normal (~{ref:,.0f} {lbl} norm)"
     spike = abs(a.get("vol_z", 0)) >= config.ANOMALY_VOL_Z_MIN
     if div < 0:

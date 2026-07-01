@@ -107,14 +107,22 @@ def optimal_quote(
     if clow is not None and chigh is not None and clow > chigh:
         return None  # crossed/inverted live book → prices unreliable
     rbid, rask = _robust(bars, "avgLowPrice"), _robust(bars, "avgHighPrice")  # median, glitch-resistant
-    bid = int(round(rbid)) if rbid is not None else (hr.get("avgLowPrice") or cur.get("low"))
-    ask = int(round(rask)) if rask is not None else (hr.get("avgHighPrice") or cur.get("high"))
+    med_bid = int(round(rbid)) if rbid is not None else None
+    med_ask = int(round(rask)) if rask is not None else None
+    # Anchor to the LIVE book — the price a fast fill actually gets right now. The recent-bar median
+    # only (a) rejects the quote when it and the live book diverge too far (a glitch, a deflating pump,
+    # or a price mid-swing we shouldn't flip into) and (b) fills in when a live side is missing.
+    # Anchoring to the median instead lags on a trending item and quotes off the current market — e.g.
+    # a buy above the live ask on a falling item, an illusory spread that never fills.
+    bid = int(clow) if clow is not None else (med_bid if med_bid is not None else (hr.get("avgLowPrice") or cur.get("low")))
+    ask = int(chigh) if chigh is not None else (med_ask if med_ask is not None else (hr.get("avgHighPrice") or cur.get("high")))
     if bid is None or ask is None:
         return None
-    # reject when the live book and the 1h average wildly disagree (deflating pump / stale)
-    if clow is not None and chigh is not None:
-        avg_mid, live_mid = (bid + ask) / 2, (clow + chigh) / 2
-        if avg_mid > 0 and abs(live_mid - avg_mid) / avg_mid > config.PRICE_DIVERGENCE_MAX:
+    # reject when the live book sits far from the recent-bar median: a glitchy tick, a deflating pump,
+    # or a price mid-move — no point estimate is trustworthy, so don't flip until it settles.
+    if med_bid is not None and med_ask is not None:
+        med_mid, live_mid = (med_bid + med_ask) / 2, (bid + ask) / 2
+        if med_mid > 0 and abs(live_mid - med_mid) / med_mid > config.PRICE_DIVERGENCE_MAX:
             return None
 
     # Only quote marketable prices: a buy must sit in [bid, ask) and a sell in (bid, ask].
