@@ -83,6 +83,7 @@ def active_offers(data: dict | None) -> list[Offer]:
             started_ms=int(o.get("placedAt", 0) or 0),
             filled=int(o.get("completed", 0)),
             uuid=o.get("uuid") or "",
+            placement_observed=bool(o.get("placementObserved", True)),  # absent (old plugin) → trust it
         ))
     return out
 

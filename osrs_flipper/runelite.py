@@ -34,6 +34,7 @@ class Offer:
     started_ms: int = 0
     filled: int = 0
     uuid: str = ""
+    placement_observed: bool = True  # False → started_ms is first-seen, not a real placement time
 
 
 @dataclass
@@ -189,13 +190,17 @@ def margin_alert(live_net: float, avg_net: float | None, elapsed_h: float, *,
     return margin_collapsed(live_net, avg_net)
 
 
-def review_verdict(state: str, progress: float, elapsed_h: float, eta_h: float) -> str:
+def review_verdict(state: str, progress: float, elapsed_h: float | None, eta_h: float) -> str:
     """Advise on an active offer from time/progress alone (we don't get the offer price).
-    Returns: collect | stale | slow | ontrack | done."""
+    Returns: collect | stale | slow | ontrack | open | done. `elapsed_h` is None when the
+    placement wasn't witnessed (e.g. an offer already open at login) — timing is then unknown,
+    so we return `open` rather than a false on-track/stale read."""
     if state in ("BOUGHT", "SOLD"):
         return "collect"
     if progress >= 1:
         return "done"
+    if elapsed_h is None:
+        return "open"
     if eta_h and eta_h < float("inf") and elapsed_h > 2 * eta_h and progress < 0.5:
         return "stale"
     if eta_h and eta_h < float("inf") and elapsed_h > eta_h:
