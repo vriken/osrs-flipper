@@ -388,14 +388,19 @@ class Terminal:
         if not buys:
             return []
         cash = int(self.j.cash()) or config.BANKROLL
-        df = scanner.scan(mode="balanced", bankroll=cash, top=6, limit_used=self._limit_used(),
+        df = scanner.scan(mode="balanced", bankroll=cash, top=8, limit_used=self._limit_used(),
                           fill_cal=self._fill_cal(), beta=self._beta())  # deep scan — same as the deploy plan
         held_active = {o.item_id for o in offers}
-        alt = next((r for _, r in df.iterrows()
-                    if int(r["item_id"]) not in held_active and float(r.get("fill_eta_h") or 0) > 0), None)
-        if alt is None:
+        alts = []  # distinct candidates you don't already hold / have on offer — one per swap
+        for _, r in df.iterrows():
+            if int(r["item_id"]) in held_active or not float(r.get("fill_eta_h") or 0) > 0:
+                continue
+            alts.append({"alt_name": str(r["name"]), "alt_margin": float(r["margin_pct"]),
+                         "alt_eta": float(r["fill_eta_h"]),
+                         "alt_roi_h": scanner.roi_per_hour(float(r["margin_pct"]),
+                                                           float(r["fill_eta_h"]), floor_eta)})
+        if not alts:
             return []
-        alt_roi_h = scanner.roi_per_hour(float(alt["margin_pct"]), float(alt["fill_eta_h"]), floor_eta)
         lat, hr = self.latest(), api.one_hour()
         names = {r["id"]: r["name"] for r in api.mapping()}
         rows = []
@@ -411,15 +416,14 @@ class Terminal:
             roi_h = scanner.roi_per_hour(roi, eta, floor_eta)
             rows.append({"slot": o.slot, "name": str(names.get(o.item_id, o.item_id)),
                          "roi": roi, "eta": eta, "roi_h": roi_h, "fill_frac": o.filled / o.qty})
-        swaps = scanner.rebalance_swaps(rows, alt_roi_h, ratio=config.SWAP_RATIO,
+        swaps = scanner.rebalance_swaps(rows, alts, ratio=config.SWAP_RATIO,
                                         max_fill=config.SWAP_MAX_FILL)
         out = []
         for s in swaps:
             eta_s = f"{s['eta']:.1f}h" if s["eta"] < 100 else "stuck"
-            edge = "stuck/underwater" if s["roi_h"] <= 0 else f"{alt_roi_h / s['roi_h']:.0f}× faster growth"
+            edge = "stuck/underwater" if s["roi_h"] <= 0 else f"{s['alt_roi_h'] / s['roi_h']:.0f}× faster growth"
             out.append(f"  slot {s['slot']}: cancel {s['name'][:18]} ({s['roi']:+.1%} in {eta_s}) → "
-                       f"{str(alt['name'])[:18]} ({float(alt['margin_pct']):.1%} in "
-                       f"{float(alt['fill_eta_h']):.1f}h) · {edge}")
+                       f"{s['alt_name'][:18]} ({s['alt_margin']:.1%} in {s['alt_eta']:.1f}h) · {edge}")
         return out
 
     def _review_offers(self) -> list[tuple]:
