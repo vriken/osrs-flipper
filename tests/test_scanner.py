@@ -117,15 +117,22 @@ def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, lim
 
 
 def test_slot_worth_floor_scales_with_net_worth_not_loose_cash(monkeypatch):
-    # A small hold worth ~312 gp clears the floor when it's based on 37k loose cash (0.2% = 74 →
-    # floor 250), but is gated once the floor reflects a 400k net worth (0.2% = 800). This is the
-    # "don't fragment 37k into <500gp flips while 334k is landing" fix.
+    # A 600-gp hold clears the dynamic slot-worth floor when it's based on 37k loose cash, but is
+    # gated once the floor reflects a 400k net worth. This is the "don't fragment 37k into small
+    # flips while 334k is landing" fix — the floor is a slot's opportunity cost, not the loose cash.
     df = pd.DataFrame([_candidate(561, "Small hold", 100, 107, margin_abs=6, margin_fast=-1,
-                                  vol=52, limit=52)])  # worth = 6 × 52 = 312 gp
+                                  vol=100, limit=100)])  # worth = 6 × 100 = 600 gp
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
-    on_cash, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1)
-    on_networth, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1, net_worth=400_000)
+    on_cash, _, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1)
+    on_networth, _, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1, net_worth=400_000)
     assert on_cash and not on_networth  # funded on the loose-cash floor, gated on the net-worth floor
+
+
+def test_slot_worth_floor_is_dynamic_on_market_roi():
+    # the floor rises with the ROI the market is paying: same net worth, fatter spreads → higher bar
+    lean = pd.DataFrame([_candidate(1, "lean", 100, 103, margin_abs=3, margin_fast=1)])   # 3% roi
+    rich = pd.DataFrame([_candidate(1, "rich", 100, 115, margin_abs=15, margin_fast=5)])  # 15% roi
+    assert scanner.slot_worth_floor(1_000_000, rich) > scanner.slot_worth_floor(1_000_000, lean)
 
 
 def test_one_gp_tick_flip_is_dropped(monkeypatch):
@@ -137,7 +144,7 @@ def test_one_gp_tick_flip_is_dropped(monkeypatch):
         _candidate(1391, "Battlestaff", 200, 215, margin_abs=10, margin_fast=5),  # real fast flip
     ])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
-    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     by_name = {p["name"]: p for p in picks}
     assert "Air rune" not in by_name                     # 1gp margin < MIN_NET_MARGIN → gated out
     assert by_name["Battlestaff"]["tier"] != "hold"      # 10gp queue-jumpable flip is active
@@ -153,7 +160,7 @@ def test_hold_quality_floor_drops_low_roi(monkeypatch):
     ])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
     # 2 free slots so the active flip and the quality hold both fit; Junk is dropped for margin, not slots.
-    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=2)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=2)
     by_name = {p["name"]: p for p in picks}
     assert by_name["Quality hold"]["tier"] == "hold"
     assert "Junk hold" not in by_name  # below HOLD_MIN_MARGIN → left liquid, not churned
@@ -163,7 +170,7 @@ def test_build_portfolio_scales_gp_by_fill_mult(monkeypatch):
     # a flip with calibrated fill_mult 0.5 → its expected gp is halved (model self-corrects)
     df = pd.DataFrame([_candidate(1, "A", 100, 110, margin_abs=10, margin_fast=5, fill_mult=0.5)])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
-    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     p = picks[0]
     assert abs(p["gp"] - 10 * p["qty"] * 0.9 * 0.5) < 1   # margin × qty × p_complete × fill_mult
 
@@ -176,6 +183,6 @@ def test_placement_order_ranks_by_roi_not_just_speed(monkeypatch):
         _candidate(562, "High ROI", 100, 111, margin_abs=10, margin_fast=-1),  # 10%
     ])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
-    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     assert picks[0]["name"] == "High ROI"
 

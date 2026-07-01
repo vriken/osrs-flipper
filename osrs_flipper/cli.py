@@ -73,7 +73,7 @@ def _cmd_portfolio(args: argparse.Namespace) -> None:
         free, source = max(0, config.GE_SLOTS - len(offers)), "live"
     else:
         free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
-    picks, idle = scanner.build_portfolio(
+    picks, idle, _ = scanner.build_portfolio(
         bankroll=cash, held_ids=[h.item_id for h in held] + active_ids, free_slots=free,
         members=True if args.members else None, min_gp=args.min_gp or None, limit_used=limit_used)
     print(alert.format_portfolio(picks, cash, held, idle, free_slots=free, slot_source=source))

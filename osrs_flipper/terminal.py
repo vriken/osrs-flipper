@@ -249,7 +249,7 @@ class Terminal:
               + (f" ({len(to_sell)} reserved for sells)…" if to_sell else "…"))
         bids = {p.item_id: (self.latest().get(p.item_id) or {}).get("low") for p in held}
         net_worth = int(self.j.equity(bids) + src.tied_gold())
-        picks, idle = scanner.build_portfolio(
+        picks, idle, _ = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
             net_worth=net_worth, fill_cal=self._fill_cal(), beta=self._beta())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
@@ -513,20 +513,19 @@ class Terminal:
                 print(f"  ({len(to_sell)} slot(s) reserved for the sell listing(s) above)")
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             fcal = self._fill_cal()
-            picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
-                                                  limit_used=self._limit_used(), net_worth=net_worth,
-                                                  fill_cal=fcal, beta=self._beta())
+            picks, idle, floor = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
+                                                         free_slots=buy_slots, limit_used=self._limit_used(),
+                                                         net_worth=net_worth, fill_cal=fcal, beta=self._beta())
             src = "live" if (offers or coins is not None) else "assumed"
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
             if fcal.get("global_measured") is not None:
                 print(f"  (auto-calibrated from {fcal['n']} attempts: β {self._beta():.2f} · "
                       f"fill ×{fcal['global']:.2f} — applied to prices, gp & ranking)")
             self._explain_picks(picks)  # one-line "why" for each buy you're about to place
-            floor = max(250, int(config.SLOT_WORTH_FRAC * net_worth))
             if idle > floor:  # cash held back rather than fragmented into slot-unworthy flips
                 tail = f"; consolidating with the {tied:,} in your offers" if tied else ""
                 print(alert.color(f"  holding {idle:,.0f} idle — below the ~{floor:,} gp slot-worth bar "
-                                  f"(~{config.SLOT_WORTH_FRAC:.1%} of net worth){tail}", "yellow"))
+                                  f"(a slot's opportunity cost at your net worth){tail}", "yellow"))
         elif buy_slots > 0:
             self._overnight_plan(cash)
 

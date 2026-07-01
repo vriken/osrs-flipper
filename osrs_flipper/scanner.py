@@ -242,13 +242,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     can't pour into penny traps. Picks are ordered by ROI-tilted gp/hour. Returns (picks, idle).
     """
     if free_slots <= 0:
-        return [], float(bankroll)  # no free slots → can't place any new buys
-    # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks.
-    # Scale the floor by NET WORTH (cash + gold in offers + stock), not the loose cash on hand —
-    # otherwise a little free cash gets fragmented into tiny flips that lock slots the incoming
-    # pile should get. Falls back to bankroll when net_worth isn't supplied (e.g. the CLI).
-    if min_gp is None:
-        min_gp = max(250, int(config.SLOT_WORTH_FRAC * (net_worth or bankroll)))
+        return [], float(bankroll), 0  # no free slots → can't place any new buys
     # daytime plan: every free slot is a patient ~2h flip (you cycle them between check-ins).
     # the slow/offline deals are reserved for the night plan (`overnight`), so during the day
     # we rank every slot on the balanced (2h) horizon.
@@ -257,6 +251,10 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
                         fill_cal=fill_cal, beta=beta)
                 for m in modes}
+    # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks —
+    # derived live from net worth and the ROI the market is paying (see slot_worth_floor).
+    if min_gp is None:
+        min_gp = slot_worth_floor(int(net_worth or bankroll), rankings["balanced"])
     taken = {int(i) for i in held_ids}
 
     def ok(row, *, fast: bool) -> bool:
@@ -299,7 +297,22 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     allocated, idle = _allocate(allocated, bankroll)
     _finalize_gp(allocated)
     _schedule(allocated, free_slots)
-    return allocated, idle
+    return allocated, idle, min_gp
+
+
+def slot_worth_floor(net_worth: int, ranking: pd.DataFrame, *, slots: int | None = None,
+                     lam: float | None = None) -> int:
+    """Dynamic minimum profit for a flip to be WORTH a GE slot = the slot's opportunity cost:
+    fair-share capital per slot (net_worth / slots) × the ROI the market is currently paying
+    (median margin% of the top candidates) × λ. Self-calibrating — no hard-coded fraction; a
+    bigger account or fatter market raises the bar, more slots lowers the per-slot bar. Floored
+    at the raw click cost (250)."""
+    slots = slots or config.GE_SLOTS
+    lam = config.SLOT_WORTH_LAMBDA if lam is None else lam
+    fair_share = net_worth / max(1, slots)
+    rois = [float(x) for x in ranking["margin_pct"].head(10)] if not ranking.empty else []
+    achievable_roi = statistics.median(rois) if rois else config.MIN_MARGIN_PCT
+    return max(250, int(fair_share * achievable_roi * lam))
 
 
 def _finalize_gp(picks: list[dict]) -> None:
