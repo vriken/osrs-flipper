@@ -44,7 +44,7 @@ _VERDICTS = {
     "stale": ("🔴 STALE — likely mispriced; cancel & re-quote", "red"),
     "slow": ("🟡 SLOW — consider re-pricing", "yellow"),
     "ontrack": ("🟢 on track", "green"),
-    "open": ("⏳ open · age unknown (placed before tracking)", None),
+    "open": ("⏳ open · true age unconfirmed (placed before tracking)", None),
     "done": ("done", None),
 }
 
@@ -462,7 +462,12 @@ class Terminal:
                     v, hint = self._refine_verdict(o, v)
                 text, c = _VERDICTS[v]
                 eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
-                elapsed_s = "   ?" if elapsed_h is None else f"{elapsed_h:>5.1f}h"
+                if elapsed_h is None:
+                    elapsed_s = "?"                       # no timestamp at all
+                elif o.placement_observed:
+                    elapsed_s = f"{elapsed_h:.1f}h"       # real age
+                else:
+                    elapsed_s = f"≥{elapsed_h:.1f}h"      # first-seen only → lower bound on true age
                 print(f"    {o.slot:<2} {str(names.get(o.item_id, o.item_id))[:18]:18} "
                       f"{'BUY' if o.is_buy else 'SELL':4} {prog:>4.0%} {elapsed_s:>6} "
                       f"{eta_s:>6}  {alert.color(text, c) if c else text}")
