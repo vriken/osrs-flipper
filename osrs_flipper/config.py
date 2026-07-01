@@ -197,12 +197,14 @@ SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 
 # A GE slot is a scarce, reusable resource: committing it to a flip has an opportunity cost —
 # that slot could hold a far bigger position once your open offers return cash. So a new flip
-# must clear a minimum profit to be WORTH a slot, and that floor scales with NET WORTH (cash +
-# gold in offers + stock), not the loose cash on hand. Otherwise, with a little free cash the
-# tool fragments it into tiny <500gp flips that lock slots the incoming pile should get. The
-# "unless the gains are huge" escape is automatic: profit = deploy × ROI, so a small but
-# high-ROI flip still clears the bar. Below it, cash stays liquid to consolidate.
-SLOT_WORTH_FRAC = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_FRAC", 0.002))  # 0.2% of net worth
+# must clear a minimum profit to be WORTH a slot. The floor is DYNAMIC (not a hard-coded %): it's
+# the opportunity cost of a slot = fair-share capital per slot (net_worth / slots) × the ROI the
+# market is currently paying (median of the top candidates) × λ. Self-calibrating — bigger account
+# or fatter market raises the bar, more slots lowers the per-slot bar. λ is how much of a fair-share
+# slot's earning a flip must match to be worth taking. The "unless gains are huge" escape is
+# automatic: profit = deploy × ROI, so a small high-ROI flip still clears it. Below it, cash stays
+# liquid to consolidate rather than fragment into slot-unworthy flips.
+SLOT_WORTH_LAMBDA = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_LAMBDA", 0.5))
 
 # --- Schedule (drives the time-aware `brief`) --------------------------------
 # Active hours = fast online flips; outside them = overnight/patient plan.
