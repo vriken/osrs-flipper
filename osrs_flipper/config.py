@@ -195,6 +195,15 @@ BANKROLL = int(os.environ.get("OSRS_FLIPPER_BANKROLL", 200_000))
 BACKTEST_BANKROLL = int(os.environ.get("OSRS_FLIPPER_BACKTEST_BANKROLL", 5_000_000))
 SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 
+# A GE slot is a scarce, reusable resource: committing it to a flip has an opportunity cost —
+# that slot could hold a far bigger position once your open offers return cash. So a new flip
+# must clear a minimum profit to be WORTH a slot, and that floor scales with NET WORTH (cash +
+# gold in offers + stock), not the loose cash on hand. Otherwise, with a little free cash the
+# tool fragments it into tiny <500gp flips that lock slots the incoming pile should get. The
+# "unless the gains are huge" escape is automatic: profit = deploy × ROI, so a small but
+# high-ROI flip still clears the bar. Below it, cash stays liquid to consolidate.
+SLOT_WORTH_FRAC = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_FRAC", 0.002))  # 0.2% of net worth
+
 # --- Schedule (drives the time-aware `brief`) --------------------------------
 # Active hours = fast online flips; outside them = overnight/patient plan.
 AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wake
