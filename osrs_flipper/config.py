@@ -241,6 +241,11 @@ AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wa
 AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sleep
 # Overnight buys need a fat margin cushion so a small overnight price drift can't go red.
 OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN", 0.04))
+# Target fill time for an overnight buy: you're asleep ~8h and can't cycle a slot, so bid LOW and
+# aim to fill near morning rather than in 1-2h — a slower fill means a better buy price (fatter
+# margin) with the slot working the whole night. The bid is chosen as the lowest that still fills
+# within this window (the α-capture estimate is conservative, so real fills tend to beat it).
+OVERNIGHT_FILL_TARGET_H = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_FILL_TARGET_H", 8))
 # Runway-to-bed switch: when fewer than this many hours remain before AWAKE_END, a flip placed
 # now can't round-trip (buy + sell) before you sleep, so `go` hands you the overnight plan
 # (fat-margin holds safe to leave) instead of fast day flips. ~one balanced round-trip (2h) +

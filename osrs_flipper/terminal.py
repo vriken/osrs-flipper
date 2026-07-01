@@ -811,7 +811,8 @@ class Terminal:
             budget = remaining / slots_left  # fair share of the pile, with spillover
             cap = max(0, (meta.get("limit") or 0) * 2 - limit_used.get(iid, 0))  # ~2 buy-limit windows
             qty = min(cap or 10**9, int(budget // bid))
-            q = optimal_quote(iid, qty, name=r["name"], horizon_h=8.0) if qty > 0 else None
+            q = optimal_quote(iid, qty, name=r["name"], horizon_h=config.OVERNIGHT_FILL_TARGET_H,
+                              target_fill_h=config.OVERNIGHT_FILL_TARGET_H) if qty > 0 else None
             if not q:
                 continue
             # the quote posts INSIDE the spread, so buy_px > bid — re-cap qty to what the remaining
@@ -849,7 +850,8 @@ class Terminal:
         if qty <= 0:
             print(f"  {name}: buy limit reached or not enough cash")
             return
-        q = optimal_quote(iid, qty, name=name, horizon_h=8.0)
+        q = optimal_quote(iid, qty, name=name, horizon_h=config.OVERNIGHT_FILL_TARGET_H,
+                          target_fill_h=config.OVERNIGHT_FILL_TARGET_H)
         if not q:
             print(f"  {name}: no profitable overnight quote")
             return

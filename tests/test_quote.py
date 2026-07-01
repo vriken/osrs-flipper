@@ -29,6 +29,22 @@ def test_sell_rate_increases_as_price_drops():
     assert rate_sell(102) == 0  # nobody bought that high
 
 
+def test_patient_target_fill_bids_below_the_live_bid_for_a_fatter_margin(monkeypatch):
+    # sellers have recently dumped at 98, but the live bid is 100. Eager can't bid below the live
+    # bid (fills fast at 100); patient bids 98 — still fills within 8h, fatter margin.
+    bars = [{"avgLowPrice": 98, "lowPriceVolume": 5000, "avgHighPrice": 110, "highPriceVolume": 100000}
+            for _ in range(72)]
+    monkeypatch.setattr(quote.api, "timeseries", lambda *a, **k: bars)
+    monkeypatch.setattr(quote.api, "latest", lambda: {1: {"low": 100, "high": 110}})
+    monkeypatch.setattr(quote.api, "one_hour", lambda: {1: {"avgLowPrice": 100, "avgHighPrice": 110}})
+    eager = quote.optimal_quote(1, 1000, horizon_h=8.0)
+    patient = quote.optimal_quote(1, 1000, horizon_h=8.0, target_fill_h=8.0)
+    assert eager and patient
+    assert patient.buy_px < eager.buy_px           # patient bids below the live bid (eager can't)
+    assert patient.net_unit > eager.net_unit       # …for a fatter margin
+    assert patient.t_buy_h <= 8.0 + 1e-6           # …while still filling within the window
+
+
 def test_frontier_is_one_rung_per_margin_level():
     results = [
         {"net_unit": 1, "ev": 100},
