@@ -135,6 +135,16 @@ def test_slot_worth_floor_is_dynamic_on_market_roi():
     assert scanner.slot_worth_floor(1_000_000, rich) > scanner.slot_worth_floor(1_000_000, lean)
 
 
+def test_blended_ref_is_relative_smooths_noise_reacts_to_a_crash():
+    # weighting is a % of price, not fixed gp: a 1gp gap on a 100gp item barely moves the ref…
+    assert abs(scanner.blended_ref(100, 101, 0.08) - 100) < 0.5
+    # …the SAME 1gp gap on a 10gp item (10% ≥ 8% big-move) fully trusts the tick
+    assert scanner.blended_ref(10, 9, 0.08) == 9
+    # a crash (40% divergence) trusts the tick regardless of absolute size
+    assert scanner.blended_ref(100, 60, 0.08) == 60
+    assert scanner.blended_ref(None, 60, 0.08) == 60 and scanner.blended_ref(100, None, 0.08) == 100
+
+
 def test_roi_per_hour_floors_fill_time_so_near_instant_flips_dont_explode():
     # the reported bug: a 1.9% flip "in 0.0h" must NOT out-rate a 4% flip in 0.9h (was "1780× faster")
     fast = scanner.roi_per_hour(0.019, 0.0, 0.25)   # 0.019 / max(0, 0.25) = 0.076
