@@ -144,15 +144,27 @@ def test_roi_per_hour_floors_fill_time_so_near_instant_flips_dont_explode():
 
 
 def test_rebalance_flags_slow_offer_but_spares_the_fast_and_near_done():
-    alt_roi_h = 0.30  # a 30%/h alternative
+    alts = [{"alt_roi_h": 0.30, "alt_name": "A"}, {"alt_roi_h": 0.28, "alt_name": "B"}]
     offers = [
         {"slot": 0, "roi_h": 0.02, "fill_frac": 0.1},   # slow + early → swap (0.30 ≥ 2×0.02)
-        {"slot": 1, "roi_h": 0.20, "fill_frac": 0.1},   # already fast (0.30 < 2×0.20) → keep
+        {"slot": 1, "roi_h": 0.20, "fill_frac": 0.1},   # already fast (0.28 < 2×0.20) → keep
         {"slot": 2, "roi_h": 0.02, "fill_frac": 0.9},   # slow but ~done → keep progress
         {"slot": 3, "roi_h": -0.05, "fill_frac": 0.0},  # underwater/stuck → swap
     ]
-    got = {s["slot"] for s in scanner.rebalance_swaps(offers, alt_roi_h, ratio=2.0, max_fill=0.5)}
+    got = {s["slot"] for s in scanner.rebalance_swaps(offers, alts, ratio=2.0, max_fill=0.5)}
     assert got == {0, 3}
+
+
+def test_rebalance_pairs_distinct_alts_never_the_same_one_twice():
+    # two beatable offers, but only ONE good alt → only one swap (can't pour both into one item)
+    offers = [{"slot": 0, "roi_h": 0.02, "fill_frac": 0.0}, {"slot": 1, "roi_h": 0.02, "fill_frac": 0.0}]
+    one_alt = [{"alt_roi_h": 0.30, "alt_name": "Blood rune"}]
+    swaps = scanner.rebalance_swaps(offers, one_alt, ratio=2.0, max_fill=0.5)
+    assert len(swaps) == 1                       # not two offers both cancelled for one alt
+    # with two distinct good alts, both can swap — each alt used once
+    two_alts = [{"alt_roi_h": 0.30, "alt_name": "X"}, {"alt_roi_h": 0.29, "alt_name": "Y"}]
+    swaps2 = scanner.rebalance_swaps(offers, two_alts, ratio=2.0, max_fill=0.5)
+    assert len(swaps2) == 2 and {s["alt_name"] for s in swaps2} == {"X", "Y"}
 
 
 def test_one_gp_tick_flip_is_dropped(monkeypatch):

@@ -324,18 +324,22 @@ def roi_per_hour(roi: float, eta_h: float, floor_h: float) -> float:
     return roi / max(eta_h, floor_h)
 
 
-def rebalance_swaps(offers_roi: list[dict], alt_roi_h: float, *,
+def rebalance_swaps(offers_roi: list[dict], alts: list[dict], *,
                     ratio: float, max_fill: float) -> list[dict]:
-    """Which active buys are worth cancelling for a better flip. Each offer dict carries its
-    ROI-per-hour (`roi_h` = margin% ÷ fill-time) and `fill_frac`. Flag it when the alternative's
-    ROI/hour beats it by `ratio` AND it's still early (< max_fill filled) — a near-done buy keeps
-    its progress. A stuck/underwater buy (roi_h ≤ 0) is beaten by any positive alt."""
-    out = []
-    for o in offers_roi:
-        if o["fill_frac"] >= max_fill:
-            continue
-        if alt_roi_h >= ratio * max(o["roi_h"], 1e-9):
-            out.append(o)
+    """Pair the weakest early active buys with the strongest DISTINCT candidate that beats each by
+    `ratio` in ROI-per-hour. Each candidate is consumed at most once — you can't pour two cancelled
+    slots into one item — so N offers never all point at the same alt (the over-eager failure mode).
+    Offers carry `roi_h`/`fill_frac`; alts carry `alt_roi_h` (+ display fields). A near-done buy
+    (≥ max_fill filled) keeps its progress; a stuck/underwater buy (roi_h ≤ 0) loses to any real alt."""
+    eligible = sorted((o for o in offers_roi if o["fill_frac"] < max_fill), key=lambda o: o["roi_h"])
+    ranked = sorted(alts, key=lambda a: -a["alt_roi_h"])
+    used, out = set(), []
+    for o in eligible:  # worst offer first, matched to the best still-unused candidate that beats it
+        for i, a in enumerate(ranked):
+            if i not in used and a["alt_roi_h"] >= ratio * max(o["roi_h"], 1e-9):
+                out.append({**o, **a})
+                used.add(i)
+                break
     return out
 
 
