@@ -39,6 +39,30 @@ def test_sell_applies_tax_and_realises_pnl(j):
     assert j.position(GOLD_BAR).qty == 0
 
 
+def test_sell_without_cost_basis_books_zero_realised_not_full_proceeds(j):
+    # selling stock the journal never saw bought (a pre-plugin holding) must NOT count the whole
+    # sale as profit — that inflated realised P&L. Cash still receives the proceeds.
+    proceeds, realized = j.record_sell(GOLD_BAR, "Gold bar", 100, 101)
+    assert realized == 0                       # cost unknown → no phantom profit
+    assert proceeds == 100 * 99                # full proceeds still credited
+    assert j.cash() == 200_000 + 100 * 99
+    assert j.realized_pnl() == 0
+
+
+def test_repair_zeroes_only_phantom_realised_and_is_idempotent(tmp_path):
+    jr = Journal(path=str(tmp_path / "r.duckdb"))
+    jr.con.execute("DELETE FROM meta WHERE key='realized_repair_v1'")  # let the one-time repair run
+    # a zero-cost (phantom) sell: realised == proceeds; and a properly-costed sell that must survive
+    jr.con.execute("INSERT INTO ledger VALUES (1,111,'Phantom','SELL',100,500,1000,49000,49000)")
+    jr.con.execute("INSERT INTO ledger VALUES (2,222,'Costed','SELL',100,500,1000,49000,4000)")
+    removed = jr._repair_phantom_realized()
+    assert removed == 49000
+    got = dict(jr.con.execute("SELECT name, realized_pnl FROM ledger").fetchall())
+    assert got["Phantom"] == 0 and got["Costed"] == 4000  # only the phantom is zeroed
+    assert jr._repair_phantom_realized() == 0             # idempotent — flag set, no re-run
+    jr.con.close()
+
+
 def test_cannot_oversell(j):
     j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
     proceeds, realized = j.record_sell(GOLD_BAR, "Gold bar", 999, 101)
