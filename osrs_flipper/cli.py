@@ -63,13 +63,14 @@ def _cmd_portfolio(args: argparse.Namespace) -> None:
     except Exception:
         print("(journal busy — it's open in the `trade` terminal. Using --bankroll; "
               "run `port` inside the terminal for held-position- and buy-limit-aware planning.)\n")
-    from . import runelite
-    rl = runelite.read()
-    active_ids = [o.item_id for o in runelite.active_offers(rl)] if rl else []
+    from . import datasource
+    src = datasource.active()
+    offers = src.active_offers()
+    active_ids = [o.item_id for o in offers]
     if args.slots:
         free, source = args.slots, "specified"
-    elif rl is not None:
-        free, source = runelite.free_slots(rl, config.GE_SLOTS), "runelite"
+    elif offers or src.cash() is not None:
+        free, source = max(0, config.GE_SLOTS - len(offers)), "live"
     else:
         free, source = max(0, config.GE_SLOTS - len(held)), "assumed"
     picks, idle = scanner.build_portfolio(
