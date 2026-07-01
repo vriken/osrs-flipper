@@ -50,6 +50,9 @@ class DataSource:
     def warnings(self) -> list[str]:
         return []
 
+    def version(self) -> str | None:
+        return None
+
 
 class FlipExporterSource(DataSource):
     """The Flip Exporter plugin — a single canonical source (noted-resolved holdings, real prices,
@@ -78,6 +81,9 @@ class FlipExporterSource(DataSource):
 
     def completed_offers(self) -> list[Fill]:
         return flip_exporter.completed_offers(self._h)
+
+    def version(self) -> str | None:
+        return (self._d or {}).get("version")
 
 
 class LegacySource(DataSource):

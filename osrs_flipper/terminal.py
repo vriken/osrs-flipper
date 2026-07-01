@@ -1283,7 +1283,8 @@ class Terminal:
     def run(self) -> None:
         print("osrs-flipper terminal — type `help`, `quit` to exit")
         src = datasource.active()
-        print(alert.color(f"  data source: {src.name}", "green"))
+        ver = src.version()
+        print(alert.color(f"  data source: {src.name}" + (f" v{ver}" if ver else ""), "green"))
         for w in src.warnings():
             print(alert.color(f"  ⚠ data looks wrong: {w}. Slot/limit advice may be unsafe — "
                               f"pass free slots explicitly (`port <n>`).", "red"))
