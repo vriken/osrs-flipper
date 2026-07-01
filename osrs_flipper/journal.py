@@ -61,6 +61,22 @@ class Journal:
         self.con.execute(_SCHEMA)
         # migrate older journals that created `predictions` before `source` existed
         self.con.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'quote'")
+        self._repair_phantom_realized()
+
+    def _repair_phantom_realized(self) -> int:
+        """One-time: zero the realised P&L of sells that were booked with no cost basis — rows where
+        realised == proceeds, an artefact of importing sells whose matching buy predated the journal.
+        They counted the whole sale as profit and inflated realised P&L (cash was never affected).
+        Idempotent via a meta flag; returns the gp removed so the caller can report it."""
+        if self.con.execute("SELECT 1 FROM meta WHERE key='realized_repair_v1'").fetchone():
+            return 0
+        removed = self.con.execute(
+            "SELECT COALESCE(sum(realized_pnl),0) FROM ledger "
+            "WHERE side='SELL' AND cash_delta > 0 AND realized_pnl = cash_delta").fetchone()[0]
+        self.con.execute("UPDATE ledger SET realized_pnl = 0 "
+                         "WHERE side='SELL' AND cash_delta > 0 AND realized_pnl = cash_delta")
+        self.con.execute("INSERT OR REPLACE INTO meta VALUES ('realized_repair_v1', ?)", [float(removed)])
+        return int(removed)
 
     def __enter__(self) -> Journal:
         return self
@@ -118,7 +134,10 @@ class Journal:
         tax_unit = ge_tax(price, item_id=item_id)
         net_unit = price - tax_unit
         proceeds = qty * net_unit
-        realized = qty * (net_unit - avg_cost)
+        # No tracked cost basis (the buy predates the journal / was made off-device) → the profit is
+        # unknowable, so book 0 realised rather than counting the ENTIRE sale as profit, which is what
+        # inflated realised P&L. Cash still receives the full proceeds; only the P&L attribution is held.
+        realized = qty * (net_unit - avg_cost) if avg_cost > 0 else 0.0
         new_qty = max(0, (pos.qty if pos else 0) - qty)
         self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
                          [item_id, name, new_qty, avg_cost if new_qty else 0.0])
