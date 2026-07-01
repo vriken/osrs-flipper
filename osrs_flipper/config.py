@@ -125,6 +125,13 @@ ANOMALY_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_ANOMALY_CANDIDATES", 30)) 
 # fast: recent 1-bar slope as a fraction of the baseline. Catches a falling knife before it crosses
 # the divergence band — the exact case where 5-min-lagged aggregates mislead. More negative = stricter.
 ANOMALY_FALL_SLOPE = float(os.environ.get("OSRS_FLIPPER_ANOMALY_FALL_SLOPE", -0.03))
+# Structural manipulability: an item is cheap to corner when it's THIN (few units trade) and
+# VALUABLE (each unit moves real gp) — a handful of buy-limit-15 offers can walk the price. Such
+# items get extra scrutiny: a slow pump (live elevated vs the 3-MONTH baseline even when the 2-week
+# median has already followed it up) is treated as unbuyable, and gear flags them. Liquid items are
+# exempt (a real re-rating on volume isn't manipulation), so this never blocks the bread-and-butter.
+MANIP_VOL_MAX = int(os.environ.get("OSRS_FLIPPER_MANIP_VOL_MAX", 200))       # ≤ this 1h binding vol = thin
+MANIP_PRICE_MIN = int(os.environ.get("OSRS_FLIPPER_MANIP_PRICE_MIN", 50_000))  # ≥ this price = worth cornering
 
 # --- Spread persistence (see persistence.py) ---------------------------------
 PERSIST_TIMESTEP = "1h"  # recent history to judge spread stability against
