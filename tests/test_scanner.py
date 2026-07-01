@@ -140,7 +140,8 @@ def test_hold_quality_floor_drops_low_roi(monkeypatch):
         _candidate(1117, "Junk hold", 100, 102, margin_abs=2, margin_fast=-1),     # 2% → dropped
     ])
     monkeypatch.setattr(scanner, "scan", lambda **kw: df)
-    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    # 2 free slots so the active flip and the quality hold both fit; Junk is dropped for margin, not slots.
+    picks, _ = scanner.build_portfolio(bankroll=100_000, free_slots=2)
     by_name = {p["name"]: p for p in picks}
     assert by_name["Quality hold"]["tier"] == "hold"
     assert "Junk hold" not in by_name  # below HOLD_MIN_MARGIN → left liquid, not churned

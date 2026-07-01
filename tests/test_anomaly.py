@@ -82,6 +82,30 @@ def test_assess_overdump_recovering_on_volume_is_revert_buy():
     assert "revert-buy" in anomaly.summary_line(a)
 
 
+def _assess(mids, vols, live):
+    return anomaly.assess(1, {1: {"high": live + 1, "low": live - 1}}, {1: {}}, lambda i, s: _bars(mids, vols))
+
+
+def test_is_buyable_matches_the_summary_line_verdict():
+    # the buy filter and the `why` text must never disagree — same rule behind both.
+    cases = {
+        "normal":       _assess([100] * 20, [200] * 20, 100),                           # buyable
+        "revert":       _assess([100] * 17 + [60, 55, 68], [200] * 19 + [9000], 68),    # buyable
+        "knife":        _assess([100] * 17 + [80, 70, 55], [200] * 20, 55),             # not
+        "wait_floor":   _assess([100] * 17 + [70, 62, 55], [200] * 19 + [9000], 55),    # not
+        "pump":         _assess([100] * 17 + [130, 140, 150], [200] * 20, 150),         # not
+    }
+    for a in cases.values():
+        line = anomaly.summary_line(a)  # "price normal" — not bare "normal" (knife line says "normal volume")
+        assert anomaly.is_buyable(a) is (("price normal" in line) or ("revert-buy" in line)), line
+    assert anomaly.is_buyable(cases["normal"]) and anomaly.is_buyable(cases["revert"])
+    assert not any(anomaly.is_buyable(cases[k]) for k in ("knife", "wait_floor", "pump"))
+
+
+def test_is_buyable_true_when_no_baseline():
+    assert anomaly.is_buyable({"ref_baseline": None, "live_mid": None}) is True
+
+
 def test_detect_flags_overdump_with_revert_ev():
     # live ~70 dumped below a ~100 baseline, on a volume spike, still falling → DUMP↓, positive EV.
     # the 1h-avg lags at the old baseline (~100) — that's what makes the screen flag the dislocation
