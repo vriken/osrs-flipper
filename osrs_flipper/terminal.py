@@ -1037,22 +1037,43 @@ class Terminal:
             print("  no big-ticket flips clear tax + the full spread right now (most have <2% spreads "
                   "the 2% tax eats — see `scan` for the liquid stuff)")
             return
-        g["gp"] = g["margin_abs"] * g["hold_units"]
-        n = int(args[0]) if args and args[0].isdigit() else 15
+        show_all = args and args[0] == "all"  # `gear all` = aspirational list ignoring cash
+        n = next((int(a) for a in args if a.isdigit()), 15)
+        # size each flip by what you can AFFORD (cash ÷ buy) capped by volume, and rank by the gp that
+        # actually achieves — so a big-ticket flip you can do leads, not a 100M item out of reach.
+        g["qty"] = (cash // g["buy_px"]).clip(upper=g["hold_units"]).astype(int)
+        g["gp"] = g["margin_abs"] * g["qty"]
+        if not show_all:
+            afford = g[g["qty"] >= 1]
+            hidden = len(g) - len(afford)
+            if afford.empty:
+                cheapest = g.nsmallest(1, "buy_px").iloc[0]
+                print(f"  your {cash:,} can't afford a full-spread big-ticket flip yet — the cheapest is "
+                      f"{cheapest['name']} at {int(cheapest['buy_px']):,}/ea. Keep compounding via `go`, "
+                      f"or `gear all` to see the aspirational list.")
+                return
+            g = afford
+        else:
+            g["qty"] = g["hold_units"].astype(int)  # aspirational: full volume-realizable size
+            g["gp"] = g["margin_abs"] * g["qty"]
+            hidden = 0
         g = g.sort_values("gp", ascending=False).head(n)
-        print(f"  PATIENT / GEAR · full spread (β={config.PATIENT_BETA:g}, tax netted) · cash {cash:,}"
+        tag = "aspirational (ignores cash)" if show_all else f"affordable with cash {cash:,}"
+        print(f"  PATIENT / GEAR · full spread (β={config.PATIENT_BETA:g}, tax netted) · {tag}"
               f"  ⚠ best-case: assumes you fill AT the bid/ask")
-        print(f"  {'item':22}{'buy':>13}{'sell':>13}{'margin':>11}{'pct':>6}{'qty':>4}{'gp':>11}{'  fill'}")
+        print(f"  {'item':22}{'buy':>13}{'sell':>13}{'margin':>11}{'pct':>6}{'qty':>5}{'gp':>11}{'  fill'}")
         for _, r in g.iterrows():
-            qty = int(r["hold_units"])
+            qty = int(r["qty"])
             eta = r["fill_eta_h"]
             fill = f"{eta:.1f}h" if eta and eta < 100 else "—"
-            flag = "" if int(r["buy_px"]) * qty <= cash else " ⟵ need cash"
+            flag = "" if not show_all or int(r["buy_px"]) * qty <= cash else " ⟵ need cash"
             print(f"  {str(r['name'])[:22]:22}{int(r['buy_px']):>13,}{int(r['sell_px']):>13,}"
-                  f"{int(r['margin_abs']):>11,}{r['margin_pct'] * 100:>5.1f}%{qty:>4}"
+                  f"{int(r['margin_abs']):>11,}{r['margin_pct'] * 100:>5.1f}%{qty:>5}"
                   f"{int(r['gp']):>11,}  {fill}{flag}")
-        print("  qty = realizable over ~8h at a passive share of volume; post at the bid/ask and "
-              "leave it. Slow to fill — don't expect day-flip turnover.")
+        if hidden:
+            print(f"  ({hidden} pricier items beyond your {cash:,} hidden — `gear all` to see them)")
+        print("  qty = affordable × volume-realizable over ~8h; post at the bid/ask and leave it. "
+              "Slow to fill — don't expect day-flip turnover.")
 
     def cmd_audit(self, args: list[str]) -> None:
         """Full reconciliation from the authoritative sources — RuneLite's complete buy/sell history
