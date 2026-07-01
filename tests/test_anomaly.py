@@ -106,6 +106,22 @@ def test_is_buyable_true_when_no_baseline():
     assert anomaly.is_buyable({"ref_baseline": None, "live_mid": None}) is True
 
 
+def test_steep_decline_within_normal_band_is_not_buyable():
+    # only ~-8% off norm (inside the ±15% band) but falling hard bar-over-bar → a falling knife before
+    # it crosses the band. Must be blocked, and the `why` must agree (no pick/why contradiction).
+    a = _assess([100] * 17 + [98, 95, 92], [200] * 20, 92)
+    assert abs(a["div"]) < 0.15                       # inside the "normal" band
+    assert not anomaly.is_buyable(a)                  # but free-falling → blocked
+    assert "sliding" in anomaly.summary_line(a)       # why reflects the same verdict
+
+
+def test_normal_band_gentle_drift_stays_buyable():
+    # inside the band and only drifting slowly → still a fine buy (don't over-reject ordinary noise)
+    a = _assess([100] * 20, [200] * 20, 99)
+    assert abs(a["div"]) < 0.15 and anomaly.is_buyable(a)
+    assert "price normal" in anomaly.summary_line(a)
+
+
 def test_detect_flags_overdump_with_revert_ev():
     # live ~70 dumped below a ~100 baseline, on a volume spike, still falling → DUMP↓, positive EV.
     # the 1h-avg lags at the old baseline (~100) — that's what makes the screen flag the dislocation
