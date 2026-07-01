@@ -206,6 +206,21 @@ SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 # liquid to consolidate rather than fragment into slot-unworthy flips.
 SLOT_WORTH_LAMBDA = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_LAMBDA", 0.5))
 
+# Per-item edge tracker: a rolling, recency-weighted (EWMA) score of each item's REALIZED profit,
+# fed into the ranking as a multiplier — so items that are actually losing you money right now get
+# down-weighted, WITHOUT a permanent blocklist. Regimes shift, so it's adaptive:
+#  - HALF_LIFE trades: an EWMA half-life (old trades fade), so the score tracks the current regime.
+#  - FLOOR: a losing item is never banned, only floored to this multiplier — it keeps getting the
+#    occasional shot, which is the only way to discover it turned good again (explore vs exploit).
+#  - Penalty-only (cap 1.0): proven losers sink; everything else stays neutral (no over-concentration).
+#  - SHRINK_K: shrink small samples toward neutral so a couple of trades barely move an item.
+#  - FAST_HALF_LIFE: a shorter EWMA used only to flag REGIME SHIFTS (recent edge vs the baseline).
+EDGE_HALF_LIFE = float(os.environ.get("OSRS_FLIPPER_EDGE_HALF_LIFE", 30))
+EDGE_FLOOR = float(os.environ.get("OSRS_FLIPPER_EDGE_FLOOR", 0.3))
+EDGE_GAIN = float(os.environ.get("OSRS_FLIPPER_EDGE_GAIN", 10.0))  # −7% realized ROI → the 0.3 floor
+EDGE_SHRINK_K = float(os.environ.get("OSRS_FLIPPER_EDGE_SHRINK_K", 5))
+EDGE_FAST_HALF_LIFE = float(os.environ.get("OSRS_FLIPPER_EDGE_FAST_HALF_LIFE", 8))
+
 # Rebalancing: an active BUY holds a slot + capital that a better flip could use. Suggest
 # cancelling it only when a candidate's ROI-per-hour (margin% ÷ fill-time — folds in margin,
 # speed and capital efficiency) beats the offer's by SWAP_RATIO, AND the offer is still early

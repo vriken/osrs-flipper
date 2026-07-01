@@ -1,6 +1,6 @@
 """Realized-P&L matching: sells net against buys at weighted-avg cost, after tax; misses flagged."""
 
-from osrs_flipper.analysis import realized_pnl
+from osrs_flipper.analysis import item_edges, realized_pnl, regime_shifts
 from osrs_flipper.runelite import Fill
 
 
@@ -32,3 +32,37 @@ def test_weighted_average_cost_across_two_buys():
     r = realized_pnl(fills)
     # avg cost 110; tax(130)=2 → net 128; pnl = (128-110)*200 = 3600
     assert round(r["realized"]) == 3600
+
+
+def _round_trips(iid, buy_px, sell_px, n, t0=0):
+    """n buy→sell round-trips of 100 units each."""
+    out = []
+    for i in range(n):
+        out.append(_f(iid, True, 100, buy_px, t0 + 2 * i))
+        out.append(_f(iid, False, 100, sell_px, t0 + 2 * i + 1, state="SOLD"))
+    return out
+
+
+def test_edge_penalises_a_sustained_loser_toward_the_floor():
+    e = item_edges(_round_trips(1, 100, 90, 15), floor=0.3, gain=10)  # ~-11% ROI each
+    assert e[1]["edge_mult"] < 0.5 and e[1]["edge_mult"] >= 0.3  # sunk, never below the floor
+
+
+def test_edge_leaves_a_winner_neutral_penalty_only():
+    e = item_edges(_round_trips(1, 100, 115, 15))  # profitable
+    assert e[1]["edge_mult"] == 1.0  # penalty-only: winners aren't boosted, just not penalised
+
+
+def test_edge_shrinks_small_samples_toward_neutral():
+    one = item_edges(_round_trips(1, 100, 90, 1), gain=10)   # a single loss
+    many = item_edges(_round_trips(1, 100, 90, 15), gain=10)
+    assert one[1]["edge_mult"] > many[1]["edge_mult"] > 0.29  # one bad trade barely dents it
+
+
+def test_regime_shift_flags_a_recovering_loser():
+    edges = {1: {"edge_mult": 0.5, "ewma_roi": -0.05, "recent_roi": 0.04, "n": 10, "name": "X"}}
+    got = regime_shifts(edges)
+    assert got and got[0]["shift"] == "recovering"
+    # ignored when sample too small or recent still negative
+    assert regime_shifts({1: {"edge_mult": 0.5, "ewma_roi": -0.05, "recent_roi": 0.04, "n": 2, "name": "X"}}) == []
+    assert regime_shifts({1: {"edge_mult": 0.5, "ewma_roi": -0.05, "recent_roi": -0.04, "n": 10, "name": "X"}}) == []

@@ -76,6 +76,7 @@ class Terminal:
         self._cal_at = -1             # resolved-attempt count at last calibration (-1 = never)
         self._cal_beta = config.BETA   # live spread haircut, auto-applied
         self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
+        self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
         self._alert_stop = threading.Event()
         self._alert_thread: threading.Thread | None = None
 
@@ -111,7 +112,7 @@ class Terminal:
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
         df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal(), beta=self._beta())
+                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -251,7 +252,7 @@ class Terminal:
         net_worth = int(self.j.equity(bids) + src.tied_gold())
         picks, idle, _ = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
-            net_worth=net_worth, fill_cal=self._fill_cal(), beta=self._beta())
+            net_worth=net_worth, fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -274,6 +275,7 @@ class Terminal:
             return
         new_beta = calibration.effective_beta(calibration.calibrate_beta(rows, prior=config.BETA), config.BETA)
         self._cal_fill = calibration.calibrate_fill(rows)
+        self._cal_edges = analysis.item_edges(analysis.collect_fills())  # per-item realized-edge (JSON audit)
         if self._cal_at >= 0:  # not the first (silent) computation → announce the refresh
             fg = self._cal_fill.get("global") or 1.0
             print(f"  🔧 recalibrated ({n} resolved trades): β {self._cal_beta:.2f}→{new_beta:.2f} · "
@@ -290,6 +292,11 @@ class Terminal:
         """Live (cached) spread-haircut β, auto-calibrated from your fills and auto-applied."""
         self._ensure_calibration()
         return self._cal_beta
+
+    def _edges(self) -> dict:
+        """Live (cached) per-item realized-edge multipliers, auto-applied to the ranking."""
+        self._ensure_calibration()
+        return self._cal_edges
 
     def _sync_cash(self) -> tuple[int | None, int]:
         """Refresh journal cash from live coins and return (coins, tied_in_offers). Coins already
@@ -389,7 +396,7 @@ class Terminal:
             return []
         cash = int(self.j.cash()) or config.BANKROLL
         df = scanner.scan(mode="balanced", bankroll=cash, top=8, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal(), beta=self._beta())  # deep scan — same as the deploy plan
+                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())  # deep scan — same as the deploy plan
         held_active = {o.item_id for o in offers}
         alts = []  # distinct candidates you don't already hold / have on offer — one per swap
         for _, r in df.iterrows():
@@ -573,7 +580,7 @@ class Terminal:
             fcal = self._fill_cal()
             picks, idle, floor = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
                                                          free_slots=buy_slots, limit_used=self._limit_used(),
-                                                         net_worth=net_worth, fill_cal=fcal, beta=self._beta())
+                                                         net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta())
             src = "live" if (offers or coins is not None) else "assumed"
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
             if fcal.get("global_measured") is not None:
