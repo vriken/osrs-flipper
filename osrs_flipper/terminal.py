@@ -2,40 +2,29 @@
 
     osrs-flipper trade
 
-Commands (type `help`):
-  go | (press Enter)       ★ THE one command: offers+verdicts, what to sell, what to buy, next action
-  ---- drill-downs (go shows all of these together) ----
-  sync                    import completed RuneLite fills into the journal
-  orders | ge             live GE slots + active offers (from RuneLite)
-  review | check          flag active offers to re-price / cancel / collect
-  port [free_slots]        recommended allocation (free slots auto-read from RuneLite)
-  overnight [item]         plan one big ~8h buy to leave while you sleep
-  scan [n] [online|offline|balanced]   ranked live flips (mode sets speed-vs-margin)
-  gear | big [n]           big-ticket / low-frequency items at their full spread (patient, best-case)
-  anomaly | manip          price dislocations on abnormal volume (pumps to avoid / dumps to revert-buy)
-  why <item>               explain an item's price: live vs recent baselines, volume z, falling-knife check
+★ go  (or just press Enter)  does everything: imports fills, reconciles to your bag, recalibrates,
+      then shows your offers + verdicts, what to sell, what to buy, and the next action. Daily driver.
+
+Daily
+  go                       the one command (above)
   quote <item> [qty]       solve optimal buy/sell prices for an item
-  sellquote | sq <item> [qty]  sell-price tradeoff for held inventory (fill time vs profit)
-  buy <item> <quantity> <price>    log a buy fill
-  sell <item> <quantity> <price>   log a sell fill (applies GE tax)
-  placed [item buy|sell qty price]  log a PLACED order (or the last quote) for fill calibration
-  calibrate | calib        measure empirical β + fill correction from your real attempts
-  pos                      open positions + unrealised P&L (vs live bid)
-  inv | inventory          holdings split: bank (sellable) vs in-GE (listed / buying)
-  reconcile                re-sync positions from RuneLite's full offer history (heals phantoms)
-  audit                    full reconciliation: buy/sell history + live bag, per-item P&L (inspect only)
-  forget <item>            untrack a holding traded elsewhere (stays gone through reconcile)
-  hold <item> <qty> [avg]  track a holding acquired elsewhere (adds it, no cash spent)
-  recover | recovery       underwater holdings: bounce-likely (hold/double down) vs re-rating (cut)
+  why <item>               explain a price: live vs recent norm, volume z, falling-knife check
+  overnight [item]         plan one big ~8h buy to leave while you sleep
+  gear [n]                 big-ticket / low-frequency items at their full spread (patient)
+
+Occasional
+  scan [n] [online|offline|balanced]   ranked live flips (raw, unallocated)
+  port [free_slots]        recommended allocation across your free slots
+  sellquote <item> [qty]   sell-price tradeoff for held stock (fill time vs profit)
+  anomaly                  market-wide price dislocations on abnormal volume
   pnl                      realised P&L, cash, equity, bond progress
-  progress | chart         net-worth chart (realized + live equity) projected to 10M/100M
+  progress                 net-worth chart projected to 10M/100M
+  pos                      open positions + unrealised P&L (vs live bid)
+  inv                      holdings: in your bag vs listed in GE
   recent [n]               recent trades
-  preds [n]                logged model predictions (for calibration)
-  bank <amount>            set your current cash balance
-  alerts [on|off|test]     background Discord push when an offer needs you (auto-on if webhook set)
-  update                   git pull latest + reload (OTA, no manual restart)
-  reload                   re-exec to pick up code changes (keeps your DB/state)
-  help | quit
+  recover                  underwater holdings: bounce (hold) vs re-rating (cut)
+
+  type `help all` for maintenance commands · `quit` to exit
 """
 
 from __future__ import annotations
@@ -58,6 +47,22 @@ _VERDICTS = {
     "done": ("done", None),
 }
 
+_HELP_RARE = """
+Maintenance / rare  (all the commands above still work too)
+  buy  <item> <qty> <price>   log a buy fill made off-device
+  sell <item> <qty> <price>   log a sell fill made off-device (applies GE tax)
+  hold <item> <qty> [avg]     track a holding acquired elsewhere (no cash spent)
+  forget <item>               untrack a holding traded elsewhere
+  audit                       full buy/sell + bag reconciliation, per-item P&L (inspect only)
+  calibrate                   measure empirical β + fill correction from your attempts
+  preds [n]                   logged model predictions (calibration debug)
+  alerts [on|off|test]        background Discord push when an offer needs you
+  update                      git pull latest + reload · reload   re-exec, keep DB/state
+
+These run automatically on every command, so you rarely need them by hand: fills import, positions
+reconcile to your bag, β + fill correction recalibrate, and cash reads live from your coins.
+"""
+
 
 class Terminal:
     def __init__(self, db: str | None = None) -> None:
@@ -65,7 +70,6 @@ class Terminal:
         self._map: dict[str, dict] | None = None
         self._latest: dict[int, dict] = {}
         self._latest_ts = 0.0
-        self._last_quote: tuple | None = None  # (meta, Quote, qty) — used by `placed`
         # auto-calibration cache: β + fill correction, recomputed every CALIBRATE_EVERY_TRADES
         # resolved attempts (not every command) so recommendations don't wiggle on each fill.
         self._cal_at = -1             # resolved-attempt count at last calibration (-1 = never)
@@ -136,8 +140,6 @@ class Terminal:
         if q:  # log the prediction so we can calibrate it against your real fills later
             self.j.log_prediction(meta["id"], meta["name"], q.qty, q.buy_px, q.sell_px,
                                   q.p_buy, q.p_sell, q.p_round, q.ev)
-            self._last_quote = (meta, q, qty)  # `placed` records this without re-typing
-            print("  → placed it? type `placed` to log it for fill calibration")
 
     def cmd_preds(self, args: list[str]) -> None:
         n = int(args[0]) if args and args[0].isdigit() else 10
@@ -181,40 +183,6 @@ class Terminal:
         return {"avg_low": hr.get("avgLowPrice"), "avg_high": hr.get("avgHighPrice"),
                 "vol_1h_binding": min(low_vol, high_vol)}
 
-    def cmd_placed(self, args: list[str]) -> None:
-        """Record an order you just placed in-game, so its fill calibrates the model.
-          placed                              log the last `quote` (its BUY leg)
-          placed <item> <buy|sell> <qty> <price>"""
-        if not args:
-            if not self._last_quote:
-                print("  nothing to record — run `quote <item>` first, or: "
-                      "placed <item> <buy|sell> <qty> <price>")
-                return
-            meta, q, _ = self._last_quote
-            snap = self._snapshot(meta["id"])
-            aid = self.j.record_attempt(
-                meta["id"], meta["name"], "BUY", q.qty, q.buy_px, horizon_h=q.horizon_h,
-                avg_low=snap["avg_low"], avg_high=snap["avg_high"],
-                vol_1h_binding=snap["vol_1h_binding"], pred_p_fill=q.p_buy,
-                pred_eta_h=q.t_buy_h, pred_ev=q.ev)
-            print(f"  recorded BUY {q.qty:,} {meta['name']} @ {q.buy_px:,}  [attempt {aid}] — "
-                  f"auto-reconciled when it fills")
-            return
-        if len(args) < 4 or args[-3].lower() not in ("buy", "sell") \
-                or not args[-2].isdigit() or not args[-1].isdigit():
-            print("  usage: placed <item> <buy|sell> <qty> <price>")
-            return
-        side, qty, px = args[-3].lower(), int(args[-2]), int(args[-1])
-        meta = self.resolve(" ".join(args[:-3]))
-        if not meta:
-            print("  item not found")
-            return
-        snap = self._snapshot(meta["id"])
-        aid = self.j.record_attempt(
-            meta["id"], meta["name"], side, qty, px, horizon_h=1.0, avg_low=snap["avg_low"],
-            avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"])
-        print(f"  recorded {side.upper()} {qty:,} {meta['name']} @ {px:,}  [attempt {aid}]")
-
     def cmd_calibrate(self, args: list[str]) -> None:
         """Measure empirical β + fill correction from your real order attempts (report only)."""
         from . import calibration
@@ -222,7 +190,7 @@ class Terminal:
         n = len(rows)
         if n < 10:
             print(f"  only {n} resolved attempt(s) — need ~10+ for a meaningful read.")
-            print("  type `placed` after you place a recommended order; fills reconcile automatically.")
+            print("  place the orders `go` recommends; fills auto-log and calibrate as they resolve.")
             return
         beta = calibration.calibrate_beta(rows, prior=config.BETA)
         fill = calibration.calibrate_fill(rows)
@@ -391,13 +359,8 @@ class Terminal:
             open_keys.add((o.item_id, side))
             n += 1
         if n:
-            print(f"  (auto-logged {n} placed order(s) from RuneLite — no need to type `placed`)")
+            print(f"  (auto-logged {n} new order(s) from RuneLite)")
         return n
-
-    def cmd_sync(self, args: list[str]) -> None:
-        n = self._autosync()
-        print(f"  synced {n} new fill(s) from RuneLite · cash {self.j.cash():,.0f} · "
-              f"realised {self.j.realized_pnl():+,.0f}")
 
     def _review_offers(self) -> list[tuple]:
         """For each live offer: (offer, verdict, elapsed_h, eta_h, progress). Shares the pure
@@ -406,20 +369,6 @@ class Terminal:
         if not offers:
             return []
         return monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
-
-    def cmd_review(self, args: list[str]) -> None:
-        rows = self._review_offers()
-        if not rows:
-            print("  no active offers (or no RuneLite data)")
-            return
-        names = {r["id"]: r["name"] for r in api.mapping()}
-        print(f"  {'slot':4} {'item':22} {'side':4} {'prog':>5} {'elapsed':>8} {'expETA':>7}  verdict")
-        for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
-            text, c = _VERDICTS[v]
-            eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
-            print(f"  {o.slot:<4} {str(names.get(o.item_id, o.item_id))[:22]:22} {'BUY' if o.is_buy else 'SELL':4} "
-                  f"{prog:>4.0%} {elapsed_h:>7.1f}h {eta_s:>7}  {alert.color(text, c) if c else text}")
-        print("  (advice is time/progress-based — RuneLite doesn't expose your pending offer price)")
 
     def _sell_plan(self, held: list, busy_ids: set) -> list[dict]:
         """Recommended sell price + expected profit for each held item with NO active offer.
@@ -463,7 +412,7 @@ class Terminal:
             parts.append(alert.color(f"{n} slow", "yellow"))
         if (n := verds.count("collect")):
             parts.append(alert.color(f"{n} to collect", "yellow"))
-        return "  active orders: " + ", ".join(parts) + " — run `review`" if parts else ""
+        return "  active orders: " + ", ".join(parts) if parts else ""
 
     def cmd_go(self, args: list[str]) -> None:
         """THE one command — everything on one screen so you don't juggle review/port/pos/brief:
@@ -608,7 +557,7 @@ class Terminal:
             if n_now:
                 actions.append(f"place buy #1–#{n_now}")
             if actions:
-                return " + ".join(actions) + " now (auto-logged from RuneLite — no `placed` needed)"
+                return " + ".join(actions) + " now (auto-logged from RuneLite)"
         if sell_rows:
             return "list your holdings for sale (see SELL above)"
         if free > 0:  # a slot IS free — say so, don't claim "all slots working"
@@ -796,18 +745,6 @@ class Terminal:
         print(f"    AM   collect + SELL @ {q.sell_px:,}   → ~{profit:,} gp profit (net {q.net_unit}/unit, {margin_pct:.1%})")
         if margin_pct < config.OVERNIGHT_MIN_MARGIN:
             print(alert.color(f"    ⚠ thin margin ({margin_pct:.1%}) — risky to leave overnight; a small dip could go red", "red"))
-
-    def cmd_orders(self, args: list[str]) -> None:
-        offers = self._active_offers()
-        if not offers:
-            print("  no active offers found — logged in, with Local Data Exporter or Flipping Utilities running?")
-            return
-        occ, free = len(offers), self._free_slots(offers)
-        names = {r["id"]: r["name"] for r in api.mapping()}
-        print(f"  GE slots: {occ} occupied, {free} free (of {config.GE_SLOTS})")
-        for o in sorted(offers, key=lambda x: x.slot):
-            side = "BUY " if o.is_buy else "SELL"
-            print(f"  slot {o.slot}  {side} {str(names.get(o.item_id, o.item_id))[:22]:22} x{o.qty:<6} {o.state}")
 
     def cmd_sellquote(self, args: list[str]) -> None:
         if not args:
@@ -1038,28 +975,6 @@ class Terminal:
         print("  net = bought − sold (history). held = your live bag + open offers. a Δ flag means "
               "the bag and the retained history disagree — bag wins (it's what you actually have).")
 
-    def cmd_reconcile(self, args: list[str]) -> None:
-        """Recompute every held position from RuneLite's full completed-offer history (authoritative,
-        order-independent), correcting phantoms from out-of-order imports. Runs automatically on each
-        sync; this shows the result on demand."""
-        src = datasource.active()
-        completed = src.completed_offers()
-        held = src.holdings()
-        drift = self.j.reconcile_positions(completed)
-        # bag is the final word: clear/trim positions not in your bag or GE (sells the window
-        # missed, or off-device sells). Reduce-only, only when the live snapshot is present.
-        bag_drift = self.j.reconcile_to_holdings(held) if held is not None else []
-        if not drift and not bag_drift:
-            print("  positions already match your offer history + bag — nothing to correct")
-            return
-        for name, old, new in drift:
-            print(f"  {name}: {old:,} → {new:,} held  (offer history)")
-        for name, old, new in bag_drift:
-            tag = "dropped (not in bag or GE)" if new == 0 else "trimmed to bag + GE"
-            print(f"  {name}: {old:,} → {new:,} held  ({tag})")
-        print(f"  reconciled {len(drift) + len(bag_drift)} position(s). Cash/P&L from a historically "
-              "mis-recorded sell aren't auto-rewritten — cash is read live from your coins.")
-
     def cmd_inventory(self, args: list[str]) -> None:
         """What you actually hold, split BANK (sellable now) vs IN-GE (listed for sale / being
         bought), reconciled from your transactions against live RuneLite offers. Alias: inv."""
@@ -1210,12 +1125,11 @@ class Terminal:
         else:
             print("  pull failed — not reloading")
 
-    def cmd_bank(self, args: list[str]) -> None:
-        if not args or not args[0].replace("_", "").isdigit():
-            print(f"  current cash: {self.j.cash():,.0f}  (set with `bank <amount>`)")
-            return
-        self.j.set_cash(float(args[0].replace("_", "")))
-        print(f"  cash set to {self.j.cash():,.0f}")
+    def cmd_help(self, args: list[str]) -> None:
+        """Show the daily/occasional commands; `help all` adds the maintenance ones."""
+        print(__doc__)
+        if args and args[0].lower() in ("all", "full", "-a"):
+            print(_HELP_RARE)
 
     # --- loop ----------------------------------------------------------------
     def run(self) -> None:
@@ -1231,35 +1145,23 @@ class Terminal:
         if self._start_alerts():  # auto-on when a webhook is configured
             print(f"  (Discord alerts ON — every {config.ALERT_POLL_S}s; `alerts off` to stop)")
         handlers = {
-            "scan": lambda a: self.cmd_scan(a), "quote": lambda a: self.cmd_quote(a),
-            "sellquote": lambda a: self.cmd_sellquote(a), "sq": lambda a: self.cmd_sellquote(a),
+            # daily
+            "go": lambda a: self.cmd_go(a),
+            "quote": lambda a: self.cmd_quote(a), "why": lambda a: self.cmd_why(a),
+            "overnight": lambda a: self.cmd_overnight(a), "gear": lambda a: self.cmd_gear(a),
+            # occasional
+            "scan": lambda a: self.cmd_scan(a), "port": lambda a: self.cmd_port(a),
+            "sellquote": lambda a: self.cmd_sellquote(a), "anomaly": lambda a: self.cmd_anomaly(a),
+            "pnl": lambda a: self.cmd_pnl(), "progress": lambda a: self.cmd_progress(a),
+            "pos": lambda a: self.cmd_pos(), "inv": lambda a: self.cmd_inventory(a),
+            "recent": lambda a: self.cmd_recent(a), "recover": lambda a: self.cmd_recover(a),
+            # rare / maintenance (hidden from `help`; shown in `help all`)
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
-            "placed": lambda a: self.cmd_placed(a),
-            "calibrate": lambda a: self.cmd_calibrate(a), "calib": lambda a: self.cmd_calibrate(a),
-            "port": lambda a: self.cmd_port(a), "portfolio": lambda a: self.cmd_port(a),
-            "orders": lambda a: self.cmd_orders(a), "ge": lambda a: self.cmd_orders(a),
-            "review": lambda a: self.cmd_review(a), "check": lambda a: self.cmd_review(a),
-            "sync": lambda a: self.cmd_sync(a),
-            "overnight": lambda a: self.cmd_overnight(a), "night": lambda a: self.cmd_overnight(a),
-            "go": lambda a: self.cmd_go(a), "g": lambda a: self.cmd_go(a),
-            "brief": lambda a: self.cmd_go(a), "now": lambda a: self.cmd_go(a),
-            "pos": lambda a: self.cmd_pos(), "positions": lambda a: self.cmd_pos(),
-            "pnl": lambda a: self.cmd_pnl(), "recent": lambda a: self.cmd_recent(a),
-            "progress": lambda a: self.cmd_progress(a), "chart": lambda a: self.cmd_progress(a),
-            "anomaly": lambda a: self.cmd_anomaly(a), "anomalies": lambda a: self.cmd_anomaly(a),
-            "manip": lambda a: self.cmd_anomaly(a), "why": lambda a: self.cmd_why(a),
-            "gear": lambda a: self.cmd_gear(a), "big": lambda a: self.cmd_gear(a),
-            "inv": lambda a: self.cmd_inventory(a), "inventory": lambda a: self.cmd_inventory(a),
-            "reconcile": lambda a: self.cmd_reconcile(a), "audit": lambda a: self.cmd_audit(a),
-            "forget": lambda a: self.cmd_forget(a), "drop": lambda a: self.cmd_forget(a),
-            "hold": lambda a: self.cmd_hold(a), "own": lambda a: self.cmd_hold(a),
-            "recover": lambda a: self.cmd_recover(a), "recovery": lambda a: self.cmd_recover(a),
-            "preds": lambda a: self.cmd_preds(a),
-            "bank": lambda a: self.cmd_bank(a),
-            "alerts": lambda a: self.cmd_alerts(a),
+            "hold": lambda a: self.cmd_hold(a), "forget": lambda a: self.cmd_forget(a),
+            "audit": lambda a: self.cmd_audit(a), "calibrate": lambda a: self.cmd_calibrate(a),
+            "preds": lambda a: self.cmd_preds(a), "alerts": lambda a: self.cmd_alerts(a),
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
-            "help": lambda a: print(__doc__),
-            "?": lambda a: print(__doc__),
+            "help": lambda a: self.cmd_help(a), "?": lambda a: self.cmd_help(a),
         }
         while True:
             try:
@@ -1273,10 +1175,9 @@ class Terminal:
             cmd = cmd.lower()
             if cmd in ("quit", "exit", "q"):
                 break
-            if cmd != "sync":  # mirror RuneLite fills before any command (sync reports its own count)
-                synced = self._autosync()
-                if synced:
-                    print(f"  (auto-synced {synced} new fill(s) from RuneLite)")
+            synced = self._autosync()  # mirror completed fills into the journal before every command
+            if synced:
+                print(f"  (auto-synced {synced} new fill(s) from RuneLite)")
             fn = handlers.get(cmd)
             if not fn:
                 print(f"  unknown command: {cmd} (type `help`)")
