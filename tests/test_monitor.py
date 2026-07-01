@@ -4,9 +4,10 @@ from osrs_flipper import monitor
 from osrs_flipper.runelite import Offer
 
 
-def _offer(slot, iid, is_buy=True, state="BUYING", qty=1000, price=5, started_ms=0, filled=0):
+def _offer(slot, iid, is_buy=True, state="BUYING", qty=1000, price=5, started_ms=0, filled=0,
+           placement_observed=True):
     return Offer(slot=slot, item_id=iid, is_buy=is_buy, state=state, qty=qty, price=price,
-                 started_ms=started_ms, filled=filled)
+                 started_ms=started_ms, filled=filled, placement_observed=placement_observed)
 
 
 def test_filled_offer_is_collect_attention():
@@ -21,6 +22,26 @@ def test_ontrack_offer_is_not_attention():
                     "avgLowPrice": 5, "avgHighPrice": 6}}
     rows = monitor.review_offers([_offer(0, 561, started_ms=0)], hourly, latest={}, now_ms=1000)
     assert monitor.attention_events(rows) == {}
+
+
+def test_unobserved_placement_reads_open_not_stale():
+    # an offer already open at login (placement not witnessed): started_ms is only first-seen, so even
+    # a huge apparent age must NOT read as stale — verdict is `open`, elapsed unknown, no attention.
+    hourly = {561: {"lowPriceVolume": 1, "highPriceVolume": 1, "avgLowPrice": 5, "avgHighPrice": 6}}
+    o = _offer(0, 561, started_ms=1, placement_observed=False)
+    (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=10**12)
+    _o, v, elapsed_h, _eta, _p = row
+    assert v == "open" and elapsed_h is None
+    assert monitor.attention_events([row]) == {}
+
+
+def test_observed_old_offer_still_flags_stale():
+    # identical offer, but placement WAS witnessed → real age → the stale read still fires.
+    hourly = {561: {"lowPriceVolume": 1, "highPriceVolume": 1, "avgLowPrice": 5, "avgHighPrice": 6}}
+    o = _offer(0, 561, started_ms=1, placement_observed=True)
+    (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=10**12)
+    _o, v, elapsed_h, _eta, _p = row
+    assert elapsed_h is not None and v == "stale"
 
 
 def test_diff_new_only_returns_unalerted_transitions():

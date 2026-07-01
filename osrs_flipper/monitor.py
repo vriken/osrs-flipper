@@ -29,12 +29,15 @@ def review_offers(offers: list, hourly: dict, latest: dict, now_ms: int) -> list
         vol = (v.get("lowPriceVolume") if o.is_buy else v.get("highPriceVolume")) or 0
         rate = config.ALPHA * vol
         eta_h = o.qty / rate if rate > 0 else float("inf")
-        elapsed_h = (now_ms - o.started_ms) / 3_600_000 if o.started_ms else 0.0
+        # elapsed is None when we never witnessed the placement (an offer already open at login) —
+        # started_ms is then just first-seen, so any age/staleness read would be false.
+        elapsed_h = (now_ms - o.started_ms) / 3_600_000 if (o.started_ms and o.placement_observed) else None
         prog = o.filled / o.qty if o.qty else 0.0
         verdict = runelite.review_verdict(o.state, prog, elapsed_h, eta_h)
-        # market-moved check (buys): is the round-trip margin still there? guarded against
-        # snapshot noise on fresh orders / penny spreads (see runelite.margin_alert).
-        if verdict != "collect" and o.is_buy:
+        # market-moved check (buys): is the round-trip margin still there? guarded against snapshot
+        # noise on fresh orders / penny spreads (see runelite.margin_alert). Needs a real age for the
+        # min-age guard, so skip it when the placement time is unknown.
+        if verdict != "collect" and o.is_buy and elapsed_h is not None:
             lo = latest.get(o.item_id, {})
             lbid, lask = lo.get("low"), lo.get("high")
             if lbid and lask:

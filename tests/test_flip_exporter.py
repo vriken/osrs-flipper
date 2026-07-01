@@ -55,6 +55,15 @@ def test_active_offers_carry_real_price_uuid_placedat():
     assert o[2].is_buy and o[2].state == "BOUGHT" and o[2].uuid == ""   # missing uuid → empty string
 
 
+def test_active_offers_read_placement_observed_default_true():
+    # absent field (older plugin) → trusted (True); explicit false → carried through
+    base = {x.slot: x for x in fe.active_offers(LATEST)}
+    assert base[0].placement_observed is True
+    tagged = {"gameState": "LOGGED_IN", "inventory": {"loaded": True}, "offers": [
+        {"slot": 0, "id": 561, "isBuy": True, "state": "BUYING", "placedAt": 5, "placementObserved": False}]}
+    assert fe.active_offers(tagged)[0].placement_observed is False
+
+
 def test_all_fills_merges_history_and_active_partials_incl_uuidless():
     fills = {f.item_id: f for f in fe.all_fills(LATEST, HISTORY)}
     assert fills[2114].qty == 1630                    # from history
