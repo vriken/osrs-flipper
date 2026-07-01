@@ -118,6 +118,21 @@ def assess(iid: int, latest: dict[int, dict], hourly: dict[int, dict],
     return res
 
 
+def is_buyable(a: dict[str, Any]) -> bool:
+    """Should we BUY into this price per the anomaly read? Safe when the price is normal, or a dip
+    that dumped on volume AND is already recovering. NOT safe when it's elevated (pump — don't chase),
+    still falling after a volume dump (wait for the floor), or drifting down on normal volume (a
+    re-rating / falling knife). This is the single rule behind both `summary_line` and the buy filter,
+    so the scanner never recommends what the `why` warns against. No baseline → don't block."""
+    if a.get("ref_baseline") is None or a.get("live_mid") is None:
+        return True
+    div = a.get("div", 0.0)
+    if abs(div) < config.ANOMALY_DIV_MIN:
+        return True  # price normal
+    spike = abs(a.get("vol_z", 0.0)) >= config.ANOMALY_VOL_Z_MIN
+    return div < 0 and spike and a.get("slope", 0.0) > 0  # dumped on volume & recovering → revert-buy
+
+
 def summary_line(a: dict[str, Any]) -> str:
     """One-line 'why' for a `go` pick — is the price normal, a real dip to buy, or a falling knife?"""
     if a.get("ref_baseline") is None or a.get("live_mid") is None:

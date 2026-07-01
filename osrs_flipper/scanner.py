@@ -6,7 +6,7 @@ import statistics
 
 import pandas as pd
 
-from . import api, calibration, config
+from . import anomaly, api, calibration, config
 from .features import build_features
 from .persistence import fetch_persistence
 
@@ -151,6 +151,11 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
         st = fetch_persistence(iid)
         if not st or st["realizable_spread"] <= 0 or st["persist"] < config.PERSIST_MIN_FRAC:
             continue
+        # don't recommend a buy the `why` would warn against: skip pumps (don't chase), still-falling
+        # dumps (wait for the floor) and normal-volume re-ratings (falling knife). Reuses the 1h
+        # timeseries fetch_persistence just cached, so it adds no API call.
+        if not anomaly.is_buyable(anomaly.assess(iid, api.latest(), api.one_hour(), api.timeseries)):
+            continue
         q = optimal_quote(iid, int(row["capacity"]), name=row["name"], horizon_h=horizon)
         if not q or q.ev <= 0 or q.net_unit < config.MIN_NET_MARGIN:
             continue  # integer-tick flip — fat ROI%, doesn't fill
@@ -278,17 +283,30 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
             picks.append(_pick_row(row, "hold", int(row["hold_units"])))  # cap by realizable volume
             taken.add(int(row["item_id"]))
 
+    # Rank every candidate, then keep only as many as we can actually place: a position — active OR
+    # hold — needs a free slot, so never recommend more than free_slots (was: free_slots active flips
+    # PLUS up to max_accumulate holds, which told you to place 4 things with 2 slots). Provisional
+    # allocation first gives each the gp/ETA the ranking needs; re-allocating across just the
+    # survivors then concentrates the cash into the slots you have (less idle) instead of spreading it
+    # over picks you can't place.
     allocated, idle = _allocate(picks, bankroll)
-    for p in allocated:  # active gp is per-cycle; hold gp is the spread captured once sold
+    _finalize_gp(allocated)
+    allocated.sort(key=_place_score, reverse=True)  # best ROI-tilted gp/hour first
+    allocated = allocated[: max(0, free_slots)]     # cap to placeable slots — the best ones survive
+    allocated, idle = _allocate(allocated, bankroll)
+    _finalize_gp(allocated)
+    _schedule(allocated, free_slots)
+    return allocated, idle
+
+
+def _finalize_gp(picks: list[dict]) -> None:
+    """Set each pick's realised gp and buy ETA from its allocated qty. Active gp is the per-cycle
+    spread × fill; a hold's is the full spread captured once it sells (no queue-jump discount)."""
+    for p in picks:
         fill = p["p_complete"] if p["tier"] != "hold" else 1.0
         p["gp"] = p["margin_abs"] * p["qty"] * fill * p.get("fill_mult", 1.0)  # calibrated fill
         br = p.get("buy_rate", 0.0)
         p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
-    # placement order: best ROI-tilted gp/hour first, so the limited free slots go to the
-    # highest-quality fast flips now and holds queue behind (was fastest-fill-first).
-    allocated.sort(key=_place_score, reverse=True)
-    _schedule(allocated, free_slots)
-    return allocated, idle
 
 
 def _schedule(picks: list[dict], slots: int) -> None:
