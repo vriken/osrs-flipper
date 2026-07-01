@@ -1059,12 +1059,29 @@ class Terminal:
             g["qty"] = g["hold_units"].astype(int)  # aspirational: full volume-realizable size
             g["gp"] = g["margin_abs"] * g["qty"]
             hidden = 0
-        g = g.sort_values("gp", ascending=False).head(n)
+        from . import anomaly
+        g = g.sort_values("gp", ascending=False)
+        lat, hr = api.latest(), api.one_hour()
+        kept, pumped = [], 0
+        for _, r in g.iterrows():  # keep the best n that pass the pump/knife check
+            if len(kept) >= n:
+                break
+            # gear skips the volume gate, so big-ticket + thin = the most corner-able class. Run the
+            # SAME anomaly check scan/go use, so a manipulated spike (live ≫ 2wk baseline) is excluded
+            # here too — a fat "spread" on a pumped tome is a trap, not a flip.
+            if not anomaly.is_buyable(anomaly.assess(int(r["item_id"]), lat, hr, api.timeseries)):
+                pumped += 1
+                continue
+            kept.append(r)
+        if not kept:
+            print("  every big-ticket candidate is dislocated from its baseline right now (pump / falling "
+                  "knife) — nothing safe to leave. These revert; check back later.")
+            return
         tag = "aspirational (ignores cash)" if show_all else f"affordable with cash {cash:,}"
         print(f"  PATIENT / GEAR · full spread (β={config.PATIENT_BETA:g}, tax netted) · {tag}"
               f"  ⚠ best-case: assumes you fill AT the bid/ask")
         print(f"  {'item':22}{'buy':>13}{'sell':>13}{'margin':>11}{'pct':>6}{'qty':>5}{'gp':>11}{'  fill'}")
-        for _, r in g.iterrows():
+        for r in kept:
             qty = int(r["qty"])
             eta = r["fill_eta_h"]
             fill = f"{eta:.1f}h" if eta and eta < 100 else "—"
@@ -1072,6 +1089,8 @@ class Terminal:
             print(f"  {str(r['name'])[:22]:22}{int(r['buy_px']):>13,}{int(r['sell_px']):>13,}"
                   f"{int(r['margin_abs']):>11,}{r['margin_pct'] * 100:>5.1f}%{qty:>5}"
                   f"{int(r['gp']):>11,}  {fill}{flag}")
+        if pumped:
+            print(f"  ({pumped} candidate(s) skipped — price dislocated from baseline / falling; likely manipulated)")
         if hidden:
             print(f"  ({hidden} pricier items beyond your {cash:,} hidden — `gear all` to see them)")
         print("  qty = affordable × volume-realizable over ~8h; post at the bid/ask and leave it. "

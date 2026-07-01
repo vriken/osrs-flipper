@@ -82,6 +82,17 @@ def test_assess_overdump_recovering_on_volume_is_revert_buy():
     assert "revert-buy" in anomaly.summary_line(a)
 
 
+def test_pump_on_a_thin_high_value_item_is_not_buyable():
+    # the Tome of fire (empty) case: ~900k baseline on a buy-limit-15 item, live spiked to ~1.22M
+    # (+36%). Live-vs-1h can't catch it (the 1h avg is pumped too); vs the 2wk baseline it's a clear
+    # pump → must be flagged unbuyable so scan / go / gear all skip it.
+    bars = _bars([900_000] * 60, [80] * 60)
+    a = anomaly.assess(20716, {20716: {"high": 1_274_550, "low": 1_171_000}}, {20716: {}},
+                       lambda i, s: bars)
+    assert a["div"] > 0.3 and a["phase"] in ("PUMP↑", "FADE↓")
+    assert not anomaly.is_buyable(a)
+
+
 def _assess(mids, vols, live):
     return anomaly.assess(1, {1: {"high": live + 1, "low": live - 1}}, {1: {}}, lambda i, s: _bars(mids, vols))
 
