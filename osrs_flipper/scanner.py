@@ -315,6 +315,19 @@ def slot_worth_floor(net_worth: int, ranking: pd.DataFrame, *, slots: int | None
     return max(250, int(fair_share * achievable_roi * lam))
 
 
+def blended_ref(avg5m: float | None, tick: float | None, big_move: float) -> float | None:
+    """Short-term price reference: the 5-minute average pulled toward the last tick in proportion
+    to how far the tick has diverged from it. A small gap (noise) barely moves it; a divergence of
+    `big_move` or more fully trusts the tick — so a genuine crash/spike isn't smoothed away for 5
+    minutes. Returns whichever of the two exists if the other is missing."""
+    if not avg5m:
+        return tick
+    if not tick or big_move <= 0:
+        return avg5m
+    w = min(1.0, abs(tick - avg5m) / avg5m / big_move)  # weight on the tick, grows with divergence
+    return (1 - w) * avg5m + w * tick
+
+
 def roi_per_hour(roi: float, eta_h: float, floor_h: float) -> float:
     """ROI-per-hour with the fill-time floored, so a high-volume flip whose estimated fill rounds
     toward 0 can't explode the rate and dominate a fatter-margin flip on an artifact. Unrankable

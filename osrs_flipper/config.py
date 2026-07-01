@@ -252,6 +252,19 @@ RECOVERY_Z = float(os.environ.get("OSRS_FLIPPER_RECOVERY_Z", -1.0))
 REVIEW_MARGIN_MIN_AGE_H = float(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_MIN_AGE_H", 0.25))
 REVIEW_MARGIN_FLOOR = int(os.environ.get("OSRS_FLIPPER_REVIEW_MARGIN_FLOOR", 3))
 
+# Reprice deadband for the review hints ("re-list nearer X", "re-quote buy/sell"). The market
+# reference is the 5-MINUTE average (short-term context), not the instantaneous last tick, so a
+# 1gp dip over a minute doesn't read as a move. On top of that, only advise a reprice when your
+# price is off that reference by more than this fraction — a sub-deadband gap is tick jitter, and
+# chasing it costs a re-list + your queue position for nothing. Relative so it's fair across prices
+# (1gp on a 30gp item is 3% = real; 1gp on a 3000gp item is 0.03% = noise).
+REPRICE_DEADBAND = float(os.environ.get("OSRS_FLIPPER_REPRICE_DEADBAND", 0.02))  # 2%
+# The market reference blends the 5m average with the last tick, weighting the tick MORE the
+# further it has diverged from the average — so noise is smoothed but a genuine sharp move (a
+# crash or spike) still pulls the reference fast, instead of lagging 5 min behind it. This is the
+# divergence at which we fully trust the last tick (a real move this big isn't noise).
+REPRICE_BIG_MOVE = float(os.environ.get("OSRS_FLIPPER_REPRICE_BIG_MOVE", 0.08))  # 8%
+
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
 # Background attention monitor: how often to poll RuneLite for offers that need you

@@ -61,16 +61,38 @@ def test_autodetect_skips_completed_offers(tmp_path, monkeypatch):
 
 
 def test_refine_sell_priced_to_market_downgrades_to_ontrack(monkeypatch):
-    # a stale SELL still at/under market is priced to sell, just slow → don't tell me to re-list
-    monkeypatch.setattr(term_mod.api, "latest", lambda: {561: {"high": 6}})
+    # a stale SELL still at/under the 5m-avg market is priced to sell, just slow → don't re-list
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {561: {"avgHighPrice": 6}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})  # no tick → ref is the 5m avg
     o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=6)
     v, hint = Terminal._refine_verdict(o, "stale")
     assert v == "ontrack" and "just slow" in hint
 
 
+def test_refine_sell_within_deadband_is_not_flagged(monkeypatch):
+    # 1gp above the 5m-avg on a 100gp item (1% < 2% deadband) is tick noise → hold, don't chase
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {561: {"avgHighPrice": 100}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
+    o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=101)
+    v, hint = Terminal._refine_verdict(o, "stale")
+    assert v == "ontrack" and "just slow" in hint
+
+
 def test_refine_sell_above_market_says_relist_lower(monkeypatch):
-    monkeypatch.setattr(term_mod.api, "latest", lambda: {561: {"high": 6}})
+    # 50% above the 5m-avg is a genuine mispricing (past the deadband) → re-list
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {561: {"avgHighPrice": 6}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
     o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=9)
+    v, hint = Terminal._refine_verdict(o, "stale")
+    assert v == "stale" and "re-list" in hint
+
+
+def test_refine_sell_reacts_to_a_sharp_drop_via_the_tick_blend(monkeypatch):
+    # 5m avg still 100 but the last tick has crashed to 60 (40% > 8% big-move) → the blend trusts
+    # the tick, so a sell listed at 100 is now well above market → re-list (not smoothed away).
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {561: {"avgHighPrice": 100}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {561: {"high": 60}})
+    o = Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=100)
     v, hint = Terminal._refine_verdict(o, "stale")
     assert v == "stale" and "re-list" in hint
 
@@ -116,10 +138,11 @@ def test_refine_buy_unknown_price_shows_market_not_mispriced(monkeypatch):
 
 
 def test_refine_sell_unknown_price_shows_market_ask(monkeypatch):
-    monkeypatch.setattr(term_mod.api, "latest", lambda: {554: {"high": 6}})
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {554: {"high": 6}})  # only a tick → ref = 6
     o = Offer(slot=0, item_id=554, is_buy=False, state="SELLING", qty=50000, price=0)
     v, hint = Terminal._refine_verdict(o, "stale")
-    assert v == "slow" and "market ask 6" in hint
+    assert v == "slow" and "market ask ~6" in hint
 
 
 def _row(verdict, eta_h=1.0):

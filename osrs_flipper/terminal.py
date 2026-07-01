@@ -694,22 +694,29 @@ class Terminal:
                 return verdict, alert.color("         → no profitable spread now — cancel & redeploy that cash", "yellow")
             if not known:  # market spread exists → most likely just slow; show it to compare against
                 return "slow", alert.color(f"         → market now: buy {q.buy_px:,} / sell {q.sell_px:,} (net {q.net_unit}/ea) — fine if your bid ≥ {q.buy_px:,}", "yellow")
-            # known price: fine if at/above the competitive buy AND still profitable to sell into;
-            # only under-bidding (won't fill) or over-paying (no margin) needs a re-quote.
+            # known price: fine if within a deadband of the competitive buy AND still profitable to
+            # sell into; only under-bidding by MORE than tick jitter (won't fill) or over-paying (no
+            # margin) needs a re-quote. The deadband stops a 1gp book wiggle triggering a chase.
             net_at_mine = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
-            if o.price >= q.buy_px and net_at_mine > 0:
+            tol = q.buy_px * config.REPRICE_DEADBAND
+            if o.price >= q.buy_px - tol and net_at_mine > 0:
                 return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green")
             return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
-        # SELL: compare against the current market ask.
-        ask = api.latest().get(o.item_id, {}).get("high") or api.one_hour().get(o.item_id, {}).get("avgHighPrice")
+        # SELL: reference the 5m average buy price BLENDED toward the last tick (so noise is
+        # smoothed but a genuine sharp drop still moves it), and only advise a re-list when you're
+        # above that by more than the deadband.
+        avg5m = api.five_min().get(o.item_id, {}).get("avgHighPrice")
+        tick = api.latest().get(o.item_id, {}).get("high")
+        ask = scanner.blended_ref(avg5m, tick, config.REPRICE_BIG_MOVE) \
+            or api.one_hour().get(o.item_id, {}).get("avgHighPrice")
         if not ask:
             return verdict, ""
         ask = int(round(ask))
         if not known:
-            return "slow", alert.color(f"         → market ask {ask:,} — fine if you're listed ≤ {ask:,}", "yellow")
-        if o.price <= ask:
-            return "ontrack", alert.color(f"         → listed {o.price:,} ≤ market {ask:,} — priced to sell, just slow; hold", "green")
-        return verdict, alert.color(f"         → re-list nearer {ask:,} — you're above market", "bold")
+            return "slow", alert.color(f"         → market ask ~{ask:,} (5m avg) — fine if you're listed ≤ {ask:,}", "yellow")
+        if o.price <= ask + ask * config.REPRICE_DEADBAND:
+            return "ontrack", alert.color(f"         → listed {o.price:,} ≈ market ~{ask:,} (5m avg) — priced to sell, just slow; hold", "green")
+        return verdict, alert.color(f"         → re-list nearer {ask:,} (5m avg) — you're above market", "bold")
 
     # --- background Discord alerts -------------------------------------------
     def _alerts_running(self) -> bool:
