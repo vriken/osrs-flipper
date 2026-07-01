@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from . import api, config, runelite
+from . import api, config, datasource, runelite
 from .tax import post_tax_received
 
 # verdicts worth a push, with the phone-friendly reason shown in the alert
@@ -60,8 +60,7 @@ def diff_new(current: dict, alerted: dict) -> list[tuple[tuple[int, int], str]]:
 
 
 def _live_attention(names: dict) -> dict[tuple[int, int], str]:
-    rl = runelite.read()
-    offers = runelite.active_offers(rl) if rl else []
+    offers = datasource.active().active_offers()
     rows = review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
     return attention_events(rows)
 
