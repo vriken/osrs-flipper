@@ -213,6 +213,12 @@ SLOT_WORTH_LAMBDA = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_LAMBDA", 0.5))
 # cancelling costs your queue position + the re-place clicks, so only a wide edge is worth it.
 SWAP_RATIO = float(os.environ.get("OSRS_FLIPPER_SWAP_RATIO", 2.0))       # alt must be ≥2× the offer's ROI/h
 SWAP_MAX_FILL = float(os.environ.get("OSRS_FLIPPER_SWAP_MAX_FILL", 0.5))  # only swap buys under 50% filled
+SWAP_MIN_AGE_H = float(os.environ.get("OSRS_FLIPPER_SWAP_MIN_AGE_H", 0.5))  # don't cancel a just-placed buy
+# Floor on any fill-time used in a ROI-per-hour rate. A high-volume flip's estimated fill can round
+# toward 0, which makes margin% ÷ time explode to a meaningless "1000× faster" — no flip actually
+# round-trips in zero time (place → fill → collect → list → fill → collect). Clamp the denominator so
+# a near-instant flip can't dominate a fatter-margin one on a rounding artifact.
+MIN_FILL_ETA_H = float(os.environ.get("OSRS_FLIPPER_MIN_FILL_ETA_H", 0.25))
 
 # --- Schedule (drives the time-aware `brief`) --------------------------------
 # Active hours = fast online flips; outside them = overnight/patient plan.
