@@ -116,6 +116,18 @@ def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, lim
             "hold_units": min(vol, limit), "buy_rate": 5000.0, "fill_mult": fill_mult}
 
 
+def test_slot_worth_floor_scales_with_net_worth_not_loose_cash(monkeypatch):
+    # A small hold worth ~312 gp clears the floor when it's based on 37k loose cash (0.2% = 74 →
+    # floor 250), but is gated once the floor reflects a 400k net worth (0.2% = 800). This is the
+    # "don't fragment 37k into <500gp flips while 334k is landing" fix.
+    df = pd.DataFrame([_candidate(561, "Small hold", 100, 107, margin_abs=6, margin_fast=-1,
+                                  vol=52, limit=52)])  # worth = 6 × 52 = 312 gp
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    on_cash, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1)
+    on_networth, _ = scanner.build_portfolio(bankroll=37_000, free_slots=1, net_worth=400_000)
+    assert on_cash and not on_networth  # funded on the loose-cash floor, gated on the net-worth floor
+
+
 def test_one_gp_tick_flip_is_dropped(monkeypatch):
     # reversal (was "penny staple kept as hold"): a 1gp integer-tick staple (Air rune 4→5) shows
     # 25% ROI but doesn't fill — you're behind a wall of identical 1gp bids (fill calibration ≈0).

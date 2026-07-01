@@ -247,9 +247,11 @@ class Terminal:
                 print(self._recovery_note(r, rec[r["item_id"]]))
         print(f"  building portfolio for {buy_slots} free slot(s)"
               + (f" ({len(to_sell)} reserved for sells)…" if to_sell else "…"))
+        bids = {p.item_id: (self.latest().get(p.item_id) or {}).get("low") for p in held}
+        net_worth = int(self.j.equity(bids) + src.tied_gold())
         picks, idle = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
-            fill_cal=self._fill_cal(), beta=self._beta())
+            net_worth=net_worth, fill_cal=self._fill_cal(), beta=self._beta())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -435,6 +437,10 @@ class Terminal:
         held = self.j.positions()
         offers = self._active_offers()  # live GE offers from the active data source
         free = self._free_slots(offers)
+        # net worth (cash + stock + gold in offers) sets the slot-worth floor — a slot is worth its
+        # opportunity cost against your whole pile, not just the loose cash on hand.
+        bids = {p.item_id: (self.latest().get(p.item_id) or {}).get("low") for p in held}
+        net_worth = int(self.j.equity(bids) + (tied or 0))
         bp = scanner.bond_progress(cash) if not config.MEMBERS else {}
         pct = f" · {bp['pct']:.0f}% to bond" if bp.get("pct") else ""
         # runway to bed picks the plan: a flip placed now must round-trip (buy + sell) before
@@ -508,14 +514,19 @@ class Terminal:
             exclude = [h.item_id for h in held] + [o.item_id for o in offers]
             fcal = self._fill_cal()
             picks, idle = scanner.build_portfolio(bankroll=cash, held_ids=exclude, free_slots=buy_slots,
-                                                  limit_used=self._limit_used(), fill_cal=fcal,
-                                                  beta=self._beta())
+                                                  limit_used=self._limit_used(), net_worth=net_worth,
+                                                  fill_cal=fcal, beta=self._beta())
             src = "live" if (offers or coins is not None) else "assumed"
             print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
             if fcal.get("global_measured") is not None:
                 print(f"  (auto-calibrated from {fcal['n']} attempts: β {self._beta():.2f} · "
                       f"fill ×{fcal['global']:.2f} — applied to prices, gp & ranking)")
             self._explain_picks(picks)  # one-line "why" for each buy you're about to place
+            floor = max(250, int(config.SLOT_WORTH_FRAC * net_worth))
+            if idle > floor:  # cash held back rather than fragmented into slot-unworthy flips
+                tail = f"; consolidating with the {tied:,} in your offers" if tied else ""
+                print(alert.color(f"  holding {idle:,.0f} idle — below the ~{floor:,} gp slot-worth bar "
+                                  f"(~{config.SLOT_WORTH_FRAC:.1%} of net worth){tail}", "yellow"))
         elif buy_slots > 0:
             self._overnight_plan(cash)
 

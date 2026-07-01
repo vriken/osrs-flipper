@@ -231,7 +231,7 @@ def _place_score(p: dict) -> float:
 
 def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: bool | None = None,
                     max_accumulate: int = 6, min_gp: int | None = None, min_margin: float = 0.01,
-                    limit_used: dict[int, int] | None = None,
+                    limit_used: dict[int, int] | None = None, net_worth: int | None = None,
                     fill_cal: dict | None = None, beta: float | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
@@ -243,9 +243,12 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     """
     if free_slots <= 0:
         return [], float(bankroll)  # no free slots → can't place any new buys
-    # a flip must clear this to be worth a slot + the clicks (≈0.2% of bankroll, floor 250)
+    # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks.
+    # Scale the floor by NET WORTH (cash + gold in offers + stock), not the loose cash on hand —
+    # otherwise a little free cash gets fragmented into tiny flips that lock slots the incoming
+    # pile should get. Falls back to bankroll when net_worth isn't supplied (e.g. the CLI).
     if min_gp is None:
-        min_gp = max(250, int(bankroll * 0.002))
+        min_gp = max(250, int(config.SLOT_WORTH_FRAC * (net_worth or bankroll)))
     # daytime plan: every free slot is a patient ~2h flip (you cycle them between check-ins).
     # the slow/offline deals are reserved for the night plan (`overnight`), so during the day
     # we rank every slot on the balanced (2h) horizon.
