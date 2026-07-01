@@ -190,11 +190,16 @@ def margin_alert(live_net: float, avg_net: float | None, elapsed_h: float, *,
     return margin_collapsed(live_net, avg_net)
 
 
-def review_verdict(state: str, progress: float, elapsed_h: float | None, eta_h: float) -> str:
+def review_verdict(state: str, progress: float, elapsed_h: float | None, eta_h: float,
+                   observed: bool = True) -> str:
     """Advise on an active offer from time/progress alone (we don't get the offer price).
-    Returns: collect | stale | slow | ontrack | open | done. `elapsed_h` is None when the
-    placement wasn't witnessed (e.g. an offer already open at login) — timing is then unknown,
-    so we return `open` rather than a false on-track/stale read."""
+    Returns: collect | stale | slow | ontrack | open | done.
+
+    When `observed` is False the placement wasn't witnessed (offer already open at login), so
+    `elapsed_h` is a LOWER BOUND on the true age (time since first-seen), not the real age.
+    stale/slow off a lower bound are still sound (true age ≥ elapsed_h), so we keep flagging them;
+    but within the thresholds we return the neutral `open` instead of a false `ontrack`, because the
+    true age could be anything up to unknown. `elapsed_h` None means we have no timestamp at all."""
     if state in ("BOUGHT", "SOLD"):
         return "collect"
     if progress >= 1:
@@ -205,7 +210,7 @@ def review_verdict(state: str, progress: float, elapsed_h: float | None, eta_h: 
         return "stale"
     if eta_h and eta_h < float("inf") and elapsed_h > eta_h:
         return "slow"
-    return "ontrack"
+    return "ontrack" if observed else "open"
 
 
 def occupied_slots(data: dict) -> int:

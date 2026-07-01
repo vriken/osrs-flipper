@@ -24,19 +24,29 @@ def test_ontrack_offer_is_not_attention():
     assert monitor.attention_events(rows) == {}
 
 
-def test_unobserved_placement_reads_open_not_stale():
-    # an offer already open at login (placement not witnessed): started_ms is only first-seen, so even
-    # a huge apparent age must NOT read as stale — verdict is `open`, elapsed unknown, no attention.
-    hourly = {561: {"lowPriceVolume": 1, "highPriceVolume": 1, "avgLowPrice": 5, "avgHighPrice": 6}}
-    o = _offer(0, 561, started_ms=1, placement_observed=False)
-    (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=10**12)
+def test_unobserved_recent_offer_is_open_not_ontrack():
+    # placement not witnessed + only just first-seen (tiny age floor) → can't claim on-track, and the
+    # floor is too small to call stale → neutral `open`. Floor is known (not None); no attention.
+    hourly = {561: {"lowPriceVolume": 100_000, "highPriceVolume": 100_000, "avgLowPrice": 5, "avgHighPrice": 6}}
+    o = _offer(0, 561, started_ms=1_000, placement_observed=False)
+    (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=2_000)  # ~0.0003h floor
     _o, v, elapsed_h, _eta, _p = row
-    assert v == "open" and elapsed_h is None
+    assert v == "open" and elapsed_h is not None
     assert monitor.attention_events([row]) == {}
 
 
+def test_unobserved_but_long_open_is_soundly_stale():
+    # watched it far longer than its expected fill (floor >> eta) → stale is sound even unobserved:
+    # the true age is at least the floor, so it's definitely overdue.
+    hourly = {561: {"lowPriceVolume": 1, "highPriceVolume": 1, "avgLowPrice": 5, "avgHighPrice": 6}}
+    o = _offer(0, 561, started_ms=1, placement_observed=False)
+    (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=10**12)
+    _o, v, _e, _eta, _p = row
+    assert v == "stale"
+
+
 def test_observed_old_offer_still_flags_stale():
-    # identical offer, but placement WAS witnessed → real age → the stale read still fires.
+    # identical offer, placement WAS witnessed → real age → the stale read still fires.
     hourly = {561: {"lowPriceVolume": 1, "highPriceVolume": 1, "avgLowPrice": 5, "avgHighPrice": 6}}
     o = _offer(0, 561, started_ms=1, placement_observed=True)
     (row,) = monitor.review_offers([o], hourly, latest={}, now_ms=10**12)
