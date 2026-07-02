@@ -310,8 +310,11 @@ class Terminal:
 
     def _active_offers(self) -> list:
         """Authoritative live GE offers (real prices, placement time, uuid), from whatever data
-        source is active — see datasource."""
-        return datasource.active().active_offers()
+        source is active — see datasource. Placement age is made durable through the journal
+        (remember_offer_ages) so a RuneLite restart doesn't reset every offer to 'age unconfirmed'."""
+        offers = datasource.active().active_offers()
+        self.j.remember_offer_ages(offers, int(time.time() * 1000))
+        return offers
 
     def _free_slots(self, offers: list | None = None) -> int:
         """Observed free GE slots from the relog-proof offer source."""

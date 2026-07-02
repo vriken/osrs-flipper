@@ -268,3 +268,79 @@ def test_migrate_baselines_then_credits_only_new(j):
     assert j.cash() == cash0
     assert j.account_fill_delta("u", GOLD_BAR, "Gold bar", False, 600, 110) == 200  # only new units credit
     assert j.migrate_fill_accounting_if_needed([]) is False                         # one-time
+
+
+# --- durable offer age across a restart ---------------------------------------
+_HOUR_MS = 3_600_000
+
+
+def _offer(started_ms: int, observed: bool, *, slot: int = 0, item: int = GOLD_BAR,
+           is_buy: bool = True, qty: int = 100, price: int = 4, filled: int = 0):
+    from osrs_flipper.runelite import Offer
+    return Offer(slot=slot, item_id=item, is_buy=is_buy, state="BUYING", qty=qty, price=price,
+                 started_ms=started_ms, filled=filled, placement_observed=observed)
+
+
+def test_freshly_witnessed_unfilled_placement_is_trusted(j):
+    now = 100 * _HOUR_MS
+    o = _offer(started_ms=now - 10 * _HOUR_MS, observed=True)     # caught at 0 fill → real age known
+    j.remember_offer_ages([o], now)
+    assert o.started_ms == now - 10 * _HOUR_MS and o.placement_observed is True
+
+
+def test_age_survives_restart_that_resets_placement(j):
+    """The real bug: after a client restart the plugin re-emits the SAME order (same terms) with a
+    fresh placedAt — and even re-asserts placementObserved=true. The remembered original age must
+    win, and the reload must not upgrade our confidence."""
+    now = 100 * _HOUR_MS
+    # session 1: caught the placement 10h ago at 0 fill
+    j.remember_offer_ages([_offer(started_ms=now - 10 * _HOUR_MS, observed=True)], now)
+    # session 2 (after restart): identical terms, but plugin reset placedAt to ~now
+    later = now + _HOUR_MS
+    o2 = _offer(started_ms=later, observed=False)
+    j.remember_offer_ages([o2], later)
+    assert o2.started_ms == now - 10 * _HOUR_MS   # original placement preserved, not reset to `later`
+    assert o2.placement_observed is True          # locked from session 1
+
+
+def test_reload_restamp_cannot_fabricate_a_known_age(j):
+    """Regression for the observed live behaviour: an order first seen part-filled (its earlier life
+    missed) must stay a lower bound even when a reload later re-stamps it observed=true, placedAt=now."""
+    t0 = 40 * _HOUR_MS
+    j.remember_offer_ages([_offer(started_ms=t0, observed=False, filled=30)], t0)  # first sight: mid-fill
+    later = t0 + 3 * _HOUR_MS
+    o2 = _offer(started_ms=later, observed=True, filled=30)                         # reload lies: observed=true, now
+    j.remember_offer_ages([o2], later)
+    assert o2.started_ms == t0                     # earliest kept
+    assert o2.placement_observed is False          # NOT upgraded by the reload's false claim
+
+
+def test_never_witnessed_keeps_earliest_first_seen_as_lower_bound(j):
+    """An offer open before we ever tracked it stays unobserved, but its first-seen time is
+    remembered so age GROWS across restarts (a ≥ lower bound) instead of resetting each time."""
+    t0 = 50 * _HOUR_MS
+    j.remember_offer_ages([_offer(started_ms=0, observed=False)], t0)     # first ever sight, no stamp
+    o2 = _offer(started_ms=0, observed=False)
+    j.remember_offer_ages([o2], t0 + 5 * _HOUR_MS)                        # a later restart
+    assert o2.started_ms == t0 and o2.placement_observed is False         # earliest kept, still unconfirmed
+
+
+def test_new_listing_in_slot_resets_age(j):
+    """A genuinely new order (different terms) reusing the slot must not inherit the old age."""
+    now = 100 * _HOUR_MS
+    j.remember_offer_ages([_offer(started_ms=now - 20 * _HOUR_MS, observed=True, price=4)], now)
+    later = now + _HOUR_MS
+    fresh = _offer(started_ms=later, observed=True, price=7)              # re-listed at a new price
+    j.remember_offer_ages([fresh], later)
+    assert fresh.started_ms == later
+
+
+def test_slot_turnover_detected_by_fill_reset(j):
+    """Same terms but filled dropped back to 0 ⇒ the prior order completed and a new one took the
+    slot; age must restart rather than inherit the finished order's clock."""
+    now = 100 * _HOUR_MS
+    j.remember_offer_ages([_offer(started_ms=now - 15 * _HOUR_MS, observed=True, filled=90)], now)
+    later = now + _HOUR_MS
+    new = _offer(started_ms=later, observed=True, filled=0)               # fresh order, same item/price/qty
+    j.remember_offer_ages([new], later)
+    assert new.started_ms == later
