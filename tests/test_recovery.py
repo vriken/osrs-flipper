@@ -36,3 +36,15 @@ def test_double_down_blends_average_to_target():
 
 def test_double_down_zero_when_price_at_or_above_target():
     assert recovery.double_down(100, 200, cur=196, target=195) == (0, 200)
+
+
+def test_cut_below_cost_only_when_no_bounce_and_better_flip():
+    # the sole case a loss-sale is advised: below break-even AND no near-term bounce AND a better home
+    assert recovery.cut_below_cost(True, bounce_likely=False, better_flip=True) is True
+    # any missing leg → hold at break-even instead
+    assert recovery.cut_below_cost(False, bounce_likely=False, better_flip=True) is False  # not a loss yet
+    assert recovery.cut_below_cost(True, bounce_likely=True, better_flip=True) is False   # bounce likely
+    assert recovery.cut_below_cost(True, bounce_likely=False, better_flip=False) is False # nowhere better
+    # unknown signals (None) are treated as not-satisfied → safe default is to hold
+    assert recovery.cut_below_cost(True, bounce_likely=None, better_flip=True) is False
+    assert recovery.cut_below_cost(True, bounce_likely=False, better_flip=None) is False

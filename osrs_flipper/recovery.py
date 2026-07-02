@@ -50,6 +50,17 @@ def assess_recovery(avg_cost: float, bail: float, mids: list[float], *, min_dip:
             "recover": underwater and was_green and depressed and not rerating}
 
 
+def cut_below_cost(below_be: bool, bounce_likely: bool | None, better_flip: bool | None) -> bool:
+    """Should we advise selling a holding BELOW break-even (locking a loss)? Only when all hold:
+      * `below_be`      — the market has actually fallen under your break-even (else it's no loss);
+      * bounce unlikely — `bounce_likely is False`: the week read sees a re-rating/downtrend, so
+                          selling now is no worse than waiting ~5 min for a revert that isn't coming;
+      * `better_flip`   — the freed capital has a materially better home available right now.
+    Anything short of that → hold at break-even rather than realise the loss. `None` for either
+    signal means "unknown" and is treated as not-satisfied, so we default to the safe hold."""
+    return bool(below_be) and bounce_likely is False and bool(better_flip)
+
+
 def double_down(held_qty: int, avg_cost: float, cur: float, target: float) -> tuple[int, float]:
     """Units to buy at `cur` to blend the holding's average down to `target` (a reachable bounce
     level). Returns (qty, new_avg); qty is 0 if cur ≥ target (can't average down by buying higher)."""
