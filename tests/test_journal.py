@@ -303,16 +303,24 @@ def test_age_survives_restart_that_resets_placement(j):
     assert o2.placement_observed is True          # locked from session 1
 
 
-def test_reload_restamp_cannot_fabricate_a_known_age(j):
-    """Regression for the observed live behaviour: an order first seen part-filled (its earlier life
-    missed) must stay a lower bound even when a reload later re-stamps it observed=true, placedAt=now."""
+def test_fresh_order_that_partfilled_before_first_sight_is_observed(j):
+    """Regression: a just-placed BUY can start filling before the first `go`. Its placement was still
+    witnessed, so it must read as a known age — not "true age unconfirmed" — despite filled>0."""
+    now = 100 * _HOUR_MS
+    o = _offer(started_ms=now, observed=True, is_buy=True, qty=4000, price=273, filled=661)
+    j.remember_offer_ages([o], now)
+    assert o.placement_observed is True and o.started_ms == now
+
+
+def test_reload_preserves_age_even_if_it_restamps_placedat(j):
+    """The real guarantee: whatever the plugin claims after a reload, the earliest placement we ever
+    recorded wins, so age keeps growing and stale/slow keep firing."""
     t0 = 40 * _HOUR_MS
-    j.remember_offer_ages([_offer(started_ms=t0, observed=False, filled=30)], t0)  # first sight: mid-fill
+    j.remember_offer_ages([_offer(started_ms=t0, observed=False, filled=30)], t0)  # first sight, mid-fill
     later = t0 + 3 * _HOUR_MS
-    o2 = _offer(started_ms=later, observed=True, filled=30)                         # reload lies: observed=true, now
+    o2 = _offer(started_ms=later, observed=True, filled=30)                         # reload re-stamps placedAt
     j.remember_offer_ages([o2], later)
-    assert o2.started_ms == t0                     # earliest kept
-    assert o2.placement_observed is False          # NOT upgraded by the reload's false claim
+    assert o2.started_ms == t0                     # earliest kept — age is 3h, not reset to 0
 
 
 def test_never_witnessed_keeps_earliest_first_seen_as_lower_bound(j):

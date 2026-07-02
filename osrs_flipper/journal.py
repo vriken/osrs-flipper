@@ -339,31 +339,32 @@ class Journal:
         """Make an open offer's age durable across a RuneLite/plugin restart — mutates each Offer.
 
         On a client restart the Flip Exporter plugin re-discovers the still-open offers and re-stamps
-        them with placedAt=load-time AND placementObserved=true (verified against a live snapshot) —
-        so BOTH fields are worthless across sessions and every offer collapses to age ~0, losing the
-        stale/slow flags. The CLI is the only place that can remember when it first saw an order, so
-        we persist that here, keyed on the GE slot+item (which the offer holds across a relog).
+        them with placedAt=load-time (verified against a live snapshot), so age collapses to ~0 and
+        the stale/slow flags vanish. The CLI is the only place that can remember when it first saw an
+        order, so we persist that here, keyed on the GE slot+item (which the offer holds across a
+        relog). Age is the thing that matters: the stale/slow verdicts fire on elapsed-vs-eta
+        regardless of `observed`, so preserving the earliest placement we've seen is the real fix.
 
         Identity uses the offer's terms + fill count (see `_same_open_offer`), not the plugin uuid —
         so a reloaded order is recognised and keeps the EARLIEST time we ever recorded it (age keeps
-        growing), while a genuinely new listing in the slot starts fresh. `observed` (do we know the
-        true age vs a lower bound) is locked when the row is first created — only trusted then, and
-        only if we caught the order unfilled — never upgraded by a reload's re-stamp. The rare
-        exact-identical re-list (same item/slot/side/qty/price, 0 filled) inherits the prior age;
-        harmless, it can only flag a touch early. Idempotent."""
+        growing), while a genuinely new listing in the slot (terms changed, or fill count reset) starts
+        fresh. `observed` (do we know the true age, vs only a ≥ lower bound) trusts the plugin's flag:
+        it's set for orders it witnessed being placed, and can recover if our first glimpse missed it
+        (e.g. a buy that part-filled before the first `go` — the flag is honoured even at filled>0).
+        A reload can't fabricate a younger age because the earliest placed_at is always kept.
+        The rare exact-identical re-list (same item/slot/side/qty/price, 0 filled) inherits the prior
+        age; harmless, it can only flag a touch early. Idempotent."""
         for o in offers:
             cur_ts = o.started_ms if o.started_ms > 0 else now_ms
+            witnessed = bool(o.placement_observed and o.started_ms > 0)
             row = self.con.execute(
                 "SELECT placed_at, observed, is_buy, qty, price, filled FROM offer_seen "
                 "WHERE slot=? AND item_id=?", [o.slot, o.item_id]).fetchone()
             if row and self._same_open_offer(row, o):
-                placed_at = min(row[0], cur_ts)    # earliest wins → a reload's fresh stamp can't reset it
-                observed = bool(row[1])            # locked at first sight; ignore the reload's claim
-            else:                                   # new order in this slot (or first ever sight)
-                placed_at = cur_ts
-                # trust a real placement only when we catch it unfilled — a reload re-stamp of a
-                # part-filled order also claims observed, so gate on filled==0 to not believe it.
-                observed = bool(o.placement_observed and o.started_ms > 0 and o.filled == 0)
+                placed_at = min(row[0], cur_ts)     # earliest wins → a reload's fresh stamp can't reset age
+                observed = bool(row[1]) or witnessed  # stays known; recovers if the first glimpse missed it
+            else:                                    # new order in this slot (or first ever sight)
+                placed_at, observed = cur_ts, witnessed
             self.con.execute("INSERT OR REPLACE INTO offer_seen VALUES (?,?,?,?,?,?,?,?)",
                              [o.slot, o.item_id, placed_at, observed, o.is_buy, o.qty, o.price, o.filled])
             o.started_ms, o.placement_observed = placed_at, observed
