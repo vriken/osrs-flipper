@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS manual_fills (
     ts BIGINT, item_id INTEGER, name TEXT, is_buy BOOLEAN, qty BIGINT, price BIGINT
 );
 CREATE TABLE IF NOT EXISTS offer_progress (uuid TEXT PRIMARY KEY, accounted_qty BIGINT);
+CREATE TABLE IF NOT EXISTS offer_seen (
+    slot INTEGER, item_id INTEGER, placed_at BIGINT, observed BOOLEAN,
+    is_buy BOOLEAN, qty BIGINT, price BIGINT, filled BIGINT,
+    PRIMARY KEY (slot, item_id)
+);
 CREATE TABLE IF NOT EXISTS attempts (
     attempt_id TEXT PRIMARY KEY, ts BIGINT, item_id INTEGER, name TEXT, side TEXT,
     qty BIGINT, limit_px BIGINT, horizon_h DOUBLE,
@@ -318,6 +323,50 @@ class Journal:
             self.con.execute("INSERT OR REPLACE INTO offer_progress VALUES (?,?)", [f.uuid, f.qty])
         self.con.execute("INSERT OR REPLACE INTO meta VALUES ('fill_acct_v2', 1)")
         return True
+
+    @staticmethod
+    def _same_open_offer(row, o) -> bool:
+        """Is the live offer `o` the SAME order as the remembered `row` for its slot+item — i.e. did
+        it survive a restart, rather than being a new listing that reused the slot? The plugin's
+        placedAt/placementObserved/uuid all reset on reload, so identity rests on what does NOT:
+        the offer's terms (side, total qty, listed price) plus its filled count, which only ever
+        grows for one order. Same terms with filled not gone backwards ⇒ same offer."""
+        _pa, _obs, is_buy, qty, price, filled = row
+        return (bool(is_buy) == o.is_buy and qty == o.qty and price == o.price
+                and o.filled >= filled)
+
+    def remember_offer_ages(self, offers, now_ms: int) -> None:
+        """Make an open offer's age durable across a RuneLite/plugin restart — mutates each Offer.
+
+        On a client restart the Flip Exporter plugin re-discovers the still-open offers and re-stamps
+        them with placedAt=load-time AND placementObserved=true (verified against a live snapshot) —
+        so BOTH fields are worthless across sessions and every offer collapses to age ~0, losing the
+        stale/slow flags. The CLI is the only place that can remember when it first saw an order, so
+        we persist that here, keyed on the GE slot+item (which the offer holds across a relog).
+
+        Identity uses the offer's terms + fill count (see `_same_open_offer`), not the plugin uuid —
+        so a reloaded order is recognised and keeps the EARLIEST time we ever recorded it (age keeps
+        growing), while a genuinely new listing in the slot starts fresh. `observed` (do we know the
+        true age vs a lower bound) is locked when the row is first created — only trusted then, and
+        only if we caught the order unfilled — never upgraded by a reload's re-stamp. The rare
+        exact-identical re-list (same item/slot/side/qty/price, 0 filled) inherits the prior age;
+        harmless, it can only flag a touch early. Idempotent."""
+        for o in offers:
+            cur_ts = o.started_ms if o.started_ms > 0 else now_ms
+            row = self.con.execute(
+                "SELECT placed_at, observed, is_buy, qty, price, filled FROM offer_seen "
+                "WHERE slot=? AND item_id=?", [o.slot, o.item_id]).fetchone()
+            if row and self._same_open_offer(row, o):
+                placed_at = min(row[0], cur_ts)    # earliest wins → a reload's fresh stamp can't reset it
+                observed = bool(row[1])            # locked at first sight; ignore the reload's claim
+            else:                                   # new order in this slot (or first ever sight)
+                placed_at = cur_ts
+                # trust a real placement only when we catch it unfilled — a reload re-stamp of a
+                # part-filled order also claims observed, so gate on filled==0 to not believe it.
+                observed = bool(o.placement_observed and o.started_ms > 0 and o.filled == 0)
+            self.con.execute("INSERT OR REPLACE INTO offer_seen VALUES (?,?,?,?,?,?,?,?)",
+                             [o.slot, o.item_id, placed_at, observed, o.is_buy, o.qty, o.price, o.filled])
+            o.started_ms, o.placement_observed = placed_at, observed
 
     def units_bought_since(self, since_ts: int) -> dict[int, int]:
         """Units bought per item since `since_ts` (for buy-limit tracking)."""
