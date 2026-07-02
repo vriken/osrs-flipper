@@ -79,6 +79,9 @@ class Terminal:
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
         self._alert_stop = threading.Event()
         self._alert_thread: threading.Thread | None = None
+        # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
+        self._cut_bounce: dict[int, bool | None] = {}
+        self._cut_better: bool | None = None
 
     # --- data helpers --------------------------------------------------------
     def mapping(self) -> dict[str, dict]:
@@ -494,6 +497,7 @@ class Terminal:
         action. Runway-aware: by day → patient cyclable flips; near bedtime/overnight → big
         cushioned buys safe to leave (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
+        self._cut_bounce, self._cut_better = {}, None  # fresh per-invocation cut-policy caches
         hour = datetime.now().hour
         coins, tied = self._sync_cash()  # live coins on hand + gold tied up in open offers
         cash = int(self.j.cash()) or config.BANKROLL
@@ -536,7 +540,10 @@ class Terminal:
             for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
                 hint = ""
                 if v in ("margin", "stale", "slow"):
-                    v, hint = self._refine_verdict(o, v)
+                    # for a SELL, make the re-price advice cost-aware so we never tell you to chase
+                    # the market below your break-even (a loss) unless a cut is actually justified.
+                    kw = self._sell_cut_context(o, cash) if not o.is_buy else {}
+                    v, hint = self._refine_verdict(o, v, **kw)
                 text, c = _VERDICTS[v]
                 eta_s = f"{eta_h:.1f}h" if eta_h < 100 else "—"
                 if elapsed_h is None:
@@ -656,7 +663,7 @@ class Terminal:
             return alert.color(f"       ↩ {str(row['name'])[:18]}: bounce likely — week median "
                                f"{a['median']:,.0f} ({up:+.0f}% up), z={a['z']:+.1f} → {tail}", "green")
         return alert.color(f"       ✂ {str(row['name'])[:18]}: no bounce signal "
-                           "(re-rating/downtrend) — sell or break-even hold", "yellow")
+                           "(re-rating/downtrend) — hold at break-even; cut only if a better flip is ready", "yellow")
 
     @staticmethod
     def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
@@ -687,12 +694,18 @@ class Terminal:
         return "idle — set cash with `bank <gp>`, or `scan` for ideas"
 
     @staticmethod
-    def _refine_verdict(o, verdict: str) -> tuple[str, str]:
+    def _refine_verdict(o, verdict: str, *, avg_cost: float | None = None,
+                        bounce_likely: bool | None = None, better_flip: bool | None = None) -> tuple[str, str]:
         """Consult fresh prices on a flagged offer so the advice is actionable, not churn:
           - priced right, just slow   → downgrade to on-track (no pointless cancel/re-list)
           - genuinely mispriced        → keep the flag, show the price to move to
           - no profitable spread (buy) → keep the flag, say cancel & redeploy
-        Returns (possibly-downgraded verdict, indented hint line)."""
+        Returns (possibly-downgraded verdict, indented hint line).
+
+        For a SELL, `avg_cost` (your cost basis) makes the advice loss-aware: when the market has
+        fallen below your break-even, we don't chase it down — we hold at break-even — UNLESS a cut
+        is justified (`recovery.cut_below_cost`: no near-term bounce AND a better flip to redeploy
+        into). `bounce_likely`/`better_flip` carry those signals from the caller."""
         # RuneLite reports the offer price as 0 until it starts filling — for an unfilled offer
         # we genuinely don't know your price, so we can't say it's mispriced, only show the market.
         known = o.price > 0
@@ -726,7 +739,75 @@ class Terminal:
             return "slow", alert.color(f"         → market ask ~{ask:,} (5m avg) — fine if you're listed ≤ {ask:,}", "yellow")
         if o.price <= ask + ask * config.REPRICE_DEADBAND:
             return "ontrack", alert.color(f"         → listed {o.price:,} ≈ market ~{ask:,} (5m avg) — priced to sell, just slow; hold", "green")
+        # you're above market. If re-listing at the market would sell BELOW your break-even, don't
+        # chase down into a loss: hold at break-even, unless a cut is genuinely justified.
+        if avg_cost and avg_cost > 0:
+            from .recovery import cut_below_cost
+            from .tax import breakeven_sell
+            be = breakeven_sell(avg_cost, item_id=o.item_id)
+            if ask < be:
+                if cut_below_cost(True, bounce_likely, better_flip):
+                    loss = int(round((be - ask) * max(1, o.qty - o.filled)))
+                    return verdict, alert.color(f"         → market ~{ask:,} < your break-even {be:,}; no bounce + a better "
+                                                f"flip is ready → cut & redeploy (~{loss:,} loss)", "bold")
+                return "ontrack", alert.color(f"         → market ~{ask:,} is below your break-even {be:,} — "
+                                              "hold at break-even; don't sell into the dip", "green")
         return verdict, alert.color(f"         → re-list nearer {ask:,} (5m avg) — you're above market", "bold")
+
+    def _sell_cut_context(self, o, cash: int) -> dict:
+        """Cost-basis + cut-policy signals for a flagged SELL, so `_refine_verdict` won't advise
+        re-listing below break-even unless a cut is justified. Cheap by default: the recovery read
+        and opportunity scan run only when the holding is actually underwater at the live bid."""
+        pos = self.j.position(o.item_id)
+        if not pos or pos.avg_cost <= 0:
+            return {}
+        ctx: dict = {"avg_cost": pos.avg_cost}
+        from .tax import post_tax_received
+        bid = (self.latest().get(o.item_id) or {}).get("low")
+        if bid and post_tax_received(int(bid), item_id=o.item_id) < pos.avg_cost:  # a loss is on the table
+            ctx["bounce_likely"] = self._bounce_likely(o.item_id, pos.avg_cost, int(bid))
+            ctx["better_flip"] = self._better_flip(cash)
+        return ctx
+
+    def _bounce_likely(self, item_id: int, avg_cost: float, bid: int) -> bool | None:
+        """Does the past-week read expect a near-term bounce for this underwater holding? None if it
+        can't be judged (too little history). Cached per `go` to avoid a repeat /timeseries fetch."""
+        if item_id in self._cut_bounce:
+            return self._cut_bounce[item_id]
+        from . import recovery
+        from .tax import post_tax_received
+        val: bool | None = None
+        try:
+            a = recovery.assess_recovery(avg_cost, post_tax_received(int(bid), item_id=item_id),
+                                         recovery.week_mids(api.timeseries(item_id, "1h")))
+            if a is not None:
+                val = bool(a["recover"])
+        except Exception:  # noqa: BLE001 — best-effort; unknown → treated as "not a clear bounce"
+            val = None
+        self._cut_bounce[item_id] = val
+        return val
+
+    def _better_flip(self, cash: int) -> bool:
+        """Is a materially better flip available to redeploy freed capital into ASAP? True when the
+        best affordable balanced-scan candidate fills within CUT_ALT_MAX_ETA_H at ≥ CUT_ALT_MIN_ROI_H
+        ROI/hour. Cached per `go` (one scan) since it's identical for every underwater holding."""
+        if self._cut_better is not None:
+            return self._cut_better
+        res = False
+        try:
+            df = scanner.scan(mode="balanced", bankroll=max(1, cash), top=5, limit_used=self._limit_used(),
+                              fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
+            for _, r in df.iterrows():
+                eta = float(r.get("fill_eta_h") or 0)
+                roi = float(r.get("margin_pct") or 0)
+                if 0 < eta <= config.CUT_ALT_MAX_ETA_H \
+                        and scanner.roi_per_hour(roi, eta, config.MIN_FILL_ETA_H) >= config.CUT_ALT_MIN_ROI_H:
+                    res = True
+                    break
+        except Exception:  # noqa: BLE001 — best-effort; unknown → no better flip (safe: bias to hold)
+            res = False
+        self._cut_better = res
+        return res
 
     # --- background Discord alerts -------------------------------------------
     def _alerts_running(self) -> bool:

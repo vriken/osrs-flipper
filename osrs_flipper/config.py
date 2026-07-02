@@ -292,6 +292,13 @@ REPRICE_DEADBAND = float(os.environ.get("OSRS_FLIPPER_REPRICE_DEADBAND", 0.02)) 
 # divergence at which we fully trust the last tick (a real move this big isn't noise).
 REPRICE_BIG_MOVE = float(os.environ.get("OSRS_FLIPPER_REPRICE_BIG_MOVE", 0.08))  # 8%
 
+# When a held SELL has fallen below your break-even, we hold at break-even rather than chase the
+# market down into a loss — UNLESS the loss is worth taking: no near-term bounce AND a better home
+# for the freed capital exists right now. "Better home" = a scanned flip that fills within
+# CUT_ALT_MAX_ETA_H and clears CUT_ALT_MIN_ROI_H ROI/hour. Conservative so a cut is the exception.
+CUT_ALT_MAX_ETA_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MAX_ETA_H", 1.0))    # "asap" = fills ≤ 1h
+CUT_ALT_MIN_ROI_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MIN_ROI_H", 0.03))   # ≥3% ROI per hour
+
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
 # Background attention monitor: how often to poll RuneLite for offers that need you

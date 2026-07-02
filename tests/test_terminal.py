@@ -87,6 +87,47 @@ def test_refine_sell_above_market_says_relist_lower(monkeypatch):
     assert v == "stale" and "re-list" in hint
 
 
+def _uw_sell(monkeypatch, ask=50):
+    # a SELL listed well above a market that has collapsed to `ask` (5m avg), so it's flagged AND
+    # re-listing at market would be below a high cost basis → the below-break-even path.
+    monkeypatch.setattr(term_mod.api, "five_min", lambda: {561: {"avgHighPrice": ask}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
+    return Offer(slot=0, item_id=561, is_buy=False, state="SELLING", qty=100, price=200)
+
+
+def test_refine_sell_below_cost_holds_at_breakeven_by_default(monkeypatch):
+    # market below your break-even, no cut signals → hold at break-even, never chase down into a loss
+    o = _uw_sell(monkeypatch)
+    v, hint = Terminal._refine_verdict(o, "stale", avg_cost=100)
+    assert v == "ontrack" and "hold at break-even" in hint and "re-list nearer" not in hint
+
+
+def test_refine_sell_below_cost_cuts_when_no_bounce_and_better_flip(monkeypatch):
+    # the only case a below-cost sell is advised: no near-term bounce AND a better flip is ready
+    o = _uw_sell(monkeypatch)
+    v, hint = Terminal._refine_verdict(o, "stale", avg_cost=100, bounce_likely=False, better_flip=True)
+    assert "cut & redeploy" in hint
+
+
+def test_refine_sell_below_cost_holds_when_bounce_likely(monkeypatch):
+    o = _uw_sell(monkeypatch)
+    v, hint = Terminal._refine_verdict(o, "stale", avg_cost=100, bounce_likely=True, better_flip=True)
+    assert v == "ontrack" and "hold at break-even" in hint
+
+
+def test_refine_sell_below_cost_holds_when_no_better_flip(monkeypatch):
+    o = _uw_sell(monkeypatch)
+    v, hint = Terminal._refine_verdict(o, "stale", avg_cost=100, bounce_likely=False, better_flip=False)
+    assert v == "ontrack" and "hold at break-even" in hint
+
+
+def test_refine_sell_above_cost_still_relists_normally(monkeypatch):
+    # market above your (low) break-even → re-listing there is no loss, so the normal advice stands
+    o = _uw_sell(monkeypatch)
+    v, hint = Terminal._refine_verdict(o, "stale", avg_cost=5, bounce_likely=False, better_flip=True)
+    assert v == "stale" and "re-list nearer" in hint
+
+
 def test_refine_sell_reacts_to_a_sharp_drop_via_the_tick_blend(monkeypatch):
     # 5m avg still 100 but the last tick has crashed to 60 (40% > 8% big-move) → the blend trusts
     # the tick, so a sell listed at 100 is now well above market → re-list (not smoothed away).
