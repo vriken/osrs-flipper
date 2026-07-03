@@ -424,6 +424,10 @@ class Terminal:
             ask = (lat.get(o.item_id) or {}).get("high")
             if not ask or not o.price:
                 continue
+            if ask >= config.GEAR_MIN_PRICE:
+                continue  # patient big-ticket buy (gear / expensive set piece): posted at the full
+                          # spread to sit and fill over hours, so its fast-flip ROI/hour is meant to
+                          # be low — don't tell the user to cancel the gear/set `go` just recommended
             roi = (post_tax_received(int(ask), item_id=o.item_id) - o.price) / o.price
             v = hr.get(o.item_id, {})
             lowv, highv = v.get("lowPriceVolume") or 0, v.get("highPriceVolume") or 0
