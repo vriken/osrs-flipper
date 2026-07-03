@@ -14,6 +14,7 @@ Daily
 
 Occasional
   scan [n] [online|offline|balanced]   ranked live flips (raw, unallocated)
+  sets [n] [roi] [all]     GE set arbitrage: buy pieces→sell set (or reverse), net of tax
   port [free_slots]        recommended allocation across your free slots
   sellquote <item> [qty]   sell-price tradeoff for held stock (fill time vs profit)
   anomaly                  market-wide price dislocations on abnormal volume
@@ -1180,6 +1181,68 @@ class Terminal:
         print("  qty = affordable × volume-realizable over ~8h; post at the bid/ask and leave it. "
               "Slow to fill — don't expect day-flip turnover.")
 
+    def cmd_sets(self, args: list[str]) -> None:
+        """GE set arbitrage: buy the pieces and sell the combined set (ASSEMBLE), or buy the set and sell
+        the pieces (BREAK) — whichever nets more after tax. Combining/breaking at the GE set clerk is free
+        and instant, so this is pure price arbitrage; no skill needed. Priced patiently like `gear` (full
+        spread β=0, 6h staleness) because sets are big-ticket / low-frequency, and OPTIMISTIC by design —
+        it assumes you fill AT the bid/ask. Every leg must be liquid and pass the pump/knife check.
+          sets [n] [roi] [all]   n rows (default 15) · `roi` ranks by ROI% · `all` = aspirational (ignore
+          cash, include unprofitable, ignore your buy-limit room)."""
+        from . import anomaly, combinations, combos
+        cash = int(self.j.cash()) or config.BANKROLL
+        show_all = "all" in args
+        by_roi = "roi" in args
+        n = next((int(a) for a in args if a.isdigit()), 15)
+        lat, hr, mp = api.latest(), api.one_hour(), api.mapping()
+        scan_cash = 1 << 62 if show_all else cash  # aspirational view: don't let capital bind sizing
+        rows = combos.scan_combinations(
+            combinations.load("set"), lat, hr, mp,
+            cash=scan_cash, limit_used=None if show_all else self._limit_used(),
+            beta=config.COMBO_BETA, staleness_max=config.PATIENT_STALENESS_S,
+            members=config.MEMBERS, keep_unprofitable=show_all)
+        rows = [r for r in rows if show_all or r["roi"] >= config.COMBO_MIN_ROI]
+        if not rows:
+            print("  no set arbitrage clears tax + the full spread right now — set/piece prices are in "
+                  "line. These gaps open and close; check back later. (`sets all` shows the aspirational list.)")
+            return
+        if by_roi:
+            rows.sort(key=lambda r: r["roi"], reverse=True)
+        # pump/knife gate on the legs you'd BUY — same check `gear`/`go` use — until n rows survive
+        kept, pumped = [], 0
+        for r in rows:
+            if len(kept) >= n:
+                break
+            if config.COMBO_ANOMALY_CHECK and not show_all and not all(
+                anomaly.is_buyable(anomaly.assess(int(iid), lat, hr, api.timeseries, long=True))
+                for iid in r["bought_ids"]):
+                pumped += 1
+                continue
+            kept.append(r)
+        if not kept:
+            print("  every set arbitrage has a dislocated leg right now (pump / falling knife) — nothing "
+                  "safe to work. These revert; check back later.")
+            return
+        tag = "aspirational (ignores cash)" if show_all else f"affordable with cash {cash:,}"
+        rank = "ROI%" if by_roi else "total gp"
+        print(f"  COMBINATIONS · sets · full spread (β={config.COMBO_BETA:g}, tax netted) · {tag} · by {rank}"
+              f"  ⚠ best-case: assumes you fill AT the bid/ask")
+        print(f"  {'set':24}{'dir':>9}{'cost':>13}{'sell':>13}{'net/conv':>11}{'roi':>6}{'conv':>6}{'gp':>12}  fill")
+        for r in kept:
+            eta = r["fill_eta_h"]
+            fill = f"{eta:.1f}h" if eta and eta < 100 else "—"
+            conv = r["conversions"]
+            flag = "" if not show_all or conv >= 1 else " ⟵ need cash"
+            print(f"  {str(r['name'])[:24]:24}{r['direction']:>9}{int(r['cost_per_conv']):>13,}"
+                  f"{int(r['proceeds_per_conv']):>13,}{int(r['profit_per_conv']):>+11,}"
+                  f"{r['roi'] * 100:>5.1f}%{conv:>6}{int(r['total_gp']):>12,}  {fill}{flag}")
+        if pumped:
+            print(f"  ({pumped} set(s) skipped — a leg is price-dislocated / falling; likely manipulated)")
+        print("  ASSEMBLE = buy pieces → sell set (tax the set once); BREAK = buy set → sell pieces (tax "
+              "each piece). Combine/break is free & instant at the GE set clerk.")
+        print("  net/conv = gp kept per set after tax · conv = affordable × buy-limit-bound × "
+              "volume-realizable · this is many buys + a sell, so it's slot- & click-heavy vs a single flip.")
+
     def cmd_audit(self, args: list[str]) -> None:
         """Full reconciliation from the authoritative sources — RuneLite's complete buy/sell history
         (the trades file) + your live bag. Per item: total bought, total sold, history net, what you
@@ -1403,6 +1466,7 @@ class Terminal:
             "overnight": lambda a: self.cmd_overnight(a), "gear": lambda a: self.cmd_gear(a),
             # occasional
             "scan": lambda a: self.cmd_scan(a), "port": lambda a: self.cmd_port(a),
+            "sets": lambda a: self.cmd_sets(a),
             "sellquote": lambda a: self.cmd_sellquote(a), "anomaly": lambda a: self.cmd_anomaly(a),
             "pnl": lambda a: self.cmd_pnl(), "progress": lambda a: self.cmd_progress(a),
             "pos": lambda a: self.cmd_pos(), "inv": lambda a: self.cmd_inventory(a),

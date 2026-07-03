@@ -186,6 +186,15 @@ PATIENT_STALENESS_S = int(os.environ.get("OSRS_FLIPPER_PATIENT_STALENESS_S", 216
 # quiet leg, not a gear flip, and belongs in `scan`.
 GEAR_MIN_PRICE = int(os.environ.get("OSRS_FLIPPER_GEAR_MIN_PRICE", 50_000))
 
+# --- Combinations: GE sets & (Phase 2) skilling recipes (see combos.py) ------
+# Sets are big-ticket / low-frequency like `gear`, so they're priced patiently: full spread (β=0) and
+# the relaxed 6h staleness gate (PATIENT_STALENESS_S) so thin set pieces aren't ghost-gated out. β=0 is
+# best-case (assumes you fill AT the bid/ask) — captioned as such, same as `gear`.
+COMBO_BETA = float(os.environ.get("OSRS_FLIPPER_COMBO_BETA", PATIENT_BETA))
+COMBO_MIN_ROI = float(os.environ.get("OSRS_FLIPPER_COMBO_MIN_ROI", 0.0))  # hide sub-noise combos below this ROI
+COMBO_ANOMALY_CHECK = os.environ.get("OSRS_FLIPPER_COMBO_ANOMALY_CHECK", "1") == "1"  # pump/knife gate on bought legs
+COMBO_ANOMALY_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_COMBO_ANOMALY_CANDIDATES", 30))  # deep-check cap
+
 # --- Account type ------------------------------------------------------------
 # Members account (bond redeemed): full market + 8 GE slots. Set OSRS_FLIPPER_MEMBERS=0
 # to simulate F2P (non-members items only, 3 slots) — e.g. for testing the F2P path.
