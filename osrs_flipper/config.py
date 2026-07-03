@@ -194,6 +194,10 @@ COMBO_BETA = float(os.environ.get("OSRS_FLIPPER_COMBO_BETA", PATIENT_BETA))
 COMBO_MIN_ROI = float(os.environ.get("OSRS_FLIPPER_COMBO_MIN_ROI", 0.0))  # hide sub-noise combos below this ROI
 COMBO_ANOMALY_CHECK = os.environ.get("OSRS_FLIPPER_COMBO_ANOMALY_CHECK", "1") == "1"  # pump/knife gate on bought legs
 COMBO_ANOMALY_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_COMBO_ANOMALY_CANDIDATES", 30))  # deep-check cap
+# `go` ranks fast flips (calibrated, honest) against gear/sets (β=0, best-case) on one per-slot scale.
+# Best-case EV is haircut by this confidence before ranking, so an optimistic set can't crowd out an
+# honestly-priced flip — a patient play wins a slot only when it beats a flip even after the discount.
+PATIENT_EV_CONFIDENCE = float(os.environ.get("OSRS_FLIPPER_PATIENT_EV_CONFIDENCE", 0.55))
 
 # --- Account type ------------------------------------------------------------
 # Members account (bond redeemed): full market + 8 GE slots. Set OSRS_FLIPPER_MEMBERS=0

@@ -3,7 +3,9 @@
     osrs-flipper trade
 
 ★ go  (or just press Enter)  does everything: imports fills, reconciles to your bag, recalibrates,
-      then shows your offers + verdicts, what to sell, what to buy, and the next action. Daily driver.
+      then shows your offers + verdicts, what to sell, and the single best use of your free slots —
+      ranking fast flips, patient gear, and GE sets on one scale (best-case gear/set EV haircut so it
+      stays honest), tuned to the time you have. Daily driver.
 
 Daily
   go                       the one command (above)
@@ -493,10 +495,12 @@ class Terminal:
         return "  active orders: " + ", ".join(parts) if parts else ""
 
     def cmd_go(self, args: list[str]) -> None:
-        """THE one command — everything on one screen so you don't juggle review/port/pos/brief:
-        active offers + verdicts, what to sell, what to buy with free slots, and a single NEXT
-        action. Runway-aware: by day → patient cyclable flips; near bedtime/overnight → big
-        cushioned buys safe to leave (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
+        """THE one command — everything on one screen so you don't juggle review/port/pos/brief/gear/sets:
+        active offers + verdicts, what to sell, and the best use of your free slots, and a single NEXT
+        action. The buy plan ranks fast flips + gear + sets on one per-slot currency (best-case gear/set
+        EV haircut by PATIENT_EV_CONFIDENCE so it can't crowd out an honest flip). Runway-aware: by day
+        flips cycle and dominate; near bedtime/overnight everything fills once so patient gear/sets rise
+        (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         self._cut_bounce, self._cut_better = {}, None  # fresh per-invocation cut-policy caches
         hour = datetime.now().hour
@@ -579,31 +583,17 @@ class Terminal:
             for r in holds:
                 print(self._recovery_note(r, rec[r["item_id"]]))
 
-        picks: list[dict] = []  # BUY plan for free slots (the old `port` / `overnight`)
+        picks: list[dict] = []  # unified BUY plan for free slots: fast flips + gear + sets
         # reserve a slot for each pending sell listing — a sell occupies a GE slot too, so buys
         # can't claim every free slot or you'd have nowhere to list what you're holding. Bounce-holds
         # don't count: they stay in your bag, not the GE.
         buy_slots = max(0, free - len(to_sell))
-        if buy_slots > 0 and daytime:
+        if buy_slots > 0:
             if to_sell:
                 print(f"  ({len(to_sell)} slot(s) reserved for the sell listing(s) above)")
-            exclude = [h.item_id for h in held] + [o.item_id for o in offers]
-            fcal = self._fill_cal()
-            picks, idle, floor = scanner.build_portfolio(bankroll=cash, held_ids=exclude,
-                                                         free_slots=buy_slots, limit_used=self._limit_used(),
-                                                         net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta())
-            src = "live" if (offers or coins is not None) else "assumed"
-            print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=src))
-            if fcal.get("global_measured") is not None:
-                print(f"  (auto-calibrated from {fcal['n']} attempts: β {self._beta():.2f} · "
-                      f"fill ×{fcal['global']:.2f} — applied to prices, gp & ranking)")
-            self._explain_picks(picks)  # one-line "why" for each buy you're about to place
-            if idle > floor:  # cash held back rather than fragmented into slot-unworthy flips
-                tail = f"; consolidating with the {tied:,} in your offers" if tied else ""
-                print(alert.color(f"  holding {idle:,.0f} idle — below the ~{floor:,} gp slot-worth bar "
-                                  f"(a slot's opportunity cost at your net worth){tail}", "yellow"))
-        elif buy_slots > 0:
-            self._overnight_plan(cash)
+            lat, hr, mp = api.latest(), api.one_hour(), api.mapping()  # one fetch, shared by all sources
+            picks = self._plan_buys(cash, held, offers, buy_slots, net_worth, daytime,
+                                    hours_until_sleep, lat, hr, mp)
 
         print("  " + alert.color("NEXT: " + self._next_action(refined, to_sell, free, picks), "bold"))
 
@@ -622,6 +612,140 @@ class Terminal:
                 shown += 1
             except Exception:  # noqa: BLE001 — explanation is best-effort, never fatal
                 pass
+
+    # --- unified buy plan: fast flips + gear + sets, ranked on one per-slot currency --------------
+    @staticmethod
+    def _flip_window_gp(pick: dict, hours: float) -> float:
+        """Expected gp a fast flip earns over the available window `hours`. Active flips CYCLE
+        (throughput = per-cycle gp × cycles that fit the window); an accumulation `hold` fills once."""
+        gp = float(pick.get("gp", 0.0))
+        if pick.get("tier") == "hold":
+            return gp
+        eta = pick.get("buy_eta_h")
+        cycle_h = max(config.MIN_FILL_ETA_H, 2.0 * eta) if (eta and eta < 100) else max(config.MIN_FILL_ETA_H, hours)
+        return gp * max(1.0, hours / cycle_h)
+
+    def _gear_rows(self, lat: dict, hr: dict, mp: list, cash: int, limit_used: dict):
+        """Big-ticket / low-frequency 'gear' rows at the full patient spread (β=0). The shared filter
+        for `gear` and `go` — build_features with the patient beta/staleness, then the gear gate."""
+        from .features import build_features
+        df = build_features(lat, hr, mp, bankroll=cash, limit_used=limit_used,
+                            beta=config.PATIENT_BETA, staleness_max=config.PATIENT_STALENESS_S)
+        if df.empty:
+            return df
+        if not config.MEMBERS:
+            df = df[~df["members"]]
+        return df[(df["buy_px"] >= config.GEAR_MIN_PRICE) & (df["vol_1h_binding"] < config.V_MIN_1H)
+                  & (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & df["tradeable"]
+                  & (df["hold_units"] > 0) & (df["margin_abs"] > 0) & ~df["suspect"]].copy()
+
+    def _plan_buys(self, cash: int, held: list, offers: list, buy_slots: int, net_worth: int,
+                   daytime: bool, hours: float, lat: dict, hr: dict, mp: list) -> list[dict]:
+        """THE unified buy recommendation: gather fast-flip, gear, and set candidates, rank them on one
+        per-slot currency (expected gp over the window you have, best-case gear/set EV haircut so it
+        can't crowd out an honest flip), print the merged plan, and return the chosen picks. Fast flips
+        cycle (throughput); gear/sets fill once — so daytime favours flips, overnight lets patient plays
+        win the slots. `_next_action` reads the returned picks."""
+        from . import anomaly, combinations, combos, planner
+        limit_used = self._limit_used()
+        exclude_ids = {h.item_id for h in held} | {o.item_id for o in offers}
+        cands: list[planner.Candidate] = []
+        fcal: dict = {}
+        # fair-share capital per slot — every candidate is sized to ONE slot's share (a set to N shares),
+        # so a gear/set buy can't win by monopolising the whole pile against fair-shared flips.
+        fair = max(1, cash // max(1, buy_slots))
+
+        # fast flips: daytime = cyclable balanced flips (throughput); overnight = one-shot cushioned buys
+        if daytime:
+            fcal = self._fill_cal()
+            picks, _idle, _floor = scanner.build_portfolio(
+                bankroll=cash, held_ids=list(exclude_ids), free_slots=buy_slots, limit_used=limit_used,
+                net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta())
+            for p in picks:
+                cands.append(planner.Candidate(kind="flip", key=str(p["name"]), slots=1,
+                    window_gp=self._flip_window_gp(p, hours), patient=False,
+                    item_ids=(int(p["item_id"]),), fill_eta_h=p.get("buy_eta_h"),
+                    payload={"buy": p.get("buy_px"), "sell": p.get("sell_px"), "qty": p.get("qty"),
+                             "gp": p.get("gp"), "item_id": int(p["item_id"])}))
+        else:
+            for r in self._overnight_rows(cash, buy_slots, exclude_ids):
+                cands.append(planner.Candidate(kind="flip", key=str(r["name"]), slots=1,
+                    window_gp=float(r["profit"]), patient=False, item_ids=(int(r["item_id"]),),
+                    payload={"buy": r["buy"], "sell": r["sell"], "qty": r["qty"], "gp": r["profit"],
+                             "item_id": int(r["item_id"])}))
+
+        # gear (patient, best-case): one-shot expected profit
+        g = self._gear_rows(lat, hr, mp, cash, limit_used)
+        if not getattr(g, "empty", True):
+            for r in g.to_dict("records"):
+                bpx = int(r["buy_px"]) or 0
+                qty = int(min(fair // bpx, r["hold_units"])) if bpx else 0  # one slot's share of capital
+                if qty <= 0:
+                    continue
+                cands.append(planner.Candidate(kind="gear", key=str(r["name"]), slots=1,
+                    window_gp=float(r["margin_abs"]) * qty, patient=True, item_ids=(int(r["item_id"]),),
+                    fill_eta_h=r.get("fill_eta_h"),
+                    payload={"buy": bpx, "sell": int(r["sell_px"]), "qty": qty,
+                             "gp": int(r["margin_abs"]) * qty, "item_id": int(r["item_id"])}))
+
+        # sets (patient, best-case): one-shot total gp; an ASSEMBLE ties up N buy slots at once
+        for r in combos.scan_combinations(combinations.load("set"), lat, hr, mp, cash=cash,
+                                          limit_used=limit_used, beta=config.COMBO_BETA,
+                                          staleness_max=config.PATIENT_STALENESS_S, members=config.MEMBERS):
+            if r["conversions"] <= 0 or not r["cost_per_conv"]:
+                continue
+            legs = tuple(int(i) for i in r["bought_ids"])
+            budget = fair * len(legs)  # a set occupies N slots → N shares of capital
+            conv = min(int(r["conversions"]), int(budget // r["cost_per_conv"]))
+            if conv <= 0:
+                continue
+            wg = float(r["profit_per_conv"]) * conv
+            cands.append(planner.Candidate(kind="set", key=f"{r['name']} · {r['direction']}",
+                slots=len(legs), window_gp=wg, patient=True, item_ids=legs,
+                fill_eta_h=r.get("fill_eta_h"),
+                payload={"cost": r["cost_per_conv"], "proceeds": r["proceeds_per_conv"],
+                         "conv": conv, "gp": wg}))
+
+        def verify(c: planner.Candidate) -> bool:  # pump/knife gate on the legs you'd BUY (lazy, top picks)
+            if not config.COMBO_ANOMALY_CHECK:
+                return True
+            try:
+                return all(anomaly.is_buyable(anomaly.assess(int(i), lat, hr, api.timeseries, long=True))
+                           for i in c.item_ids)
+            except Exception:  # noqa: BLE001 — API hiccup shouldn't silently drop a pick
+                return True
+
+        chosen = planner.rank(cands, free_slots=buy_slots,
+                              patient_confidence=config.PATIENT_EV_CONFIDENCE,
+                              exclude_ids=exclude_ids, verify=verify)
+        self._print_plan(chosen, buy_slots, daytime, hours, fcal)
+        return [{"name": c.key, "kind": c.kind, "place_at_h": 0} for c in chosen]
+
+    @staticmethod
+    def _print_plan(chosen: list, buy_slots: int, daytime: bool, hours: float, fcal: dict) -> None:
+        """Render the merged buy plan — one ranked line per pick, tagged by type."""
+        regime = "☀️ day — flips cycle" if daytime else "🌙 patient — one fill; gear/sets favoured"
+        if not chosen:
+            print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}: nothing cleared the filters "
+                  "(no flip/gear/set worth a slot right now)")
+            return
+        tags = {"flip": "⚡flip", "gear": "🕰gear", "set": "🧩set"}
+        used = sum(c.slots for c in chosen)
+        print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}  (using {used})")
+        print(f"    {'#':<2}{'type':7}{'trade':32}{'~gp':>12}{'slots':>6}  detail")
+        for i, c in enumerate(chosen, 1):
+            d = c.payload
+            if c.kind == "set":
+                detail = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
+            else:
+                detail = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {d['qty']:,}"
+            gp = int(c.window_gp)
+            star = "*" if c.patient else " "  # best-case (β=0) marker
+            print(f"    {i:<2}{tags.get(c.kind, c.kind):7}{str(c.key)[:32]:32}{gp:>11,}{star}{c.slots:>6}  {detail}")
+        if any(c.patient for c in chosen):
+            print(f"    * best-case (β=0, fill AT the bid/ask); EV haircut ×{config.PATIENT_EV_CONFIDENCE:g} for ranking")
+        if fcal.get("global_measured") is not None:
+            print(f"    (flips auto-calibrated from {fcal['n']} attempts: β {fcal.get('global', 1):.2f})")
 
     def _recovery_reads(self, sell_rows: list) -> dict:
         """{item_id: recovery assessment} for each underwater sell candidate — bounce-likely (hold)
@@ -863,7 +987,6 @@ class Terminal:
     def _overnight_plan(self, cash: int) -> None:
         """One big buy per FREE slot (you can't cycle slots while asleep), diversified,
         cushioned, sized to fill over ~8h. Splits the whole pile across the free slots."""
-        from .quote import optimal_quote
         held = self.j.positions()
         offers = self._active_offers()  # live GE offers from the active data source
         free = self._free_slots(offers)
@@ -879,9 +1002,18 @@ class Terminal:
             print(f"  all free slot(s) reserved for {pending_sells} sell listing(s) — list those first")
             return
         exclude = {h.item_id for h in held} | {o.item_id for o in offers}
+        rows = self._overnight_rows(cash, free, exclude)
+        print(f"  OVERNIGHT plan — ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion, sized to fill over ~8h:")
+        print(alert.format_overnight(rows, cash, free))
+
+    def _overnight_rows(self, cash: int, free: int, exclude: set[int]) -> list[dict]:
+        """Compute one big cushioned ~8h buy per free slot (the `overnight` plan's rows). Shared by
+        `overnight` and by `go`'s patient regime, where they become the fast-flip candidates."""
+        from .quote import optimal_quote
         limit_used = self._limit_used()
         mapping = {r["id"]: r for r in api.mapping()}
         df = scanner.scan(mode="offline", bankroll=cash, top=40, limit_used=limit_used, beta=self._beta())
+        exclude = set(exclude)
         rows, remaining, slots_left = [], float(cash), free
         for _, r in df.iterrows():
             if slots_left <= 0:
@@ -909,13 +1041,12 @@ class Terminal:
             # expected overnight profit = net/unit × qty × P(fill). Don't floor a single unit's
             # fractional expected fill to 0 — int(1 × 0.73) = 0 made a fat-spread ring show +0.
             profit = round(q.net_unit * aqty * q.p_buy)
-            rows.append({"name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": aqty,
+            rows.append({"item_id": iid, "name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": aqty,
                          "deploy": deploy, "fill8h": q.p_buy, "profit": profit})
             exclude.add(iid)
             remaining -= deploy
             slots_left -= 1
-        print(f"  OVERNIGHT plan — ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion, sized to fill over ~8h:")
-        print(alert.format_overnight(rows, cash, free))
+        return rows
 
     def _overnight_single(self, name_or_id: str, cash: int) -> None:
         """One big buy of a named item over an ~8h horizon (~2 buy-limit windows)."""
@@ -1105,22 +1236,12 @@ class Terminal:
         since you wait rather than queue-jump). OPTIMISTIC by design: it assumes you capture the full
         bid-ask, so treat it as best-case — calibration tells you what actually fills. `gear <n>`
         shows n rows (default 15)."""
-        from .features import build_features
         cash = int(self.j.cash()) or config.BANKROLL
-        df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=cash,
-                            limit_used=self._limit_used(),
-                            beta=config.PATIENT_BETA, staleness_max=config.PATIENT_STALENESS_S)
-        if df.empty:
-            print("  no market data")
-            return
-        if not config.MEMBERS:
-            df = df[~df["members"]]
         # the gear set: genuinely big-ticket items (≥ GEAR_MIN_PRICE) the normal scan drops on unit
         # volume but that clear on gp turnover, with a real full-spread margin, not a manip artifact.
-        g = df[(df["buy_px"] >= config.GEAR_MIN_PRICE) & (df["vol_1h_binding"] < config.V_MIN_1H)
-               & (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & df["tradeable"]
-               & (df["hold_units"] > 0) & (df["margin_abs"] > 0) & ~df["suspect"]].copy()
-        if g.empty:
+        # Shared with `go` via _gear_rows so the gate lives in one place.
+        g = self._gear_rows(api.latest(), api.one_hour(), api.mapping(), cash, self._limit_used())
+        if getattr(g, "empty", True):
             print("  no big-ticket flips clear tax + the full spread right now (most have <2% spreads "
                   "the 2% tax eats — see `scan` for the liquid stuff)")
             return
