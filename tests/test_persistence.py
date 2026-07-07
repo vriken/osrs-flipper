@@ -1,6 +1,39 @@
 """Spread persistence must separate a real spread (Jug) from integer churn (Earth rune)."""
 
-from osrs_flipper.persistence import spread_stats
+import pytest
+
+from osrs_flipper.persistence import reliability_stats, spread_stats
+
+
+def _bars(specs):
+    """specs: list of (avgHighPrice, avgLowPrice) → /timeseries-shaped bars."""
+    return [{"avgHighPrice": h, "avgLowPrice": low} for h, low in specs]
+
+
+# --- fast margin-decay (5m reliability): catch a spread that collapses within minutes --------------
+
+def test_stable_margin_is_not_penalised():
+    # every bar's post-tax net (98−90=8) clears half the quote (4) → uptime 1.0, no penalty
+    s = reliability_stats(_bars([(100, 90)] * 12), item_id=2, quoted_net=8)
+    assert s["uptime"] == 1.0 and s["gone_frac"] == 0.0 and s["reliab_mult"] == 1.0
+
+
+def test_fleeting_margin_is_downweighted():
+    # half the bars have the spread (net 8), half collapsed (91−90 → net 0) — the Ultracompost case
+    s = reliability_stats(_bars([(100, 90)] * 6 + [(91, 90)] * 6), item_id=2, quoted_net=8)
+    assert s["uptime"] == pytest.approx(0.5) and s["gone_frac"] == pytest.approx(0.5)
+    assert s["reliab_mult"] == pytest.approx(0.4 + 0.6 * 0.5)   # floor + slope·uptime = 0.7
+
+
+def test_threshold_is_relative_to_the_quote():
+    # net 8 is real, but if we're quoting 100 then 8 is <half the quote → not "healthy"
+    s = reliability_stats(_bars([(100, 90)] * 12), item_id=2, quoted_net=100)
+    assert s["uptime"] == 0.0 and s["reliab_mult"] == 0.4       # floored
+
+
+def test_thin_history_is_neutral_not_penalised():
+    s = reliability_stats(_bars([(100, 90)] * 4), item_id=2, quoted_net=8)   # < RELIAB_MIN_BARS
+    assert s["thin"] is True and s["reliab_mult"] == 1.0
 
 
 def test_stable_spread_is_capturable():

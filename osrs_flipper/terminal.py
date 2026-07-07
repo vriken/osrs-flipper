@@ -779,7 +779,8 @@ class Terminal:
                     window_gp=self._flip_window_gp(p, hours), patient=False,
                     item_ids=(int(p["item_id"]),), fill_eta_h=p.get("buy_eta_h"),
                     payload={"buy": p.get("buy_px"), "sell": p.get("sell_px"), "qty": p.get("qty"),
-                             "gp": p.get("gp"), "item_id": int(p["item_id"])}))
+                             "gp": p.get("gp"), "item_id": int(p["item_id"]),
+                             "gone_frac": p.get("reliab_gone_frac")}))
         else:
             for r in self._overnight_rows(cash, buy_slots, exclude_ids):
                 cands.append(planner.Candidate(kind="flip", key=str(r["name"]), slots=1,
@@ -881,6 +882,9 @@ class Terminal:
                 detail = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
             else:
                 detail = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {d['qty']:,}"
+                gf = d.get("gone_frac")
+                if gf is not None and gf >= 0.3:  # margin was gone ≥30% of the last hour at 5m resolution
+                    detail += f"  ⚠ fleeting ({gf * 100:.0f}% gone)"
             gp = int(c.window_gp)
             star = "*" if c.patient else " "  # best-case (β=0) marker
             print(f"    {i:<2}{tags.get(c.kind, c.kind):7}{str(c.key)[:32]:32}{gp:>11,}{star}{c.slots:>6}  {detail}")
@@ -1720,6 +1724,17 @@ class Terminal:
                 print(f"  {lbl:6} {b:>9,.0f} {(a['live_mid'] - b) / b * 100:>+7.0f}%")
         print(f"  vol_z {a['vol_z']:+.1f} (abnormal ≥{config.ANOMALY_VOL_Z_MIN:.0f})  ·  "
               f"slope {a['slope']:+.1f}  ·  phase {a['phase'] or '—'}")
+        # fast margin-decay read: how durable is the achievable spread at 5m resolution (the 1h view can't see it)
+        from .persistence import fetch_reliability
+        from .tax import post_tax_received
+        ah, al = a.get("avg_high"), a.get("avg_low")
+        if ah and al:
+            qnet = post_tax_received(int(ah), item_id=meta["id"]) - int(al)
+            rel = fetch_reliability(meta["id"], qnet)
+            if rel and not rel["thin"]:
+                tag = alert.color("⚠ fleeting spread", "yellow") if rel["reliab_mult"] < 0.95 else "durable"
+                print(f"  margin (5m, last hr): held ≥half-quote {rel['uptime'] * 100:.0f}% of bars · "
+                      f"gone {rel['gone_frac'] * 100:.0f}% · rank ×{rel['reliab_mult']:.2f}  {tag}")
         print("  → " + alert.color(anomaly.summary_line(a), "bold"))
 
     def cmd_anomaly(self, args: list[str]) -> None:
