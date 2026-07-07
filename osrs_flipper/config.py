@@ -139,6 +139,20 @@ PERSIST_CANDIDATES = 40  # only deep-check the top snapshot candidates (1 API ca
 PERSIST_MIN_BARS = 48  # need ≥48 bars (~2 days at 1h) for an honest stat
 PERSIST_MIN_FRAC = 0.6  # the spread must exist in ≥60% of recent bars
 
+# --- Fast margin-decay guard (fine-grained, see persistence.reliability_stats) -----
+# The 1h/2-day check above can't see a spread that collapses within MINUTES (a 1h bar
+# averages the flicker away), so a heavily-flipped tight item (Ultracompost) passes it
+# yet the margin is gone 5 min after you place. This 5m short-window check catches that:
+# how often, over the last hour, was the achievable post-tax margin at least RELIAB_RATIO
+# of the quoted margin. Penalty-only multiplier, applied to fast flips only.
+RELIAB_TIMESTEP = "5m"   # fine resolution — see the intraday collapse the 1h check misses
+RELIAB_BARS = 12         # judge over the last ~hour (12 × 5m)
+RELIAB_MIN_BARS = 6      # fewer valid bars than this → neutral (don't punish on thin data)
+RELIAB_RATIO = 0.5       # a bar is "healthy" if its net ≥ this × the quoted net
+RELIAB_MIN_NET = int(os.environ.get("OSRS_FLIPPER_RELIAB_MIN_NET", 2))  # abs gp floor for "healthy"
+RELIAB_FLOOR = float(os.environ.get("OSRS_FLIPPER_RELIAB_FLOOR", 0.4))  # min multiplier (penalty cap)
+RELIAB_HARD_FRAC = float(os.environ.get("OSRS_FLIPPER_RELIAB_HARD_FRAC", 0.0))  # >0 ⇒ DROP below this uptime
+
 # Quote fill-rate estimation uses only the most recent bars so rates reflect the
 # CURRENT price regime — stale volume from an old price level must not suggest
 # buying below today's bid (e.g. an item that trended up).

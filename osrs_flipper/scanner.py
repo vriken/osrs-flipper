@@ -8,7 +8,7 @@ import pandas as pd
 
 from . import anomaly, api, calibration, config
 from .features import build_features
-from .persistence import fetch_persistence
+from .persistence import fetch_persistence, fetch_reliability
 
 RANK_COL = "score"
 # snapshot (--no-persistence) quick path: composite = gp/cycle ÷ fill_eta^w
@@ -19,6 +19,8 @@ MODE_ROI_WEIGHT = {"online": config.ROI_WEIGHT_FAST, "balanced": config.ROI_WEIG
                    "offline": config.ROI_WEIGHT_SLOW}
 # deep path: mode sets the quote horizon — short = fill-now (online), long = patient (offline)
 MODE_HORIZON = {"online": 0.5, "balanced": 2.0, "offline": 8.0}
+FAST_MODES = {"online", "balanced"}  # throughput trading — where a minutes-scale margin collapse bites;
+#                                      offline/overnight waits through the noise, so skip the 5m penalty
 
 
 def _mode_roi_weight(mode: str) -> float:
@@ -164,10 +166,17 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
         q = optimal_quote(iid, int(row["capacity"]), name=row["name"], horizon_h=horizon)
         if not q or q.ev <= 0 or q.net_unit < config.MIN_NET_MARGIN:
             continue  # integer-tick flip — fat ROI%, doesn't fill
-        reliability = st["persist_factor"] * min(1.0, q.p_round / 0.5)
+        # fast margin-decay guard: the 1h persistence check above can't see a spread that collapses
+        # within minutes, so re-score the last hour at 5m resolution vs the quoted net. Penalty-only,
+        # one cached API call, top-N only, and fast modes only (throughput is where the decay bites).
+        rel = fetch_reliability(iid, q.net_unit) if mode in FAST_MODES else None
+        if rel and config.RELIAB_HARD_FRAC > 0 and not rel["thin"] and rel["uptime"] < config.RELIAB_HARD_FRAC:
+            continue  # margin gone most of the last hour — don't recommend it at all
+        reliab_mult = rel["reliab_mult"] if rel else 1.0
         edge_mult = float((edges or {}).get(iid, {}).get("edge_mult", 1.0))
         fmult = calibration.fill_multiplier(fill_cal, row.get("turnover_1h") or 0)
-        mult = fmult * edge_mult  # fill calibration × realized-edge, both applied to EV and gp
+        mult = fmult * edge_mult * reliab_mult  # fill cal × realized-edge × margin-reliability — EV, gp, score
+        reliability = st["persist_factor"] * reliab_mult * min(1.0, q.p_round / 0.5)
         rows.append({
             **row.to_dict(),
             "buy_px": q.buy_px, "sell_px": q.sell_px, "margin_abs": q.net_unit,
@@ -176,7 +185,9 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
             "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
             "exp_gp_cycle_adj": q.ev * mult, "reliability": reliability,
-            "fill_mult": fmult, "edge_mult": edge_mult,
+            "fill_mult": fmult, "edge_mult": edge_mult, "reliab_mult": reliab_mult,
+            "reliab_uptime": rel["uptime"] if rel else None,
+            "reliab_gone_frac": rel["gone_frac"] if rel else None,
             "raw_score": q.ev / horizon * mult * _roi_mult(
                 q.net_unit / q.buy_px if q.buy_px else None, _mode_roi_weight(mode)),
         })
@@ -218,6 +229,7 @@ def _pick_row(row, tier: str, cap_units: int) -> dict:
         "margin_abs": int(row["margin_abs"]), "p_complete": float(row["p_complete"]),
         "cap_units": max(0, cap_units), "buy_rate": float(row.get("buy_rate", 0.0)),
         "fill_mult": float(row.get("fill_mult", 1.0)), "edge_mult": float(row.get("edge_mult", 1.0)),
+        "reliab_mult": float(row.get("reliab_mult", 1.0)), "reliab_gone_frac": row.get("reliab_gone_frac"),
     }
 
 
