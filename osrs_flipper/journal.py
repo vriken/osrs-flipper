@@ -59,6 +59,36 @@ class Position:
     avg_cost: float
 
 
+def realized_history_from_fills(fills: list) -> list[tuple[int, float, float]]:
+    """Replay authoritative completed fills (buys + sells) chronologically into (ts, cash_delta,
+    realized_pnl) rows — the SAME shape the `ledger` table yields — on an avg-cost basis.
+
+    Why: the `ledger` is only written by typed `buy`/`sell`/`decant`, so a pure RuneLite-auto-sync
+    workflow has an empty ledger and `progress` reports "not enough trade history". This reconstructs
+    the same series from RuneLite's completed-offer history instead. Mirrors record_buy / record_sell
+    exactly: buys move cash out untaxed and set avg cost; a sell books post-tax proceeds and realises
+    qty×(net−avg), or 0 when there's no tracked basis (an early buy that rolled out of RuneLite's
+    retained window) — never the whole sale, which would inflate P&L."""
+    avg: dict[int, float] = {}
+    qty: dict[int, int] = {}
+    rows: list[tuple[int, float, float]] = []
+    for f in sorted(fills, key=lambda x: x.t_ms):
+        ts = int(f.t_ms / 1000)
+        if f.is_buy:
+            prev_q = qty.get(f.item_id, 0)
+            new_q = prev_q + f.qty
+            avg[f.item_id] = (prev_q * avg.get(f.item_id, 0.0) + f.qty * f.price) / new_q if new_q else 0.0
+            qty[f.item_id] = new_q
+            rows.append((ts, float(-f.qty * f.price), 0.0))
+        else:
+            net_unit = post_tax_received(f.price, item_id=f.item_id)
+            a = avg.get(f.item_id, 0.0)
+            realized = f.qty * (net_unit - a) if a > 0 else 0.0
+            qty[f.item_id] = max(0, qty.get(f.item_id, 0) - f.qty)
+            rows.append((ts, float(f.qty * net_unit), float(realized)))
+    return rows
+
+
 class Journal:
     def __init__(self, path: str | None = None):
         DATA_DIR.mkdir(parents=True, exist_ok=True)

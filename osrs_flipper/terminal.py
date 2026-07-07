@@ -1701,11 +1701,24 @@ class Terminal:
 
     def cmd_progress(self, args: list[str]) -> None:
         """Net-worth progress chart: realized history + live (marked-to-market) equity, projected
-        to 10M/100M at a growth rate re-fit from your own trade history. Saves + opens a PNG."""
+        to 10M/100M at a growth rate re-fit from your own trade history. Saves + opens a PNG.
+
+        History source: RuneLite's authoritative completed fills, replayed on an avg-cost basis — so it
+        works for a pure auto-sync workflow (whose manual `ledger` is empty). Falls back to the typed
+        buy/sell/decant `ledger` when RuneLite isn't connected."""
         from . import progress
-        rows = self.j.con.execute("SELECT ts, cash_delta, realized_pnl FROM ledger ORDER BY ts").fetchall()
+        from .journal import realized_history_from_fills
+        rows: list = []
+        try:
+            completed = datasource.active().completed_offers()
+        except Exception:  # noqa: BLE001 — a datasource hiccup just means fall back to the ledger
+            completed = []
+        if completed:
+            rows = realized_history_from_fills(completed)
+        if len(rows) < 2:  # no live RuneLite history → the typed buy/sell/decant ledger
+            rows = self.j.con.execute("SELECT ts, cash_delta, realized_pnl FROM ledger ORDER BY ts").fetchall()
         if len(rows) < 2:
-            print("  not enough trade history yet — flip a bit, then `progress`")
+            print("  not enough trade history yet — flip a bit (or start RuneLite), then `progress`")
             return
         _, tied = self._sync_cash()  # fold gold tied in open offers back into liquid for continuity
         lat = self.latest()

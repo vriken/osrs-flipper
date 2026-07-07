@@ -104,6 +104,36 @@ def test_decant_falls_back_to_last_buy_when_position_synced_away(j):
     assert in_avg == 2204 and moved == 2000 * 2204                  # recovered from the BUY ledger row
 
 
+# --- progress history rebuilt from RuneLite fills (auto-sync workflow has an empty manual ledger) ---
+
+def _fill(t_ms, is_buy, qty, price, item_id=GOLD_BAR):
+    import types
+    return types.SimpleNamespace(t_ms=t_ms, is_buy=is_buy, item_id=item_id, qty=qty, price=price)
+
+
+def test_realized_history_from_fills_replays_avg_cost_staircase():
+    from osrs_flipper.journal import realized_history_from_fills
+    from osrs_flipper.tax import ge_tax
+    fills = [_fill(1000, True, 100, 97), _fill(2000, True, 100, 99), _fill(3000, False, 200, 101)]
+    rows = realized_history_from_fills(fills)
+    net = 101 - ge_tax(101)                                   # post-tax 99/unit
+    assert rows[0] == (1, -9700.0, 0.0)                       # buys move cash out untaxed, no realised
+    assert rows[1] == (2, -9900.0, 0.0)
+    assert rows[2] == (3, 200.0 * net, 200 * (net - 98.0))    # sell 200 @avg 98 → realised (99-98)*200
+
+
+def test_realized_history_sell_without_basis_books_zero_not_proceeds():
+    from osrs_flipper.journal import realized_history_from_fills
+    rows = realized_history_from_fills([_fill(5000, False, 50, 101)])  # sold with no prior buy in the window
+    assert rows[0][2] == 0.0 and rows[0][1] > 0               # 0 realised, but cash still credited
+
+
+def test_realized_history_sorts_out_of_order_fills():
+    from osrs_flipper.journal import realized_history_from_fills
+    rows = realized_history_from_fills([_fill(3000, False, 1, 101), _fill(1000, True, 1, 97)])
+    assert [r[0] for r in rows] == [1, 3]                     # replayed in time order (buy before sell)
+
+
 def test_cannot_oversell(j):
     j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
     proceeds, realized = j.record_sell(GOLD_BAR, "Gold bar", 999, 101)
