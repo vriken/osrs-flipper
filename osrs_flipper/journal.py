@@ -179,6 +179,47 @@ class Journal:
         self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)",
                          [item_id, name, qty, float(avg_cost)])
 
+    def _last_buy_price(self, item_id: int) -> float:
+        """Fallback cost basis: the most recent logged BUY price for an item, else 0. Used when a decant's
+        source position was already reconciled away, so we can still approximate its basis."""
+        r = self.con.execute("SELECT price FROM ledger WHERE item_id=? AND side='BUY' ORDER BY ts DESC LIMIT 1",
+                             [item_id]).fetchone()
+        return float(r[0]) if r else 0.0
+
+    def record_decant(self, in_id: int, in_name: str, in_qty: int,
+                      out_id: int, out_name: str, out_qty: int) -> tuple[float, float, float]:
+        """Re-base cost when you DECANT `in_qty` of one potion dose into `out_qty` of another. Decanting up
+        at Bob Barter is free — so this moves cost basis only: NO cash change, NO GE tax, NO realised P&L.
+
+        Total cost is conserved: the basis consumed from the input (`in_qty × its avg_cost`) is carried onto
+        the output, so a later SELL of the (4)s books TRUE realised P&L. Without this, the decanted (4)s are
+        untracked (no matching GE buy) → they sell at avg_cost 0 → realised booked as 0, hiding the profit.
+
+        Returns (cost_moved, out_avg_cost, in_avg_used). `in_avg_used == 0` means the input had no tracked
+        basis (position already synced away / bought off-journal) — the caller should warn."""
+        pin = self.position(in_id)
+        in_avg = pin.avg_cost if pin else self._last_buy_price(in_id)
+        moved = in_qty * in_avg
+        # shrink or drop the consumed input dose (bag will confirm on next sync; avg_cost preserved on remainder)
+        if pin:
+            left = max(0, pin.qty - in_qty)
+            if left:
+                self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [in_id, in_name, left, in_avg])
+            else:
+                self.con.execute("DELETE FROM positions WHERE item_id=?", [in_id])
+        # blend the moved cost into the output (4)-dose position on an avg-cost basis
+        pout = self.position(out_id)
+        if pout:
+            nq = pout.qty + out_qty
+            navg = (pout.qty * pout.avg_cost + moved) / nq if nq else 0.0
+        else:
+            nq, navg = out_qty, (moved / out_qty if out_qty else 0.0)
+        self.con.execute("INSERT OR REPLACE INTO positions VALUES (?,?,?,?)", [out_id, out_name, nq, navg])
+        # informational ledger row — cash- and P&L-neutral, so it never distorts realised aggregates
+        self.con.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?,?,?)",
+                         [int(time.time()), out_id, out_name, "DECANT", out_qty, int(round(navg)), 0, 0.0, 0.0])
+        return moved, navg, in_avg
+
     def sync_positions_to_bag(self, holdings: dict[int, int], fills) -> list[tuple[str, int, int]]:
         """Bag = ground truth for held QUANTITY (you keep flip stock in your bag). Set each position's
         qty to the bag amount, with avg_cost from the existing position (else from buy history, else

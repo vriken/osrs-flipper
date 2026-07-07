@@ -61,6 +61,15 @@ def price_combination(combo: Combo, feat: dict[int, Row], *, cash: int, members:
     else:
         proceeds_out = _post_tax(out["sell_px"], combo.output_id, on_date) * combo.output_yield
         tax_assemble = int(ge_tax(int(out["sell_px"]), item_id=combo.output_id, on_date=on_date) * combo.output_yield)
+    # byproduct credit (e.g. vials freed by decanting up): sold post-tax, added to proceeds. SOFT — skip any
+    # that's missing / untradeable / suspect so a stale vial can't drop the whole recipe. This is exactly why
+    # byproducts are kept OUT of item_ids()'s hard leg-gate and the anomaly bought_ids.
+    for bp_id, bp_qty in combo.byproducts:
+        bp = feat.get(bp_id)
+        if bp is None or not bp["tradeable"] or bp["suspect"]:
+            continue
+        proceeds_out += _post_tax(bp["sell_px"], bp_id, on_date) * bp_qty
+        tax_assemble += int(ge_tax(int(bp["sell_px"]), item_id=bp_id, on_date=on_date) * bp_qty)
     profit_assemble = proceeds_out - cost_in
 
     # --- BREAK: buy output → sell parts; tax each part (sets only; recipes are one-way) ----------
@@ -83,7 +92,10 @@ def price_combination(combo: Combo, feat: dict[int, Row], *, cash: int, members:
         return None
 
     # --- sizing: capital ∩ buy-limit(bought legs) ∩ volume-realizable(all legs) ------------------
-    all_legs = combo.inputs + combo.secondaries + ((combo.output_id, 1),)
+    # ASSEMBLE SELLS `output_yield` outputs per conversion (the (3)→(4) decant makes 3), so its sell-volume
+    # cap must divide by the yield; BREAK buys 1 output. Sets keep yield 1, so this is a no-op for them.
+    out_units = combo.output_yield if direction == "ASSEMBLE" else 1
+    all_legs = combo.inputs + combo.secondaries + ((combo.output_id, out_units),)
     afford = int(cash // cost_pc) if cost_pc > 0 else 0
     limit_cap, limit_leg = math.inf, None
     for pid, qty in bought:
@@ -107,12 +119,22 @@ def price_combination(combo: Combo, feat: dict[int, Row], *, cash: int, members:
     etas = [feat[pid]["fill_eta_h"] for pid, _ in all_legs if feat[pid]["fill_eta_h"] is not None]
     fill_eta_h = max(etas) if etas else None
 
+    # per-unit view for a single-input conversion (decant): lets a printer show "N×buy → M×sell" so the
+    # 4→3 batch ratio is explicit and isn't misread as a single buy→sell flip. None when multi-input (sets).
+    in_qty = int(sum(q for _, q in bought))
+    in_unit_px = int(feat[bought[0][0]]["buy_px"]) if len(bought) == 1 else None
+    out_qty = int(out_units)
+    out_unit_px = (int(_post_tax(out["sell_px"], combo.output_id, on_date))
+                   if direction == "ASSEMBLE" and combo.output_type != "coins" else None)
+
     return {
         "id": combo.id, "name": combo.name, "kind": combo.kind,
-        "direction": direction,
+        "output_id": combo.output_id, "direction": direction,
         "cost_per_conv": cost_pc, "proceeds_per_conv": proceeds_pc, "profit_per_conv": profit,
         "roi": profit / cost_pc if cost_pc > 0 else 0.0,
         "tax_per_conv": tax_pc,
+        "in_qty": in_qty, "in_unit_px": in_unit_px, "out_qty": out_qty, "out_unit_px": out_unit_px,
+        "in_dose": combo.in_dose, "out_dose": combo.out_dose,
         "conversions": conversions, "total_gp": profit * conversions,
         "bound_by": bound_by, "fill_eta_h": fill_eta_h,
         "members": any(r["members"] for r in legs.values()),
