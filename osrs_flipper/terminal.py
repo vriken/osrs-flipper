@@ -253,6 +253,7 @@ class Terminal:
             print("  HOLDING for the bounce (not listing — no slot used):")
             for r in holds:
                 print(self._recovery_note(r, rec[r["item_id"]]))
+        self._print_decant_exits(self._decant_exits(held, set(active_ids)))
         print(f"  building portfolio for {buy_slots} free slot(s)"
               + (f" ({len(to_sell)} reserved for sells)…" if to_sell else "…"))
         bids = {p.item_id: (self.latest().get(p.item_id) or {}).get("low") for p in held}
@@ -461,9 +462,10 @@ class Terminal:
         buys (you're accumulating more — don't sell the partial out from under yourself)."""
         from .tax import breakeven_sell, post_tax_received
         hourly, latest = api.one_hour(), api.latest()
+        skip = busy_ids | self._decant_input_ids()  # a held low dose exits via decant, NOT a flip-sell
         rows = []
         for p in held:
-            if p.item_id in busy_ids:
+            if p.item_id in skip:
                 continue
             h = hourly.get(p.item_id, {})
             ask = h.get("avgHighPrice") or (latest.get(p.item_id, {}) or {}).get("high")
@@ -484,6 +486,64 @@ class Terminal:
                          "sell_px": sell_px, "profit": net * p.qty, "eta_h": eta_h,
                          "underwater": underwater})
         return rows
+
+    def _decant_input_ids(self) -> set[int]:
+        """Item ids of low-dose potions that are decant INPUTS (members only) — held to decant UP to (4),
+        never flipped back — so the sell plan must not treat them as flip inventory. Empty in F2P."""
+        if not config.MEMBERS:
+            return set()
+        from . import combinations
+        return {rc.inputs[0][0] for rc in combinations.decant_recipes(api.mapping())}
+
+    def _decant_exits(self, held: list, busy_ids: set) -> list[dict]:
+        """Exit advice for held low-dose potions: decant UP to (4) at Bob Barter, then sell the (4) — the
+        low dose is a decant input, not a flip. `ready` = you hold enough for ≥1 whole (4); otherwise
+        accumulate. Skips items with a live offer (still buying / already listed). Members-only."""
+        if not config.MEMBERS:
+            return []
+        from . import combinations
+        from .tax import post_tax_received
+        mp = api.mapping()
+        hourly, latest = api.one_hour(), api.latest()
+        by_input = {rc.inputs[0][0]: rc for rc in combinations.decant_recipes(mp)}
+        names = {it["id"]: it["name"] for it in mp}
+        rows = []
+        for p in held:
+            if p.item_id in busy_ids:
+                continue
+            rc = by_input.get(p.item_id)
+            if rc is None:
+                continue
+            out_qty = p.qty * rc.in_dose // 4                 # whole (4)s you can make from the held low dose
+            out_name = names.get(rc.output_id, f"item {rc.output_id}")
+            if out_qty < 1:                                   # e.g. 1×(3) = 3 doses — not enough for a (4)
+                rows.append({"item_id": p.item_id, "name": p.name, "qty": p.qty, "ready": False,
+                             "need": -(-4 // rc.in_dose), "out_name": out_name})
+                continue
+            h4 = hourly.get(rc.output_id, {})
+            ask4 = h4.get("avgHighPrice") or (latest.get(rc.output_id, {}) or {}).get("high")
+            sell4 = int(round(ask4)) if ask4 else 0
+            net = (post_tax_received(sell4, item_id=rc.output_id) * out_qty - p.avg_cost * p.qty) if sell4 else 0
+            rows.append({"item_id": p.item_id, "name": p.name, "qty": p.qty, "ready": True,
+                         "out_name": out_name, "out_qty": out_qty, "sell4": sell4, "net": net,
+                         "leftover": p.qty * rc.in_dose - out_qty * 4, "underwater": bool(sell4) and net < 0})
+        return rows
+
+    @staticmethod
+    def _print_decant_exits(rows: list) -> None:
+        """Render the DECANT exit section — the counterpart to the sell plan for low-dose potion holdings."""
+        if not rows:
+            return
+        print("  DECANT (low-dose potions — decant UP to (4); don't flip the low dose back):")
+        for d in rows:
+            if not d["ready"]:
+                print(f"    {d['name']} ×{d['qty']:,} — decant input; need ≥{d['need']} for one {d['out_name']}. "
+                      f"Accumulate or decant with a spare dose — not a flip, holding.")
+                continue
+            lo = f" (+{d['leftover']} dose leftover)" if d["leftover"] else ""
+            warn = "  ⚠ (4) below your cost — decant & hold, don't dump" if d["underwater"] else ""
+            print(f"    {d['name']} ×{d['qty']:,} → decant → sell {d['out_qty']:,} {d['out_name']} @{d['sell4']:,} "
+                  f"(net {d['net']:+,.0f}){lo} · then log it: `decant log {d['name']} {d['qty']}`{warn}")
 
     def _attention_nudge(self) -> str:
         """A coloured one-liner if any active offer needs re-pricing/collecting."""
@@ -587,6 +647,8 @@ class Terminal:
             print("  HOLDING for the bounce (not listing — no slot used):")
             for r in holds:
                 print(self._recovery_note(r, rec[r["item_id"]]))
+        decant_rows = self._decant_exits(held, busy_ids)
+        self._print_decant_exits(decant_rows)
 
         picks: list[dict] = []  # unified BUY plan for free slots: fast flips + gear + sets
         # reserve a slot for each pending sell listing — a sell occupies a GE slot too, so buys
@@ -600,7 +662,7 @@ class Terminal:
             picks = self._plan_buys(cash, held, offers, buy_slots, net_worth, daytime,
                                     hours_until_sleep, lat, hr, mp)
 
-        print("  " + alert.color("NEXT: " + self._next_action(refined, to_sell, free, picks), "bold"))
+        print("  " + alert.color("NEXT: " + self._next_action(refined, to_sell, free, picks, decant_rows), "bold"))
 
     def _explain_picks(self, picks: list, limit: int = 5) -> None:
         """Print a one-line price-position 'why' for each buy being placed now (bounded — one
@@ -825,9 +887,11 @@ class Terminal:
                            "(re-rating/downtrend) — hold at break-even; cut only if a better flip is ready", "yellow")
 
     @staticmethod
-    def _next_action(review_rows: list, sell_rows: list, free: int, picks: list) -> str:
+    def _next_action(review_rows: list, sell_rows: list, free: int, picks: list,
+                     decants: list | None = None) -> str:
         """The single most important thing to do right now, synthesized from current state."""
         verds = [v for (_o, v, *_rest) in review_rows]
+        ready_decants = [d for d in (decants or []) if d.get("ready")]
         if (n := verds.count("collect")):
             return f"collect {n} finished offer(s) — frees a slot, then press Enter again"
         if "margin" in verds or "stale" in verds:
@@ -841,6 +905,9 @@ class Terminal:
                 actions.append(f"place buy #1–#{n_now}")
             if actions:
                 return " + ".join(actions) + " now (auto-logged from RuneLite)"
+        if ready_decants:  # decanting is off-GE (no slot needed) — a real to-do the slot logic won't surface
+            return ("decant your low-dose potion(s) at Bob Barter → sell the (4)s, then `decant log` "
+                    "(see DECANT above)")
         if sell_rows:
             return "list your holdings for sale (see SELL above)"
         if free > 0:  # a slot IS free — say so, don't claim "all slots working"
