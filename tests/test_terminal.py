@@ -2,6 +2,8 @@
 
 import types
 
+import pytest
+
 from osrs_flipper import terminal as term_mod
 from osrs_flipper.journal import Journal, Position
 from osrs_flipper.runelite import Offer
@@ -82,6 +84,69 @@ def test_next_action_surfaces_a_ready_decant(monkeypatch):
     ready = [{"ready": True, "name": "Super strength(3)"}]
     msg = na([], [], 0, [], ready)
     assert "decant" in msg.lower() and "Bob Barter" in msg
+
+
+# --- auto-detect in-game decants: move basis before the bag-sync drops the low dose -----------------
+
+def _term_stub(j, offers=()):
+    return types.SimpleNamespace(j=j, _active_offers=lambda: list(offers))
+
+
+def test_autodecant_moves_basis_when_low_dose_leaves_bag(tmp_path, monkeypatch):
+    _mock_potion_api(monkeypatch)
+    j = Journal(path=str(tmp_path / "ad.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 4, 2204)          # hold 4 (3)s @2,204
+    # bag now: (3) gone, three (4)s present → decanted 4×(3) into 3×(4)
+    Terminal._autodecant(_term_stub(j), {2440: 3}, bought_since={}, sold_since={})
+    assert j.position(157) is None                            # (3) basis not lost as junk
+    p4 = j.position(2440)
+    assert p4.qty == 3 and p4.avg_cost == pytest.approx(4 * 2204 / 3)
+    j.con.close()
+
+
+def test_autodecant_ignores_a_ge_sale_of_the_low_dose(tmp_path, monkeypatch):
+    # the (3) left the bag because you SOLD it on GE (not decanted) — conservation nets to 0, no transfer,
+    # even though (4)s happen to be present. Prevents double-counting the sale as a decant.
+    _mock_potion_api(monkeypatch)
+    j = Journal(path=str(tmp_path / "ad2.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 4, 2204)
+    Terminal._autodecant(_term_stub(j), {2440: 5}, bought_since={}, sold_since={157: 4})
+    assert j.position(157).qty == 4 and j.position(2440) is None   # untouched
+    j.con.close()
+
+
+def test_autodecant_skips_when_no_4_dose_evidence(tmp_path, monkeypatch):
+    # (3) vanished but no (4) in bag / offers / sells → don't attribute a mystery drop to a decant
+    _mock_potion_api(monkeypatch)
+    j = Journal(path=str(tmp_path / "ad3.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 4, 2204)
+    Terminal._autodecant(_term_stub(j), {}, bought_since={}, sold_since={})
+    assert j.position(157).qty == 4                            # left alone (basis preserved for now)
+    j.con.close()
+
+
+def test_autodecant_partial_decant_keeps_remainder(tmp_path, monkeypatch):
+    _mock_potion_api(monkeypatch)
+    j = Journal(path=str(tmp_path / "ad4.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 8, 2204)           # hold 8; decant 4, keep 4 in bag
+    Terminal._autodecant(_term_stub(j), {157: 4, 2440: 3}, bought_since={}, sold_since={})
+    assert j.position(157).qty == 4                            # remainder stays tracked
+    assert j.position(2440).qty == 3
+    j.con.close()
+
+
+def test_autodecant_noop_in_f2p(tmp_path, monkeypatch):
+    _mock_potion_api(monkeypatch, members=False)
+    j = Journal(path=str(tmp_path / "ad5.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 4, 2204)
+    Terminal._autodecant(_term_stub(j), {2440: 3}, bought_since={}, sold_since={})
+    assert j.position(157).qty == 4 and j.position(2440) is None
+    j.con.close()
 
 
 def _stub(j, offers=()):

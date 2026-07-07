@@ -339,10 +339,14 @@ class Terminal:
         held = src.holdings()
         self.j.migrate_fill_accounting_if_needed(fills)  # one-time baseline to current state; no-op after
         n = 0
+        bought_since: dict[int, int] = {}                # this sync's NEW filled units per item, by side —
+        sold_since: dict[int, int] = {}                  # lets _autodecant tell a decant from a GE sale
         for f in fills:                                  # credit only the NEW units filled per offer
             delta = self.j.account_fill_delta(f.uuid, f.item_id, f.name, f.is_buy, f.qty, f.price)
             if delta > 0:
                 n += 1
+                side = bought_since if f.is_buy else sold_since
+                side[f.item_id] = side.get(f.item_id, 0) + delta
                 self.j.reconcile_fill(f.item_id, f.is_buy, delta, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
         self._autodetect_placements()
@@ -350,6 +354,8 @@ class Terminal:
         # bag), with cost from your buy history — one idempotent, self-healing pass. Falls back to
         # the offer-history net only when the bag snapshot isn't live (exporter off / logged out).
         if held is not None:
+            # move cost basis for any in-game decant BEFORE the bag-sync drops the vanished low dose
+            self._autodecant(held, bought_since, sold_since)
             for name, old, new in self.j.sync_positions_to_bag(held, fills):
                 tag = "dropped (not in bag/GE)" if new == 0 else "matched to bag"
                 print(f"  {name}: {old:,} → {new:,} — {tag}")
@@ -390,6 +396,46 @@ class Terminal:
         if n:
             print(f"  (auto-logged {n} new order(s) from RuneLite)")
         return n
+
+    def _autodecant(self, bag: dict[int, int], bought_since: dict[int, int],
+                    sold_since: dict[int, int]) -> None:
+        """Detect an in-game decant and move the low-dose cost basis onto the (4)s BEFORE the bag-sync
+        would drop the vanished low dose as 'not in bag' (losing its basis). Decanting is free and leaves
+        no GE trade, so it's invisible to fill accounting — but it's recoverable by conservation:
+
+            decanted = (last_tracked_qty − bag_qty) + bought_this_sync − sold_this_sync
+
+        i.e. every low-dose unit that left the bag and wasn't a GE buy/sell was decanted up. Gated on
+        membership (Bob Barter) and on the (4) actually existing now (in the bag, on an offer, or sold this
+        sync) so a transient/glitchy snapshot can't fabricate a transfer. Announces every move it makes."""
+        if not config.MEMBERS:
+            return
+        from . import combinations
+        by_input = {rc.inputs[0][0]: rc for rc in combinations.decant_recipes(api.mapping())}
+        if not by_input:
+            return
+        names = {it["id"]: it["name"] for it in api.mapping()}
+        offer_ids = {o.item_id for o in self._active_offers()}
+        for p in self.j.positions():
+            rc = by_input.get(p.item_id)
+            if rc is None:
+                continue
+            decanted = (p.qty - bag.get(p.item_id, 0)) + bought_since.get(p.item_id, 0) \
+                - sold_since.get(p.item_id, 0)
+            if decanted <= 0:
+                continue
+            oid = rc.output_id
+            four_seen = bag.get(oid, 0) > 0 or oid in offer_ids or sold_since.get(oid, 0) > 0
+            if not four_seen:  # no evidence the (4) exists → don't attribute the drop to a decant
+                continue
+            out_qty = decanted * rc.in_dose // 4
+            if out_qty <= 0:
+                continue
+            out_name = names.get(oid, str(oid))
+            moved, navg, in_avg = self.j.record_decant(p.item_id, p.name, decanted, oid, out_name, out_qty)
+            if in_avg > 0:
+                print(f"  decant detected: {decanted:,} {p.name} → {out_qty:,} {out_name} "
+                      f"(basis {moved:,.0f} gp moved onto the (4)s, avg {navg:,.0f}/ea)")
 
     def _rebalance(self, offers: list) -> list[str]:
         """Flag active BUYs whose slot + capital a better available flip would beat by SWAP_RATIO
