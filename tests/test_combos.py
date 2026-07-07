@@ -183,3 +183,57 @@ def test_scan_combinations_prices_through_build_features(monkeypatch):
     assert r["direction"] == "ASSEMBLE"
     assert r["profit_per_conv"] == (260 - ge_tax(260)) - 200
     assert r["conversions"] > 0
+
+
+# --- recipes with output_yield > 1 and byproducts (the decant case) --------------------------------
+
+def _decant_3to4(**kw):
+    # 4× (3)-dose (id 1) → 3× (4)-dose (id 900): doses conserved, one-way. Vials optional via byproducts.
+    return Combo(id="d34", name="Pot (3→4)", output_id=900, inputs=((1, 4),),
+                 kind="recipe", reversible=False, output_yield=3.0, **kw)
+
+
+def test_output_yield_caps_liquidity_by_units_sold():
+    # A conversion SELLS 3 outputs, so a thin (4)-dose sell-side must cap conversions by hold//yield, not hold.
+    combo = _decant_3to4()
+    feat = {1: leg(1, "p3", 100, 90, eff=10_000, hold=10_000),
+            900: leg(900, "p4", 400, 200, hold=30)}          # only 30 (4)-doses of sell volume
+    r = price_combination(combo, feat, cash=10 ** 9, members=True)
+    assert r["conversions"] == 10                             # 30 // 3, NOT 30
+    assert r["bound_by"].startswith("liquidity:")
+    assert r["profit_per_conv"] == 3 * (200 - ge_tax(200)) - 400   # 3 outputs sold, tax per output
+
+
+def test_per_unit_fields_expose_the_batch_ratio():
+    # decant: single input leg → the row carries "N×buy → M×sell" so a printer can show the 4→3 batch.
+    combo = _decant_3to4()
+    r = price_combination(combo, {1: leg(1, "p3", 100, 90), 900: leg(900, "p4", 400, 200)},
+                          cash=10 ** 9, members=True)
+    assert (r["in_qty"], r["in_unit_px"]) == (4, 100)          # 4 low-dose bought/conv at unit 100
+    assert (r["out_qty"], r["out_unit_px"]) == (3, 200 - ge_tax(200))   # 3 (4)-dose sold/conv, post-tax
+    # a multi-input set has no single unit price → in_unit_px is None (printer keeps the batch format)
+    s = price_combination(two_piece(), {1: leg(1, "p1", 100, 90), 2: leg(2, "p2", 100, 90),
+                                        900: leg(900, "set", 320, 300)}, cash=10_000, members=True)
+    assert s["in_qty"] == 2 and s["in_unit_px"] is None and s["out_qty"] == 1
+
+
+def test_byproduct_credited_post_tax():
+    combo = _decant_3to4(byproducts=((229, 1),))             # decanting frees 1 vial
+    base = {1: leg(1, "p3", 100, 90), 900: leg(900, "p4", 400, 200)}
+    without = price_combination(_decant_3to4(), base, cash=10 ** 9, members=True)["profit_per_conv"]
+    with_vial = price_combination(combo, {**base, 229: leg(229, "Vial", 5, 40)},
+                                  cash=10 ** 9, members=True)["profit_per_conv"]
+    assert with_vial == without + (40 - ge_tax(40))          # vial sold post-tax, added to proceeds
+
+
+def test_byproduct_is_soft_missing_or_suspect_is_skipped_not_gated():
+    combo = _decant_3to4(byproducts=((229, 1),))
+    base = {1: leg(1, "p3", 100, 90), 900: leg(900, "p4", 400, 200)}
+    plain = price_combination(_decant_3to4(), base, cash=10 ** 9, members=True)["profit_per_conv"]
+    # vial absent from the feature map → recipe still prices (229 is not a hard leg), no credit
+    missing = price_combination(combo, base, cash=10 ** 9, members=True)
+    assert missing is not None and missing["profit_per_conv"] == plain
+    # vial present but suspect → skipped, still no credit and still not gated out
+    suspect = price_combination(combo, {**base, 229: leg(229, "Vial", 5, 40, suspect=True)},
+                                cash=10 ** 9, members=True)
+    assert suspect is not None and suspect["profit_per_conv"] == plain

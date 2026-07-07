@@ -18,6 +18,7 @@ against /mapping; `tests/test_combinations.py` guards them.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -34,9 +35,13 @@ class Combo:
     level: int = 0                            # min level to perform the conversion
     xp: float = 0.0                           # informational only
     secondaries: tuple[tuple[int, int], ...] = ()   # ((item_id, qty), …) consumed per op, priced at BUY
+    byproducts: tuple[tuple[int, int], ...] = ()     # ((item_id, qty), …) produced as a SIDE output per op
+                                                     # (e.g. vials freed by decanting up); sold post-tax, SOFT-credited
     fee: int = 0                              # fixed gp per op (clerk/tan fee); 0 for sets
     output_yield: float = 1.0                 # expected outputs per op (<1 for burn/fail loss)
     output_type: str = "item"                 # "item" (taxed GE sale) | "coins" (alch — untaxed)
+    in_dose: int = 0                          # decant display only: source dose (e.g. 3 in a (3)→(4)); 0 = n/a
+    out_dose: int = 0                         # decant display only: output dose (e.g. 4); 0 = n/a
 
 
 def _set(slug: str, name: str, output_id: int, pieces: tuple[int, ...]) -> Combo:
@@ -157,6 +162,49 @@ def load(kind: str | None = None) -> list[Combo]:
     return [c for c in COMBINATIONS if c.kind == kind]
 
 
+_DOSE_RE = re.compile(r"^(.+?)\((\d)\)$")  # "Prayer potion(4)" → ("Prayer potion", 4); no space before the paren
+
+# per conversion, decanting UP to (4): (source_dose, inputs_bought, outputs_made) — doses conserved (dose×qty == 4×out)
+_DECANT_SPECS: tuple[tuple[int, int, int], ...] = ((1, 4, 1), (2, 2, 1), (3, 4, 3))
+
+
+def _slug(name: str) -> str:
+    """Stable snake-case slug from a potion base name. '+' → 'plus' so Antidote / Antidote+ / Antidote++
+    (and the anti-venoms) get distinct, non-colliding slugs."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower().replace("+", " plus ")).strip("_")
+
+
+def decant_recipes(mapping: list) -> list[Combo]:
+    """Derive up-decant recipes from live /mapping: for every potion shipping a full (1)-(4) set, buy the
+    low dose, decant UP to (4) at Bob Barter (free, instant, no skill), sell the (4). Freed empty vials
+    (inputs − outputs) are returned and credited as a byproduct. Decanting is a MEMBERS-only service.
+
+    IDs are read straight from /mapping — never computed: real dose ids are irregular (e.g. Antipoison is
+    179/177/175/2446). Composition lives in the item NAME ("<base>(<dose>)"), which is why this is built
+    dynamically rather than bundled like `_SETS`. `output_yield` carries the (3)→(4) case (4 in → 3 out)."""
+    vial = next((it["id"] for it in mapping if it.get("name") == "Vial"), None)
+    doses: dict[str, dict[int, int]] = {}
+    for it in mapping:
+        m = _DOSE_RE.match(it.get("name", "") or "")
+        if m and 1 <= int(m.group(2)) <= 4:
+            doses.setdefault(m.group(1), {})[int(m.group(2))] = it["id"]
+
+    out: list[Combo] = []
+    for base, dv in sorted(doses.items()):
+        if not all(k in dv for k in (1, 2, 3, 4)):
+            continue  # only real 4-dose potion families decant up to (4)
+        slug = _slug(base)
+        for src, in_qty, out_qty in _DECANT_SPECS:
+            freed = in_qty - out_qty  # vials returned when decanting up
+            bp = ((vial, freed),) if vial is not None and freed > 0 else ()
+            out.append(Combo(
+                id=f"decant_{slug}_{src}_to_4", name=f"{base} ({src}→4)",
+                output_id=dv[4], inputs=((dv[src], in_qty),),
+                kind="recipe", reversible=False, output_yield=float(out_qty), byproducts=bp,
+                in_dose=src, out_dose=4))
+    return out
+
+
 def item_ids(combo: Combo) -> set[int]:
     """Every item id the combo touches — output, inputs, and secondaries. Used to gather feature rows."""
     ids = {combo.output_id}
@@ -171,7 +219,7 @@ def validate(combo: Combo, mapping_ids: set[int] | None = None) -> list[str]:
     errs: list[str] = []
     if not combo.inputs:
         errs.append(f"{combo.id}: no inputs")
-    for pid, qty in combo.inputs + combo.secondaries + ((combo.output_id, 1),):
+    for pid, qty in combo.inputs + combo.secondaries + combo.byproducts + ((combo.output_id, 1),):
         if not isinstance(pid, int):
             errs.append(f"{combo.id}: non-int id {pid!r}")
         if not isinstance(qty, int) or qty <= 0:
@@ -181,7 +229,8 @@ def validate(combo: Combo, mapping_ids: set[int] | None = None) -> list[str]:
     if combo.kind == "recipe" and combo.skill and combo.level <= 0:
         errs.append(f"{combo.id}: recipe skill {combo.skill} has no level")
     if mapping_ids is not None:
-        for iid in item_ids(combo):
+        # byproducts aren't in item_ids() (they're a soft credit, not a hard leg-gate) — check them here too
+        for iid in item_ids(combo) | {pid for pid, _ in combo.byproducts}:
             if iid not in mapping_ids:
                 errs.append(f"{combo.id}: id {iid} not in /mapping")
     return errs

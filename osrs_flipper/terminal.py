@@ -17,6 +17,7 @@ Daily
 Occasional
   scan [n] [online|offline|balanced]   ranked live flips (raw, unallocated)
   sets [n] [roi] [all]     GE set arbitrage: buy pieces→sell set (or reverse), net of tax
+  decant [n] [roi] [all]   buy (1)/(2)/(3)-dose potions → decant up to (4) → sell, net of tax (members)
   port [free_slots]        recommended allocation across your free slots
   sellquote <item> [qty]   sell-price tradeoff for held stock (fill time vs profit)
   anomaly                  market-wide price dislocations on abnormal volume
@@ -710,6 +711,31 @@ class Terminal:
                 payload={"cost": r["cost_per_conv"], "proceeds": r["proceeds_per_conv"],
                          "conv": conv, "gp": wg}))
 
+        # decant (patient, members-only): buy ONE low-dose potion → decant up → sell (4). One buy slot, like
+        # a flip. Keep only the best dose per output potion so 3 near-identical rows don't crowd the plan.
+        if config.MEMBERS:
+            best: dict[int, dict] = {}
+            for r in combos.scan_combinations(combinations.decant_recipes(mp), lat, hr, mp, cash=cash,
+                                              limit_used=limit_used, beta=config.COMBO_BETA,
+                                              staleness_max=config.PATIENT_STALENESS_S, members=True):
+                if r["conversions"] <= 0 or not r["cost_per_conv"]:
+                    continue
+                conv = min(int(r["conversions"]), int(fair // r["cost_per_conv"]))  # one slot's share of capital
+                if conv <= 0:
+                    continue
+                wg = float(r["profit_per_conv"]) * conv
+                oid = int(r["output_id"])
+                if oid not in best or wg > best[oid]["wg"]:
+                    best[oid] = {"r": r, "conv": conv, "wg": wg}
+            for b in best.values():
+                r = b["r"]
+                cands.append(planner.Candidate(kind="decant", key=str(r["name"]), slots=1,
+                    window_gp=b["wg"], patient=True, item_ids=(int(r["bought_ids"][0]),),
+                    fill_eta_h=r.get("fill_eta_h"),
+                    payload={"in_qty": r["in_qty"], "in_px": r["in_unit_px"], "out_qty": r["out_qty"],
+                             "out_px": r["out_unit_px"], "in_dose": r["in_dose"], "out_dose": r["out_dose"],
+                             "conv": b["conv"], "gp": b["wg"]}))
+
         def verify(c: planner.Candidate) -> bool:  # pump/knife gate on the legs you'd BUY (lazy, top picks)
             if not config.COMBO_ANOMALY_CHECK:
                 return True
@@ -733,13 +759,17 @@ class Terminal:
             print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}: nothing cleared the filters "
                   "(no flip/gear/set worth a slot right now)")
             return
-        tags = {"flip": "⚡flip", "gear": "🕰gear", "set": "🧩set"}
+        tags = {"flip": "⚡flip", "gear": "🕰gear", "set": "🧩set", "decant": "🧪decant"}
         used = sum(c.slots for c in chosen)
         print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}  (using {used})")
         print(f"    {'#':<2}{'type':7}{'trade':32}{'~gp':>12}{'slots':>6}  detail")
         for i, c in enumerate(chosen, 1):
             d = c.payload
-            if c.kind == "set":
+            if c.kind == "decant":  # TOTALS + the decant step, so direction & counts can't be misread
+                bt, st = d['in_qty'] * d['conv'], d['out_qty'] * d['conv']
+                detail = (f"buy {bt:,} ({d['in_dose']})@{int(d['in_px']):,} → decant → "
+                          f"sell {st:,} ({d['out_dose']})@{int(d['out_px']):,}")
+            elif c.kind == "set":
                 detail = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
             else:
                 detail = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {d['qty']:,}"
@@ -1368,6 +1398,120 @@ class Terminal:
         print("  net/conv = gp kept per set after tax · conv = affordable × buy-limit-bound × "
               "volume-realizable · this is many buys + a sell, so it's slot- & click-heavy vs a single flip.")
 
+    def cmd_decant(self, args: list[str]) -> None:
+        """Potion decanting: buy the cheaper low-dose potion (1)/(2)/(3), decant UP to (4) at Bob Barter
+        (free, instant, no Herblore), sell the (4) — capturing the per-dose premium 4-doses carry, net of
+        the single GE tax on the (4) sale. Freed empty vials are credited. Priced patiently like `sets`
+        (full spread β=0, 6h staleness) and OPTIMISTIC by design — it assumes you fill AT the bid/ask.
+        MEMBERS-ONLY (Bob Barter is a members service); every leg must be liquid and pass the pump/knife check.
+          decant [n] [roi] [all]   n rows (default 15) · `roi` ranks by ROI% · `all` = aspirational (ignore
+          cash, include unprofitable, ignore your buy-limit room)
+          decant log <potion(dose)> <count>   after you decant in-game, move the cost basis onto the (4)s so
+          the later sell books real P&L — e.g. `decant log Super strength(3) 2000`."""
+        if args and args[0] == "log":  # bookkeeping, not a scan — allow it regardless of the members flag
+            return self._decant_log(args[1:])
+        if not config.MEMBERS:
+            print("  decanting is a members-only service (Bob Barter at the GE) — set OSRS_FLIPPER_MEMBERS=1 "
+                  "once you've redeemed a bond.")
+            return
+        from . import anomaly, combinations, combos
+        cash = int(self.j.cash()) or config.BANKROLL
+        show_all = "all" in args
+        by_roi = "roi" in args
+        n = next((int(a) for a in args if a.isdigit()), 15)
+        lat, hr, mp = api.latest(), api.one_hour(), api.mapping()
+        scan_cash = 1 << 62 if show_all else cash  # aspirational view: don't let capital bind sizing
+        rows = combos.scan_combinations(
+            combinations.decant_recipes(mp), lat, hr, mp,
+            cash=scan_cash, limit_used=None if show_all else self._limit_used(),
+            beta=config.COMBO_BETA, staleness_max=config.PATIENT_STALENESS_S,
+            members=True, keep_unprofitable=show_all)
+        rows = [r for r in rows if show_all or r["roi"] >= config.COMBO_MIN_ROI]
+        if not rows:
+            print("  no potion decant clears tax + the full spread right now — dose prices are in line. "
+                  "These gaps open and close; check back later. (`decant all` shows the aspirational list.)")
+            return
+        if by_roi:
+            rows.sort(key=lambda r: r["roi"], reverse=True)
+        # pump/knife gate on the legs you'd BUY — same check `sets`/`go` use — until n rows survive
+        kept, pumped = [], 0
+        for r in rows:
+            if len(kept) >= n:
+                break
+            if config.COMBO_ANOMALY_CHECK and not show_all and not all(
+                anomaly.is_buyable(anomaly.assess(int(iid), lat, hr, api.timeseries, long=True))
+                for iid in r["bought_ids"]):
+                pumped += 1
+                continue
+            kept.append(r)
+        if not kept:
+            print("  every potion decant has a dislocated leg right now (pump / falling knife) — nothing "
+                  "safe to work. These revert; check back later.")
+            return
+        tag = "aspirational (ignores cash)" if show_all else f"affordable with cash {cash:,}"
+        rank = "ROI%" if by_roi else "total gp"
+        print(f"  COMBINATIONS · decant · full spread (β={config.COMBO_BETA:g}, tax netted, vials credited) · "
+              f"{tag} · by {rank}  ⚠ best-case: assumes you fill AT the bid/ask")
+        print(f"  {'potion (from→to)':22}{'buy → decant → sell (totals for the plan)':44}{'ROI':>6}"
+              f"{'net gp':>12}  fill")
+        for r in kept:
+            eta = r["fill_eta_h"]
+            fill = f"{eta:.1f}h" if eta and eta < 100 else "—"
+            conv = r["conversions"]
+            flag = "" if not show_all or conv >= 1 else " ⟵ need cash"
+            bt, st = r["in_qty"] * conv, r["out_qty"] * conv   # totals you'd actually buy / sell
+            seg = (f"{bt:,} ({r['in_dose']})@{int(r['in_unit_px']):,} → "
+                   f"{st:,} ({r['out_dose']})@{int(r['out_unit_px']):,}")
+            print(f"  {str(r['name'])[:22]:22}{seg:44}{r['roi'] * 100:>5.1f}%{int(r['total_gp']):>12,}"
+                  f"  {fill}{flag}")
+        if pumped:
+            print(f"  ({pumped} decant(s) skipped — a leg is price-dislocated / falling; likely manipulated)")
+        print("  Read a row as: BUY that many of the (from)-dose at its price, decant UP for free at Bob Barter, "
+              "then SELL the (to=4)-dose (post-tax) at its price. You buy the low dose, you sell the (4).")
+        print("  Counts differ because doses are conserved — 4×(3) = 3×(4) — not multiplied. The edge is a dose "
+              "being cheaper as a low dose than as a (4). ROI = per gp deployed · totals fit cash+buy-limit · members-only.")
+        print("  After you decant in-game, run `decant log <potion(dose)> <count>` so the (4) sell books real P&L.")
+
+    def _decant_log(self, args: list[str]) -> None:
+        """Record an executed decant so cost basis follows the potion: `decant log <source-potion(dose)>
+        <count>` moves the basis of `count` low-dose potions onto the (4)s they became, so the later sell
+        reports true realised P&L instead of 0. e.g. `decant log Super strength(3) 2000`."""
+        import math
+        import re
+        if len(args) < 2 or not args[-1].isdigit():
+            print("  usage: decant log <potion(dose)> <count>   e.g. decant log Super strength(3) 2000")
+            return
+        count = int(args[-1])
+        src = self.resolve(" ".join(args[:-1]))
+        if not src:
+            print("  source not found — name the low dose exactly, e.g. 'Super strength(3)'")
+            return
+        m = re.match(r"^(.+?)\((\d)\)$", src["name"])
+        if not m or int(m.group(2)) >= 4:
+            print(f"  '{src['name']}' isn't a (1),(2) or (3) dose — decant UP means the source is a low dose")
+            return
+        base, dose = m.group(1), int(m.group(2))
+        out = self.resolve(f"{base}(4)")
+        if not out:
+            print(f"  couldn't find {base}(4) in the mapping")
+            return
+        out_qty = count * dose // 4
+        if out_qty <= 0:
+            print(f"  {count}×({dose}) = {count * dose} doses — not enough for a single (4)")
+            return
+        if (count * dose) % 4:
+            step = 4 // math.gcd(dose, 4)  # smallest whole-(4) source batch for this dose
+            print(f"  ⚠ {count}×({dose}) = {count * dose} doses isn't a whole number of (4)s — recording "
+                  f"{out_qty} and leaving {count * dose - out_qty * 4} dose(s) behind. Decant multiples of {step}.")
+        moved, navg, in_avg = self.j.record_decant(src["id"], src["name"], count, out["id"], out["name"], out_qty)
+        if in_avg <= 0:
+            print(f"  ⚠ no tracked cost for {src['name']} (position already synced away or bought off-journal). "
+                  f"Recorded {out_qty:,} {out['name']} at avg 0 — its sell P&L will read low. Re-`buy` the source, "
+                  f"or `hold {out['name']} {out_qty} <avg>` to set the basis.")
+        else:
+            print(f"  decanted {count:,} {src['name']} → {out_qty:,} {out['name']} · moved {moved:,.0f} gp basis "
+                  f"→ avg {navg:,.0f}/ea (cash & tax unchanged; the sell will now book real P&L)")
+
     def cmd_audit(self, args: list[str]) -> None:
         """Full reconciliation from the authoritative sources — RuneLite's complete buy/sell history
         (the trades file) + your live bag. Per item: total bought, total sold, history net, what you
@@ -1591,7 +1735,7 @@ class Terminal:
             "overnight": lambda a: self.cmd_overnight(a), "gear": lambda a: self.cmd_gear(a),
             # occasional
             "scan": lambda a: self.cmd_scan(a), "port": lambda a: self.cmd_port(a),
-            "sets": lambda a: self.cmd_sets(a),
+            "sets": lambda a: self.cmd_sets(a), "decant": lambda a: self.cmd_decant(a),
             "sellquote": lambda a: self.cmd_sellquote(a), "anomaly": lambda a: self.cmd_anomaly(a),
             "pnl": lambda a: self.cmd_pnl(), "progress": lambda a: self.cmd_progress(a),
             "pos": lambda a: self.cmd_pos(), "inv": lambda a: self.cmd_inventory(a),

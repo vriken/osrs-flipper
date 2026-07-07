@@ -63,6 +63,47 @@ def test_repair_zeroes_only_phantom_realised_and_is_idempotent(tmp_path):
     jr.con.close()
 
 
+# --- decanting: cost basis follows the potion, cash/tax/P&L untouched -------------------------------
+
+SS3, SS4 = 157, 2440  # Super strength(3) / (4)
+
+
+def test_decant_moves_cost_basis_from_low_dose_to_the_4(j):
+    j.record_buy(SS3, "Super strength(3)", 2000, 2204)          # 4,408,000 into (3)s
+    cash_after_buy = j.cash()
+    moved, navg, in_avg = j.record_decant(SS3, "Super strength(3)", 2000, SS4, "Super strength(4)", 1500)
+    assert in_avg == 2204 and moved == 2000 * 2204              # basis consumed from the (3)s
+    assert j.position(SS3) is None                              # all 2000 (3)s decanted away
+    p4 = j.position(SS4)
+    assert p4.qty == 1500 and p4.avg_cost == pytest.approx(2000 * 2204 / 1500)  # cost conserved onto the (4)s
+    assert j.cash() == cash_after_buy and j.realized_pnl() == 0  # decant is cash- and P&L-neutral
+
+
+def test_decant_then_sell_books_true_realised_pnl(j):
+    # the whole point: without the re-base the (4)s sell at avg_cost 0 → realised 0, hiding the profit.
+    j.record_buy(SS3, "Super strength(3)", 2000, 2204)
+    j.record_decant(SS3, "Super strength(3)", 2000, SS4, "Super strength(4)", 1500)
+    _proceeds, realized = j.record_sell(SS4, "Super strength(4)", 1500, 3235)   # tax(3235)=64 → net 3171
+    assert realized == pytest.approx(1500 * 3171 - 2000 * 2204)  # +348,500 — the real decant edge
+    assert j.position(SS4).qty == 0
+
+
+def test_decant_blends_into_an_existing_4_position(j):
+    j.record_buy(SS4, "Super strength(4)", 500, 3200)           # already hold 500 (4)s at 3,200
+    j.record_buy(SS3, "Super strength(3)", 2000, 2204)
+    j.record_decant(SS3, "Super strength(3)", 2000, SS4, "Super strength(4)", 1500)
+    p4 = j.position(SS4)
+    assert p4.qty == 2000                                       # 500 + 1500
+    assert p4.avg_cost == pytest.approx((500 * 3200 + 2000 * 2204) / 2000)  # weighted blend
+
+
+def test_decant_falls_back_to_last_buy_when_position_synced_away(j):
+    j.record_buy(SS3, "Super strength(3)", 2000, 2204)
+    j.con.execute("DELETE FROM positions WHERE item_id=?", [SS3])   # simulate a bag-sync that dropped it
+    moved, _navg, in_avg = j.record_decant(SS3, "Super strength(3)", 2000, SS4, "Super strength(4)", 1500)
+    assert in_avg == 2204 and moved == 2000 * 2204                  # recovered from the BUY ledger row
+
+
 def test_cannot_oversell(j):
     j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
     proceeds, realized = j.record_sell(GOLD_BAR, "Gold bar", 999, 101)
