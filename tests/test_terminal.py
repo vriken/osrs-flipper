@@ -3,11 +3,26 @@
 import types
 
 from osrs_flipper import terminal as term_mod
-from osrs_flipper.journal import Journal
+from osrs_flipper.journal import Journal, Position
 from osrs_flipper.runelite import Offer
 from osrs_flipper.terminal import Terminal
 
 na = Terminal._next_action
+
+# A full Super strength (1)-(4) family + the empty vial — enough for decant_recipes to build inputs.
+_SS_MAPPING = [
+    {"id": 161, "name": "Super strength(1)"}, {"id": 159, "name": "Super strength(2)"},
+    {"id": 157, "name": "Super strength(3)"}, {"id": 2440, "name": "Super strength(4)"},
+    {"id": 229, "name": "Vial"},
+]
+
+
+def _mock_potion_api(monkeypatch, *, members=True, high4=3235):
+    monkeypatch.setattr(term_mod.config, "MEMBERS", members)
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: _SS_MAPPING)
+    monkeypatch.setattr(term_mod.api, "one_hour",
+                        lambda: {2440: {"avgHighPrice": high4, "highPriceVolume": 5000}})
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
 
 
 def test_split_sells_holds_back_bounce_items():
@@ -20,6 +35,53 @@ def test_split_sells_holds_back_bounce_items():
     to_list, holds = Terminal._split_sells(rows, rec)
     assert [r["item_id"] for r in to_list] == [1, 3]   # bounce (2) pulled out of the sell list
     assert [r["item_id"] for r in holds] == [2]
+
+
+# --- decant-aware sell review: a held low dose exits via decant, not a flip -------------------------
+
+def test_decant_input_ids_lists_low_doses_members_only(monkeypatch):
+    _mock_potion_api(monkeypatch, members=True)
+    ids = Terminal._decant_input_ids(None)
+    assert {161, 159, 157} <= ids and 2440 not in ids   # the (1),(2),(3) are inputs; the (4) is the output
+    _mock_potion_api(monkeypatch, members=False)
+    assert Terminal._decant_input_ids(None) == set()     # no Bob Barter in F2P
+
+
+def test_decant_exit_ready_recommends_decant_and_prices_the_4(monkeypatch):
+    from osrs_flipper.tax import ge_tax
+    _mock_potion_api(monkeypatch)
+    held = [Position(item_id=157, name="Super strength(3)", qty=4, avg_cost=2204)]  # 4×(3) = 12 doses = 3×(4)
+    rows = Terminal._decant_exits(None, held, busy_ids=set())
+    assert len(rows) == 1
+    d = rows[0]
+    assert d["ready"] and d["out_qty"] == 3 and d["out_name"] == "Super strength(4)"
+    assert d["net"] == 3 * (3235 - ge_tax(3235)) - 4 * 2204    # sell 3 (4)s post-tax, less the (3) basis
+    assert d["leftover"] == 0 and not d["underwater"]
+
+
+def test_decant_exit_partial_says_accumulate_not_flip(monkeypatch):
+    _mock_potion_api(monkeypatch)
+    held = [Position(item_id=157, name="Super strength(3)", qty=1, avg_cost=2204)]  # 3 doses — can't make a (4)
+    rows = Terminal._decant_exits(None, held, busy_ids=set())
+    assert rows[0]["ready"] is False and rows[0]["need"] == 2   # need ≥2 (3)s for one (4)
+
+
+def test_decant_exit_skips_items_with_a_live_offer(monkeypatch):
+    _mock_potion_api(monkeypatch)
+    held = [Position(item_id=157, name="Super strength(3)", qty=4, avg_cost=2204)]
+    assert Terminal._decant_exits(None, held, busy_ids={157}) == []   # still buying / already listed → skip
+
+
+def test_decant_exit_none_in_f2p(monkeypatch):
+    _mock_potion_api(monkeypatch, members=False)
+    held = [Position(item_id=157, name="Super strength(3)", qty=4, avg_cost=2204)]
+    assert Terminal._decant_exits(None, held, busy_ids=set()) == []
+
+
+def test_next_action_surfaces_a_ready_decant(monkeypatch):
+    ready = [{"ready": True, "name": "Super strength(3)"}]
+    msg = na([], [], 0, [], ready)
+    assert "decant" in msg.lower() and "Bob Barter" in msg
 
 
 def _stub(j, offers=()):
