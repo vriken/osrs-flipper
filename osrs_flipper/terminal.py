@@ -437,61 +437,70 @@ class Terminal:
                 print(f"  decant detected: {decanted:,} {p.name} → {out_qty:,} {out_name} "
                       f"(basis {moved:,.0f} gp moved onto the (4)s, avg {navg:,.0f}/ea)")
 
-    def _rebalance(self, offers: list) -> list[str]:
-        """Flag active BUYs whose slot + capital a better available flip would beat by SWAP_RATIO
-        in ROI-per-hour (margin% ÷ fill-time), while the buy is still EARLY and not just-placed.
-        Sells are excluded — they're just waiting for a buyer. Uses the SAME deep scan the deploy
-        plan uses (so it can't contradict what `port` just recommended), and floors every fill-time
-        so a near-instant flip can't dominate on a rounding artifact."""
+    def _rebalance(self, offers: list, cash: int, held: list, net_worth: int,
+                   daytime: bool, hours: float) -> list[str]:
+        """Flag an active BUY whose slot + capital `go`'s OWN buy plan would deploy something materially
+        better into (≥ SWAP_RATIO the expected gp/slot of just finishing the stuck buy), while the buy is
+        still EARLY and not just-placed. Sells are excluded — they're waiting for a buyer.
+
+        The alternative is the top pick of the SAME unified candidate pool the deploy plan ranks (flips +
+        gear + sets + decant, `_deploy_candidates`), so the named swap is exactly what you'll be told to
+        buy for the freed slot — never a flips-only pick the plan then overrides. The freed capital is
+        added back for sizing so affordability matches the post-cancel plan."""
+        from . import planner
         from .tax import post_tax_received
         now_ms = int(time.time() * 1000)
-        floor_eta = config.MIN_FILL_ETA_H
         # eligible = early fill AND old enough that suggesting a cancel isn't churning a fresh order
         buys = [o for o in offers if o.is_buy and o.qty and (o.filled / o.qty) < config.SWAP_MAX_FILL
                 and o.started_ms and (now_ms - o.started_ms) / 3_600_000 >= config.SWAP_MIN_AGE_H]
         if not buys:
             return []
-        cash = int(self.j.cash()) or config.BANKROLL
-        df = scanner.scan(mode="balanced", bankroll=cash, top=8, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())  # deep scan — same as the deploy plan
-        held_active = {o.item_id for o in offers}
-        alts = []  # distinct candidates you don't already hold / have on offer — one per swap
-        for _, r in df.iterrows():
-            if int(r["item_id"]) in held_active or not float(r.get("fill_eta_h") or 0) > 0:
-                continue
-            alts.append({"alt_name": str(r["name"]), "alt_margin": float(r["margin_pct"]),
-                         "alt_eta": float(r["fill_eta_h"]),
-                         "alt_roi_h": scanner.roi_per_hour(float(r["margin_pct"]),
-                                                           float(r["fill_eta_h"]), floor_eta)})
-        if not alts:
-            return []
         lat, hr = self.latest(), api.one_hour()
         names = {r["id"]: r["name"] for r in api.mapping()}
-        rows = []
+        # value of KEEPING each stuck buy = expected gp over the window from finishing it (buy→sell),
+        # prorated by how much of that completion fits the window — a slow buy earns only a sliver.
+        stuck, freed_capital = [], 0
         for o in buys:
             ask = (lat.get(o.item_id) or {}).get("high")
-            if not ask or not o.price:
-                continue
-            if ask >= config.GEAR_MIN_PRICE:
-                continue  # patient big-ticket buy (gear / expensive set piece): posted at the full
-                          # spread to sit and fill over hours, so its fast-flip ROI/hour is meant to
-                          # be low — don't tell the user to cancel the gear/set `go` just recommended
-            roi = (post_tax_received(int(ask), item_id=o.item_id) - o.price) / o.price
+            if not ask or not o.price or ask >= config.GEAR_MIN_PRICE:
+                continue  # patient big-ticket buy is meant to sit and fill slowly — don't nag to cancel it
+            remaining = max(0, o.qty - o.filled)
+            margin = post_tax_received(int(ask), item_id=o.item_id) - o.price
             v = hr.get(o.item_id, {})
             lowv, highv = v.get("lowPriceVolume") or 0, v.get("highPriceVolume") or 0
-            eta = ((o.qty - o.filled) / (config.ALPHA * lowv) if lowv else float("inf")) \
-                + (o.qty / (config.ALPHA * highv) if highv else float("inf"))
-            roi_h = scanner.roi_per_hour(roi, eta, floor_eta)
-            rows.append({"slot": o.slot, "name": str(names.get(o.item_id, o.item_id)),
-                         "roi": roi, "eta": eta, "roi_h": roi_h, "fill_frac": o.filled / o.qty})
-        swaps = scanner.rebalance_swaps(rows, alts, ratio=config.SWAP_RATIO,
-                                        max_fill=config.SWAP_MAX_FILL)
-        out = []
-        for s in swaps:
+            eta = ((remaining / (config.ALPHA * lowv)) if lowv else float("inf")) \
+                + ((o.qty / (config.ALPHA * highv)) if highv else float("inf"))
+            keep_gp = (max(0.0, margin) * remaining * min(1.0, hours / max(config.MIN_FILL_ETA_H, eta))
+                       if eta < float("inf") else 0.0)
+            freed_capital += o.price * remaining  # unfilled reserved gold a cancel would return
+            stuck.append({"slot": o.slot, "name": str(names.get(o.item_id, o.item_id)),
+                          "keep_gp": keep_gp, "roi": margin / o.price, "eta": eta})
+        if not stuck:
+            return []
+        # rank the SAME unified pool the deploy plan uses, sized to the post-cancel cash for one freed slot
+        mp = api.mapping()
+        n = len(stuck)
+        cands, verify, _ = self._deploy_candidates(cash + freed_capital, held, offers, n, net_worth,
+                                                   daytime, hours, lat, hr, mp)
+        exclude_ids = {h.item_id for h in held} | {o.item_id for o in offers}
+        ranked = planner.rank(cands, free_slots=n, patient_confidence=config.PATIENT_EV_CONFIDENCE,
+                              exclude_ids=exclude_ids, verify=verify)
+        if not ranked:
+            return []
+        cand_val = [(c, planner.per_slot_score(c, patient_confidence=config.PATIENT_EV_CONFIDENCE))
+                    for c in ranked]
+        out, used = [], 0
+        for s in sorted(stuck, key=lambda x: x["keep_gp"]):   # worst-kept buy first
+            if used >= len(cand_val):
+                break
+            c, cval = cand_val[used]
+            if cval < max(s["keep_gp"], 1.0) * config.SWAP_RATIO:
+                continue  # nothing available clearly beats finishing this buy — leave it
+            used += 1
             eta_s = f"{s['eta']:.1f}h" if s["eta"] < 100 else "stuck"
-            edge = "stuck/underwater" if s["roi_h"] <= 0 else f"{s['alt_roi_h'] / s['roi_h']:.0f}× faster growth"
+            edge = "stuck/underwater" if s["keep_gp"] <= 0 else f"~{cval / max(s['keep_gp'], 1):.0f}× the gp/slot"
             out.append(f"  slot {s['slot']}: cancel {s['name'][:18]} ({s['roi']:+.1%} in {eta_s}) → "
-                       f"{s['alt_name'][:18]} ({s['alt_margin']:.1%} in {s['alt_eta']:.1f}h) · {edge}")
+                       f"{str(c.key)[:26]} · {edge} (what `go` would deploy here)")
         return out
 
     def _review_offers(self) -> list[tuple]:
@@ -674,9 +683,9 @@ class Terminal:
                 if hint:
                     print(hint)
                 refined.append((o, v, elapsed_h, eta_h, prog))
-            swaps = self._rebalance(offers)  # active buy a better flip would beat → suggest a swap
+            swaps = self._rebalance(offers, cash, held, net_worth, daytime, hours_until_sleep)  # a better slot use → swap
             if swaps:
-                print("  REBALANCE (a better flip wants these slots):")
+                print("  REBALANCE (a better use of these slots — what `go` would deploy):")
                 for s in swaps:
                     print(alert.color(s, "yellow"))
 
@@ -752,13 +761,13 @@ class Terminal:
                   & (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & df["tradeable"]
                   & (df["hold_units"] > 0) & (df["margin_abs"] > 0) & ~df["suspect"]].copy()
 
-    def _plan_buys(self, cash: int, held: list, offers: list, buy_slots: int, net_worth: int,
-                   daytime: bool, hours: float, lat: dict, hr: dict, mp: list) -> list[dict]:
-        """THE unified buy recommendation: gather fast-flip, gear, and set candidates, rank them on one
-        per-slot currency (expected gp over the window you have, best-case gear/set EV haircut so it
-        can't crowd out an honest flip), print the merged plan, and return the chosen picks. Fast flips
-        cycle (throughput); gear/sets fill once — so daytime favours flips, overnight lets patient plays
-        win the slots. `_next_action` reads the returned picks."""
+    def _deploy_candidates(self, cash: int, held: list, offers: list, buy_slots: int, net_worth: int,
+                           daytime: bool, hours: float, lat: dict, hr: dict, mp: list):
+        """Gather every deployable candidate — fast flips + patient gear + GE sets + potion decants — as
+        planner.Candidate on ONE per-slot currency (expected gp over the window; best-case gear/set/decant
+        EV is haircut at ranking). Shared by the free-slot buy plan (`_plan_buys`) AND the rebalance nudge
+        (`_rebalance`), so both rank the SAME universe — the nudge's named swap is exactly what the plan
+        would deploy. Returns (candidates, verify_fn, fill_cal); verify_fn is the lazy pump/knife gate."""
         from . import anomaly, combinations, combos, planner
         limit_used = self._limit_used()
         exclude_ids = {h.item_id for h in held} | {o.item_id for o in offers}
@@ -854,6 +863,18 @@ class Terminal:
             except Exception:  # noqa: BLE001 — API hiccup shouldn't silently drop a pick
                 return True
 
+        return cands, verify, fcal
+
+    def _plan_buys(self, cash: int, held: list, offers: list, buy_slots: int, net_worth: int,
+                   daytime: bool, hours: float, lat: dict, hr: dict, mp: list) -> list[dict]:
+        """THE unified buy recommendation: gather flip/gear/set/decant candidates (`_deploy_candidates`),
+        rank them on one per-slot currency, print the merged plan, and return the chosen picks. Fast flips
+        cycle (throughput); gear/sets/decant fill once — so daytime favours flips, overnight lets patient
+        plays win the slots. `_next_action` reads the returned picks."""
+        from . import planner
+        exclude_ids = {h.item_id for h in held} | {o.item_id for o in offers}
+        cands, verify, fcal = self._deploy_candidates(cash, held, offers, buy_slots, net_worth,
+                                                      daytime, hours, lat, hr, mp)
         chosen = planner.rank(cands, free_slots=buy_slots,
                               patient_confidence=config.PATIENT_EV_CONFIDENCE,
                               exclude_ids=exclude_ids, verify=verify)

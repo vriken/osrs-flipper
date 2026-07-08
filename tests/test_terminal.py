@@ -149,6 +149,49 @@ def test_autodecant_noop_in_f2p(tmp_path, monkeypatch):
     j.con.close()
 
 
+# --- rebalance names the deploy plan's OWN pick (unified pool), not a flips-only alt ----------------
+
+def _rebal_stub(cands, latest, monkeypatch):
+    monkeypatch.setattr(term_mod.api, "one_hour", lambda: {100: {"lowPriceVolume": 1, "highPriceVolume": 1}})
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 100, "name": "Raw halibut"}])
+    return types.SimpleNamespace(latest=lambda: latest,
+                                 _deploy_candidates=lambda *a, **k: (cands, lambda c: True, {}))
+
+
+def _stuck_buy():  # early-fill, old (started_ms truthy but ancient) → eligible for a swap
+    return Offer(slot=7, item_id=100, is_buy=True, state="BUYING", qty=1000, price=100,
+                 started_ms=1, filled=0)
+
+
+def test_rebalance_names_the_unified_top_pick(monkeypatch):
+    from osrs_flipper import planner
+    # a strong gear candidate — the OLD flips-only rebalance could never have named it
+    cand = planner.Candidate(kind="gear", key="Elder chaos top", slots=1, window_gp=60_000,
+                             patient=True, item_ids=(200,))
+    stub = _rebal_stub([cand], {100: {"high": 105}}, monkeypatch)
+    out = Terminal._rebalance(stub, [_stuck_buy()], cash=400_000, held=[], net_worth=2_000_000,
+                              daytime=True, hours=5.0)
+    assert len(out) == 1
+    assert "cancel Raw halibut" in out[0] and "Elder chaos top" in out[0] and "go` would deploy" in out[0]
+
+
+def test_rebalance_stays_silent_when_nothing_clearly_beats_the_stuck_buy(monkeypatch):
+    from osrs_flipper import planner
+    weak = planner.Candidate(kind="flip", key="Meh flip", slots=1, window_gp=1.0, item_ids=(200,))
+    stub = _rebal_stub([weak], {100: {"high": 105}}, monkeypatch)
+    assert Terminal._rebalance(stub, [_stuck_buy()], cash=400_000, held=[], net_worth=2_000_000,
+                               daytime=True, hours=5.0) == []
+
+
+def test_rebalance_ignores_a_nearly_filled_buy(monkeypatch):
+    from osrs_flipper import planner
+    cand = planner.Candidate(kind="flip", key="Fast flip", slots=1, window_gp=60_000, item_ids=(200,))
+    stub = _rebal_stub([cand], {100: {"high": 105}}, monkeypatch)
+    o = Offer(slot=7, item_id=100, is_buy=True, state="BUYING", qty=1000, price=100, started_ms=1, filled=900)
+    assert Terminal._rebalance(stub, [o], cash=400_000, held=[], net_worth=2_000_000,
+                               daytime=True, hours=5.0) == []   # 90% filled → don't churn it
+
+
 def _stub(j, offers=()):
     return types.SimpleNamespace(
         j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000},
