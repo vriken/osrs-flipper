@@ -990,7 +990,8 @@ class Terminal:
             from .tax import post_tax_received
             q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
             if not q:
-                return verdict, alert.color("         → no profitable spread now — cancel & redeploy that cash", "yellow")
+                return verdict, alert.color("         → no spread to buy into now — cancel the buy & redeploy; "
+                                            "stock you already hold may still sell at cost+", "yellow")
             if not known:  # market spread exists → most likely just slow; show it to compare against
                 return "slow", alert.color(f"         → market now: buy {q.buy_px:,} / sell {q.sell_px:,} (net {q.net_unit}/ea) — fine if your bid ≥ {q.buy_px:,}", "yellow")
             # known price: fine if within a deadband of the competitive buy AND still profitable to
