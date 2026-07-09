@@ -155,6 +155,7 @@ class Terminal:
         self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
         self._cal_eta: dict = {}       # live fill-time (ETA) correction by price×volume, auto-applied
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
+        self._cal_impact: dict = {}    # live market-impact slope K (calibrate_impact from fills), auto-applied
         # auto-push: repost the compact `go` board to Discord on an idle tick (main thread — no DB race).
         # The board is the single message; it reposts at the bottom only when its actionable content changes.
         self._auto_push = False        # enabled flag (`alerts on/off`); auto-on at startup if a channel is set
@@ -196,7 +197,8 @@ class Terminal:
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
         df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
+                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal(),
+                          impact_cal=self._impact_cal())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -398,7 +400,8 @@ class Terminal:
         net_worth = int(self.j.equity(bids) + src.tied_gold())
         picks, idle, _ = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
-            net_worth=net_worth, fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
+            net_worth=net_worth, fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal(),
+                          impact_cal=self._impact_cal())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -423,11 +426,13 @@ class Terminal:
         self._cal_fill = calibration.calibrate_fill(rows)
         self._cal_eta = calibration.calibrate_eta(rows)  # realized fill-time vs predicted, by price×volume
         self._cal_edges = analysis.item_edges(analysis.collect_fills())  # per-item realized-edge (JSON audit)
+        self._cal_impact = calibration.calibrate_impact(rows)  # market-impact slope K from fills (dormant→prior)
         if self._cal_at >= 0:  # not the first (silent) computation → announce the refresh
             fg = self._cal_fill.get("global") or 1.0
             eg = self._cal_eta.get("global") or 1.0
+            ik = calibration.effective_impact_k(self._cal_impact)
             print(f"  🔧 recalibrated ({n} resolved trades): β {self._cal_beta:.2f}→{new_beta:.2f} · "
-                  f"fill ×{fg:.2f} · eta ×{eg:.2f} (auto-applied)")
+                  f"fill ×{fg:.2f} · eta ×{eg:.2f} · impact K {ik:.2f} (auto-applied)")
         self._cal_beta = new_beta
         self._cal_at = n
 
@@ -450,6 +455,11 @@ class Terminal:
         """Live (cached) per-item realized-edge multipliers, auto-applied to the ranking."""
         self._ensure_calibration()
         return self._cal_edges
+
+    def _impact_cal(self) -> dict:
+        """Live (cached) market-impact calibration (slope K measured from fills), auto-applied to ranking."""
+        self._ensure_calibration()
+        return self._cal_impact
 
     def _sync_cash(self) -> tuple[int | None, int]:
         """Refresh journal cash from live coins and return (coins, tied_in_offers). Coins already
@@ -991,7 +1001,8 @@ class Terminal:
             fcal = self._fill_cal()
             picks, _idle, _floor = scanner.build_portfolio(
                 bankroll=cash, held_ids=list(exclude_ids), free_slots=buy_slots, limit_used=limit_used,
-                net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta())
+                net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta(),
+                impact_cal=self._impact_cal())
             for p in picks:
                 cands.append(planner.Candidate(kind="flip", key=str(p["name"]), slots=1,
                     window_gp=self._flip_window_gp(p, hours), patient=False,
@@ -1377,7 +1388,8 @@ class Terminal:
         res = False
         try:
             df = scanner.scan(mode="balanced", bankroll=max(1, cash), top=5, limit_used=self._limit_used(),
-                              fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
+                              fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal(),
+                          impact_cal=self._impact_cal())
             for _, r in df.iterrows():
                 eta = float(r.get("fill_eta_h") or 0)
                 roi = float(r.get("margin_pct") or 0)

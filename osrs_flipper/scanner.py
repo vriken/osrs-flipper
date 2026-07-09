@@ -132,6 +132,7 @@ def scan(
     beta: float | None = None,
     net_worth: int | None = None,
     cal_eta: dict | None = None,
+    impact_cal: dict | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -181,7 +182,8 @@ def scan(
     # price-impact haircut: your intended size vs the volume that trades — a large share walks the
     # price against you (distinct from fill probability). Deflates EV where a position is a big
     # fraction of flow; ≈1 for small bankroll-bound stacks and deep commodities.
-    df["impact_mult"] = [market_impact_mult(c, v)
+    impact_k = calibration.effective_impact_k(impact_cal)  # calibrated market-impact slope, else the prior
+    df["impact_mult"] = [market_impact_mult(c, v, k=impact_k)
                          for c, v in zip(df["capacity"], df["vol_1h_binding"], strict=False)]
     df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"] * df["edge_mult"] * df["impact_mult"]
     df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"] * df["edge_mult"] * df["impact_mult"]
@@ -201,7 +203,8 @@ def scan(
             df = df[df[base_col] >= min_gp]
         return _buyable_head(df, top)  # snapshot path still skips pumps/knives (deep path does too)
 
-    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges, roi_weight)
+    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges, roi_weight,
+                             impact_k=impact_k)
     if min_gp and not out.empty:
         out = out[out["exp_gp_cycle_adj"] >= min_gp]  # drop flips too small to be worth a slot
     return out.head(top).reset_index(drop=True)
@@ -209,7 +212,7 @@ def scan(
 
 def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
                        fill_cal: dict | None = None, edges: dict | None = None,
-                       roi_weight: float | None = None) -> pd.DataFrame:
+                       roi_weight: float | None = None, impact_k: float | None = None) -> pd.DataFrame:
     """Deep-check the top snapshot candidates: re-price each with the quote optimiser (one
     source of truth — price-specific fills), then shrink the scores against the curse.
 
@@ -219,6 +222,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
     from .quote import optimal_quote
 
     horizon = MODE_HORIZON.get(mode, 2.0)
+    ik = config.IMPACT_K if impact_k is None else impact_k  # calibrated market-impact slope, else prior
     rows = []
     for _, row in df.head(candidates).iterrows():
         iid = int(row["item_id"])
@@ -242,7 +246,7 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
         reliab_mult = rel["reliab_mult"] if rel else 1.0
         edge_mult = float((edges or {}).get(iid, {}).get("edge_mult", 1.0))
         fmult = calibration.fill_multiplier(fill_cal, row.get("turnover_1h") or 0)
-        impact = market_impact_mult(int(row["capacity"]), row.get("vol_1h_binding") or 0)
+        impact = market_impact_mult(int(row["capacity"]), row.get("vol_1h_binding") or 0, k=ik)
         hung = hung_leg_mult(q.p_sell, q.net_unit / q.buy_px if q.buy_px else 0.0)
         mult = fmult * edge_mult * reliab_mult * impact * hung  # fill×edge×reliability×impact×hung-leg — EV, gp, score
         reliability = st["persist_factor"] * reliab_mult * min(1.0, q.p_round / 0.5)
@@ -355,7 +359,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
                     max_accumulate: int = 6, min_gp: int | None = None, min_margin: float = 0.01,
                     limit_used: dict[int, int] | None = None, net_worth: int | None = None,
                     fill_cal: dict | None = None, edges: dict | None = None,
-                    beta: float | None = None, cal_eta: dict | None = None) -> tuple[list[dict], float]:
+                    beta: float | None = None, cal_eta: dict | None = None,
+                    impact_cal: dict | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
                 fast-fill liquidity — what you work in your slots right now and cycle.
@@ -372,7 +377,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
-                        fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth, cal_eta=cal_eta)
+                        fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth, cal_eta=cal_eta,
+                        impact_cal=impact_cal)
                 for m in modes}
     # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks —
     # derived live from net worth and the ROI the market is paying (see slot_worth_floor).

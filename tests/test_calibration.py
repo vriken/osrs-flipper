@@ -127,6 +127,42 @@ def test_attribution_classifies_the_miss_reason():
                         "pred_eta_h": 1.0, "ts": 0, "filled_ts": 3600}) == "on_time"
 
 
+def _impact_row(qty, vol, filled_qty, pred_p_fill=0.8):
+    return {"qty": qty, "vol_1h_binding": vol, "filled_qty": filled_qty, "pred_p_fill": pred_p_fill}
+
+
+def test_calibrate_impact_dormant_until_both_participation_buckets_have_data():
+    assert calibration.calibrate_impact([], prior_k=1.0)["k"] == 1.0            # no data → prior
+    lo_only = [_impact_row(qty=1, vol=1000, filled_qty=1) for _ in range(5)]     # only the low bucket
+    assert calibration.calibrate_impact(lo_only, prior_k=1.0)["k"] == 1.0        # one bucket → prior
+
+
+def test_calibrate_impact_raises_k_when_big_orders_fill_worse():
+    # low-participation orders fill as predicted; high-participation ones fill far worse → impact real
+    lo = [_impact_row(qty=1, vol=1000, filled_qty=1) for _ in range(6)]      # p≈0.001, quality 1.25
+    hi = [_impact_row(qty=100, vol=1000, filled_qty=40) for _ in range(6)]   # p=0.10,  quality 0.625
+    out = calibration.calibrate_impact(lo + hi, prior_k=1.0, k=1)
+    assert out["k_measured"] is not None and out["k_measured"] > 1.0         # steeper than the prior
+    assert out["k"] > 1.0
+
+
+def test_calibrate_impact_neutral_when_participation_doesnt_matter():
+    # both buckets fill at the SAME quality (a flat fill-level bias fill_cal handles) → ratio 1 → K→0,
+    # so the participation slope is isolated and NOT double-counted with the fill correction.
+    lo = [_impact_row(qty=1, vol=1000, filled_qty=1, pred_p_fill=1.0) for _ in range(6)]
+    hi = [_impact_row(qty=100, vol=1000, filled_qty=100, pred_p_fill=1.0) for _ in range(6)]
+    out = calibration.calibrate_impact(lo + hi, prior_k=1.0, k=1)
+    assert out["k_measured"] == 0.0
+    assert out["k"] < 1.0
+
+
+def test_effective_impact_k_uses_calibrated_else_prior_clamped():
+    assert calibration.effective_impact_k(None, 1.0) == 1.0            # no calibration → prior
+    assert calibration.effective_impact_k({"k": 3.0}, 1.0) == 3.0       # calibrated value applied
+    assert calibration.effective_impact_k({"k": None}, 1.0) == 1.0      # no measure → prior
+    assert calibration.effective_impact_k({"k": 99.0}, 1.0) == 10.0     # clamped hi
+
+
 def test_eta_attribution_counts():
     rows = [{"status": "expired", "filled_qty": 0, "qty": 100},
             {"status": "expired", "filled_qty": 0, "qty": 100},
