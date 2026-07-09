@@ -72,3 +72,9 @@ def test_post_discord_strips_ansi_and_reports_no_webhook():
     from osrs_flipper import alert
     ok, detail = alert.post_discord("\033[31mred text\033[0m", webhook_url=None)
     assert ok is False and "no webhook" in detail
+
+
+def test_status_text_renders_free_slots_offers_and_verdicts():
+    o = Offer(slot=2, item_id=561, is_buy=True, state="BUYING", qty=1000, price=5, filled=600)
+    txt = monitor.status_text([(o, "ontrack", 0.5, 1.2, 0.6)], {561: "Air rune"}, free=3)
+    assert "3 slot(s) free" in txt and "Air rune" in txt and "BUY" in txt and "60%" in txt

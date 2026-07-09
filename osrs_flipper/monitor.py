@@ -62,26 +62,64 @@ def diff_new(current: dict, alerted: dict) -> list[tuple[tuple[int, int], str]]:
     return [(k, v) for k, v in current.items() if alerted.get(k) != v]
 
 
-def _live_attention(names: dict) -> dict[tuple[int, int], str]:
-    offers = datasource.active().active_offers()
-    rows = review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
-    return attention_events(rows)
+_VERDICT_TAG = {"collect": "✅ collect", "margin": "🟠 margin gone", "stale": "🟡 re-price",
+                "slow": "🐌 slow", "ontrack": "🟢 on track", "open": "· open", "done": "✅ done"}
+
+
+def status_text(rows: list[tuple], names: dict, free: int) -> str:
+    """A compact, always-current snapshot for the live status message: free slots + every offer + verdict."""
+    lines = [f"osrs-flipper · {free} slot(s) free · {len(rows)} working"]
+    for (o, v, _elapsed_h, eta_h, prog) in sorted(rows, key=lambda x: x[0].slot):
+        eta = f"{eta_h:.1f}h" if eta_h and eta_h < 100 else "—"
+        lines.append(f"  {o.slot} {str(names.get(o.item_id, o.item_id))[:16]:16} "
+                     f"{'BUY' if o.is_buy else 'SELL':4} {prog:>3.0%} {eta:>5}  {_VERDICT_TAG.get(v, v)}")
+    return "\n".join(lines)
 
 
 def watch_loop(stop, *, interval_s: int | None = None, webhook: str | None = None) -> None:
-    """Blocking poll loop (run in a daemon thread): push a Discord alert when an offer newly
-    needs attention. Resilient — a transient API/RuneLite error never kills the loop. State
-    that clears (offer collected / re-priced) is forgotten so a later re-entry alerts again."""
-    from .alert import notify
+    """Blocking poll loop (daemon thread), independent of `go`. Two outputs to Discord:
+      • a LIVE STATUS message (bot only) edited in place each tick — current slots/offers/verdicts;
+      • discrete ALERTS on transitions — an offer newly needs you (collect/margin/stale) or you PLACED
+        a new offer. Deduped so it never re-pings the same state. Resilient: a transient error just
+        retries next tick. Read-only (RuneLite + API) — never touches the journal, so no DB lock."""
+    from .alert import bot_enabled, edit_bot, notify, post_bot
 
     interval_s = interval_s or config.ALERT_POLL_S
     names: dict[int, str] = {}
     alerted: dict[tuple[int, int], str] = {}
+    seen_offers: set | None = None          # None until the first poll (don't alert existing offers as "placed")
+    status_id: str | None = None
+    last_status = ""
     while not stop.is_set():
         try:
             if not names:
                 names = {r["id"]: r["name"] for r in api.mapping()}
-            current = _live_attention(names)
+            offers = datasource.active().active_offers()
+            rows = review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
+
+            # live status message (bot only — webhooks can't edit): edit in place, only when it changed
+            if bot_enabled():
+                txt = status_text(rows, names, max(0, config.GE_SLOTS - len(offers)))
+                if txt != last_status:
+                    if status_id and edit_bot(status_id, txt):
+                        last_status = txt
+                    else:
+                        ok, mid = post_bot(txt)
+                        if ok:
+                            status_id, last_status = mid, txt
+
+            # discrete alert: you PLACED a new offer (transition into a slot we hadn't seen)
+            keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
+            if seen_offers is not None:
+                placed = [k for k in keys - seen_offers]
+                if placed:
+                    lines = [f"placed {'BUY' if s == 'BUY' else 'SELL'} {names.get(iid, iid)} (slot {sl})"
+                             for (sl, iid, s) in placed]
+                    notify("\U0001f4e5 offer placed:\n" + "\n".join(lines))
+            seen_offers = keys
+
+            # discrete alert: an offer newly NEEDS you (collect / margin gone / stale)
+            current = attention_events(rows)
             for k in [k for k in alerted if k not in current]:
                 del alerted[k]  # cleared → allow a future re-alert
             new = diff_new(current, alerted)
