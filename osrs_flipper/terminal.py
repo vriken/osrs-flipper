@@ -33,6 +33,10 @@ Occasional
 
 from __future__ import annotations
 
+import contextlib
+import io
+import queue
+import sys
 import threading
 import time
 
@@ -41,6 +45,24 @@ from .journal import Journal
 from .quote import optimal_quote
 
 _BOND = config.BOND_ITEM_ID
+
+
+class _Tee:
+    """A stdout proxy that writes to several streams at once — used to capture the `go` dashboard into a
+    buffer while still printing it to the console (interactive `go`)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s: str) -> int:
+        for st in self._streams:
+            st.write(s)
+        return len(s)
+
+    def flush(self) -> None:
+        for st in self._streams:
+            with contextlib.suppress(Exception):
+                st.flush()
 
 _VERDICTS = {
     "collect": ("📦 COLLECT — frees a slot", "yellow"),
@@ -82,8 +104,12 @@ class Terminal:
         self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
         self._cal_eta: dict = {}       # live fill-time (ETA) correction by price×volume, auto-applied
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
-        self._alert_stop = threading.Event()
-        self._alert_thread: threading.Thread | None = None
+        # auto-push: mirror the full `go` dashboard to Discord on an idle tick (main thread — no DB race)
+        self._auto_push = False        # enabled flag (`alerts on/off`); auto-on at startup if a channel is set
+        self._status_msg_id: str | None = None   # the live status message we edit in place
+        self._last_dash = ""           # last dashboard text pushed (push only when it changes)
+        self._alerted: dict = {}       # deduped attention pings (collect/margin/stale) until they clear
+        self._seen_offers: set | None = None      # for placed / slot-freed transition detection
         # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
         self._cut_bounce: dict[int, bool | None] = {}
         self._cut_better: bool | None = None
@@ -1271,20 +1297,70 @@ class Terminal:
 
     # --- background Discord alerts -------------------------------------------
     def _alerts_running(self) -> bool:
-        return self._alert_thread is not None and self._alert_thread.is_alive()
+        return self._auto_push
 
     def _start_alerts(self) -> bool:
-        """Spawn the daemon watcher (read-only: RuneLite + API, never the journal → no DB lock)."""
-        if not (config.DISCORD_WEBHOOK_URL or alert.bot_enabled()) or self._alerts_running():
-            return self._alerts_running()
-        self._alert_stop.clear()
-        self._alert_thread = threading.Thread(target=monitor.watch_loop, args=(self._alert_stop,), daemon=True)
-        self._alert_thread.start()
-        return True
+        """Enable auto-push (the idle-tick mirrors `go` to Discord on the MAIN thread — no watcher
+        thread, so no DuckDB race). Auto-on only when a Discord channel is configured."""
+        if config.DISCORD_WEBHOOK_URL or alert.bot_enabled():
+            self._auto_push = True
+        return self._auto_push
 
     def _stop_alerts(self) -> None:
-        self._alert_stop.set()
-        self._alert_thread = None
+        self._auto_push = False
+
+    def _render_go(self, echo: bool, args: list | None = None) -> str:
+        """Run the full `go` dashboard and return its rendered text. echo=True also prints it locally
+        (interactive `go`); echo=False is silent (background auto-tick). Main-thread only — cmd_go touches
+        the journal, and only this thread does. A `_Tee` mirrors stdout to the console AND the buffer."""
+        buf = io.StringIO()
+        sink = _Tee(sys.stdout, buf) if echo else buf
+        with contextlib.redirect_stdout(sink):
+            self.cmd_go(args or [])
+        return buf.getvalue()
+
+    def _go(self, args: list) -> None:
+        """Interactive `go`: print locally AND (if pushing is on) mirror the dashboard to the bot."""
+        dash = self._render_go(echo=True, args=args)
+        if self._auto_push and alert.bot_enabled() and dash:
+            self._status_msg_id = alert.set_status(dash, self._status_msg_id)
+            self._last_dash = dash
+
+    def _push_transition_pings(self) -> None:
+        """Discrete Discord pings on real transitions — you PLACED an offer, or one now needs you
+        (collect / margin gone / stale). Deduped until the state clears. Offers-only (no journal)."""
+        offers = self._active_offers()
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        rows = monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
+        keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
+        if self._seen_offers is not None and (placed := keys - self._seen_offers):
+            lines = [f"placed {s} {names.get(iid, iid)} (slot {sl})" for (sl, iid, s) in placed]
+            alert.notify("\U0001f4e5 offer placed:\n" + "\n".join(lines))
+        self._seen_offers = keys
+        current = monitor.attention_events(rows)
+        for k in [k for k in self._alerted if k not in current]:
+            del self._alerted[k]  # cleared → re-arm
+        new = monitor.diff_new(current, self._alerted)
+        if new:
+            lines = [f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}"
+                     for ((slot, iid), v) in new]
+            if alert.notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
+                self._alerted.update(dict(new))
+
+    def _auto_tick(self) -> None:
+        """Idle tick (main thread): ping transitions + edit the live status message with the full `go`
+        dashboard, but only when it changed. Silent locally. No-op unless auto-push is on with a channel."""
+        if not self._auto_push or not (config.DISCORD_WEBHOOK_URL or alert.bot_enabled()):
+            return
+        try:
+            self._push_transition_pings()
+            dash = self._render_go(echo=False)
+            if dash and dash != self._last_dash:
+                if alert.bot_enabled():
+                    self._status_msg_id = alert.set_status(dash, self._status_msg_id)
+                self._last_dash = dash
+        except Exception:  # noqa: BLE001 — a push failure must never break the REPL
+            pass
 
     def cmd_alerts(self, args: list[str]) -> None:
         """Background Discord alerts when an offer needs you (filled/margin-gone/stale).
@@ -1297,7 +1373,8 @@ class Terminal:
                       "(or OSRS_FLIPPER_DISCORD_WEBHOOK), then `reload`")
             else:
                 self._start_alerts()
-                print(f"  alerts ON — polling RuneLite every {config.ALERT_POLL_S}s, pushing via {chan}")
+                print(f"  alerts ON — auto-mirroring the `go` dashboard to {chan} every "
+                      f"{config.ALERT_POLL_S}s (and on each manual `go`), pushing transitions as they happen")
         elif sub == "off":
             self._stop_alerts()
             print("  alerts OFF")
@@ -2159,11 +2236,13 @@ class Terminal:
         n0 = self._autosync()
         if n0:
             print(f"  (auto-synced {n0} fill(s) from RuneLite)")
-        if self._start_alerts():  # auto-on when a webhook is configured
-            print(f"  (Discord alerts ON — every {config.ALERT_POLL_S}s; `alerts off` to stop)")
+        if self._start_alerts():  # auto-on when a Discord channel is configured
+            chan = "bot" if alert.bot_enabled() else "webhook"
+            print(f"  (Discord auto-push ON via {chan} — the `go` dashboard mirrors there + transitions "
+                  f"ping, refreshed every {config.ALERT_POLL_S}s; `alerts off` to stop)")
         handlers = {
             # daily
-            "go": lambda a: self.cmd_go(a),
+            "go": lambda a: self._go(a),
             "quote": lambda a: self.cmd_quote(a), "why": lambda a: self.cmd_why(a),
             "overnight": lambda a: self.cmd_overnight(a), "gear": lambda a: self.cmd_gear(a),
             # occasional
@@ -2184,29 +2263,51 @@ class Terminal:
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
             "help": lambda a: self.cmd_help(a), "?": lambda a: self.cmd_help(a),
         }
+        # input runs in a reader thread → a queue, so the main loop can wake on a timer (queue.Empty) to
+        # run the auto-push tick while idle. ALL journal access stays on this (main) thread → no DB race.
+        inq: queue.Queue = queue.Queue()
+
+        def _reader() -> None:
+            for line in sys.stdin:
+                inq.put(line)
+            inq.put(None)  # stdin closed (EOF / piped input exhausted)
+
+        threading.Thread(target=_reader, daemon=True).start()
+        sys.stdout.write("osrs> ")
+        sys.stdout.flush()
         while True:
             try:
-                raw = input("osrs> ").strip()
-            except (EOFError, KeyboardInterrupt):
+                try:
+                    raw = inq.get(timeout=config.ALERT_POLL_S)
+                except queue.Empty:
+                    self._auto_tick()  # idle → mirror `go` to Discord if anything changed (silent locally)
+                    continue
+                if raw is None:  # EOF
+                    print()
+                    break
+                raw = raw.strip()
+                if not raw:
+                    raw = "go"  # bare Enter → the everything dashboard
+                cmd, *args = raw.split()
+                cmd = cmd.lower()
+                if cmd in ("quit", "exit", "q"):
+                    break
+                synced = self._autosync()  # mirror completed fills into the journal before every command
+                if synced:
+                    print(f"  (auto-synced {synced} new fill(s) from RuneLite)")
+                fn = handlers.get(cmd)
+                if not fn:
+                    print(f"  unknown command: {cmd} (type `help`)")
+                else:
+                    try:
+                        fn(args)
+                    except Exception as e:  # keep the REPL alive on any error
+                        print(f"  error: {e}")
+                sys.stdout.write("osrs> ")  # re-prompt only after handling a command (not on idle ticks)
+                sys.stdout.flush()
+            except KeyboardInterrupt:
                 print()
                 break
-            if not raw:
-                raw = "go"  # bare Enter → the everything dashboard
-            cmd, *args = raw.split()
-            cmd = cmd.lower()
-            if cmd in ("quit", "exit", "q"):
-                break
-            synced = self._autosync()  # mirror completed fills into the journal before every command
-            if synced:
-                print(f"  (auto-synced {synced} new fill(s) from RuneLite)")
-            fn = handlers.get(cmd)
-            if not fn:
-                print(f"  unknown command: {cmd} (type `help`)")
-                continue
-            try:
-                fn(args)
-            except Exception as e:  # keep the REPL alive on any error
-                print(f"  error: {e}")
 
 
 def run() -> None:
