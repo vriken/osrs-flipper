@@ -829,7 +829,10 @@ class Terminal:
             regime = f"\U0001f319 winding down ({hours_until_sleep:.0f}h to sleep)"
         else:
             regime = "\U0001f4a4 overnight"
-        cash_str = f"cash {cash:,}" + (f" (+{tied:,} in offers)" if coins is not None and tied else "")
+        # cash (liquid) + net worth (everything: cash + held stock marked-to-market, listed-to-sell
+        # included, + gold reserved in buy offers). The old "(+X in offers)" only counted buy-reserved
+        # gold, so it hid the value of what you're currently selling — net worth doesn't.
+        cash_str = f"cash {cash:,} · net worth {net_worth:,}"
         print(f"  === {hour:02d}:00 · {cash_str} · {len(held)} held · "
               f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
         if held and offers:  # split holdings into bank (sellable) vs tied up in GE
@@ -1276,10 +1279,17 @@ class Terminal:
             # sell into; only under-bidding by MORE than tick jitter (won't fill) or over-paying (no
             # margin) needs a re-quote. The deadband stops a 1gp book wiggle triggering a chase.
             net_at_mine = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
+            # a partial buy filling slowly: you can bank what's ALREADY filled at the same margin right
+            # now and free the slot + unfilled capital, instead of waiting for the slow remainder. Same
+            # gp/unit — the win is speed. Only worth showing when the filled units sell for a profit.
+            bank = ""
+            if 0 < o.filled < o.qty and net_at_mine > 0:
+                bank = alert.color(f"  ↳ or bank the {o.filled:,} filled now: sell @ {q.sell_px:,} "
+                                   f"(net {net_at_mine:,}/ea ≈ {net_at_mine * o.filled:,}) & free the slot", "yellow")
             tol = q.buy_px * config.REPRICE_DEADBAND
             if o.price >= q.buy_px - tol and net_at_mine > 0:
-                return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green")
-            return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
+                return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green") + bank
+            return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold") + bank
         # SELL: reference the 5m average buy price BLENDED toward the last tick (so noise is
         # smoothed but a genuine sharp drop still moves it), and only advise a re-list when you're
         # above that by more than the deadband.
