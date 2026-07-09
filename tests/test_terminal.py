@@ -465,20 +465,20 @@ def _autopush_stub(dash_ref):
                                  _push_transition_pings=lambda: None, _status_msg_id=None, _last_dash="")
 
 
-def test_auto_tick_edits_status_only_when_dashboard_changes(monkeypatch):
+def test_auto_tick_reposts_status_only_when_dashboard_changes(monkeypatch):
     monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: True)
     monkeypatch.setattr(term_mod.config, "DISCORD_BOT_TOKEN", "x")
     monkeypatch.setattr(term_mod.config, "DISCORD_CHANNEL_ID", "y")
     posted = []
-    monkeypatch.setattr(term_mod.alert, "set_status", lambda t, m: (posted.append(t), "mid")[1])
+    monkeypatch.setattr(term_mod.alert, "repost_status", lambda t, m: (posted.append(t), "mid")[1])
     dash = ["D1"]
     stub = _autopush_stub(dash)
-    Terminal._auto_tick(stub)                                  # first render → push
+    Terminal._auto_tick(stub)                                  # first render → repost at bottom
     assert posted == ["D1"] and stub._status_msg_id == "mid" and stub._last_dash == "D1"
-    Terminal._auto_tick(stub)                                  # unchanged → no push
+    Terminal._auto_tick(stub)                                  # unchanged → no repost (no churn/spam)
     assert posted == ["D1"]
     dash[0] = "D2"
-    Terminal._auto_tick(stub)                                  # changed → push again (edit in place)
+    Terminal._auto_tick(stub)                                  # changed → repost fresh (old one deleted)
     assert posted == ["D1", "D2"] and stub._last_dash == "D2"
 
 
@@ -488,7 +488,7 @@ def test_auto_tick_is_a_noop_when_off_or_no_channel(monkeypatch):
     monkeypatch.setattr(term_mod.config, "DISCORD_WEBHOOK_URL", None)
     monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: False)
     posted = []
-    monkeypatch.setattr(term_mod.alert, "set_status", lambda t, m: posted.append(t))
+    monkeypatch.setattr(term_mod.alert, "repost_status", lambda t, m: posted.append(t))
     off = _autopush_stub(["D"])
     off._auto_push = False
     Terminal._auto_tick(off)                                   # push disabled
