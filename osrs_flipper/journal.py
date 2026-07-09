@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS offer_events (
     attempt_id TEXT, ts BIGINT, event TEXT, qty BIGINT, price BIGINT, note TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS recommendations (
+    rec_id TEXT PRIMARY KEY, device TEXT, first_ts BIGINT, last_ts BIGINT, runs BIGINT,
+    kind TEXT, item_id INTEGER, side TEXT, name TEXT,
+    buy_px BIGINT, sell_px BIGINT, qty BIGINT, pred_eta_h DOUBLE, pred_gp DOUBLE, score DOUBLE,
+    net_worth BIGINT, free_slots INTEGER, mode TEXT, snap_low BIGINT, snap_high BIGINT, snap_vol BIGINT,
+    acted BOOLEAN DEFAULT FALSE, acted_ts BIGINT, attempt_id TEXT,
+    pulled_ts BIGINT, pull_reason TEXT, eval TEXT, eval_ts BIGINT
+);
 CREATE TABLE IF NOT EXISTS offer_seen (
     slot INTEGER, item_id INTEGER, placed_at BIGINT, observed BOOLEAN,
     is_buy BOOLEAN, qty BIGINT, price BIGINT, filled BIGINT,
@@ -271,6 +279,73 @@ class Journal:
 
     def blacklist_remove(self, item_id: int) -> None:
         self.con.execute("DELETE FROM blacklist WHERE item_id=?", [item_id])
+
+    # --- recommendation ledger (what the engine advised, whether you acted, and pulls) ---------------
+    _REC_DYN = ["buy_px", "sell_px", "qty", "pred_eta_h", "pred_gp", "score", "net_worth",
+                "free_slots", "mode", "snap_low", "snap_high", "snap_vol"]
+
+    def open_recommendations(self) -> list[dict[str, Any]]:
+        """Episodes still being recommended (not yet acted on or pulled)."""
+        rows = self.con.execute(
+            "SELECT rec_id, kind, item_id, side, name FROM recommendations "
+            "WHERE pulled_ts IS NULL AND (acted IS NULL OR acted = FALSE)").fetchall()
+        return [{"rec_id": r[0], "kind": r[1], "item_id": r[2], "side": r[3], "name": r[4]} for r in rows]
+
+    def upsert_recommendation(self, r: dict[str, Any], ts: int) -> str:
+        """Open a rec episode on first appearance for (kind,item_id,side), or bump its last_ts/runs and
+        refresh the dynamic fields while it keeps being recommended. Returns the episode's rec_id."""
+        row = self.con.execute(
+            "SELECT rec_id FROM recommendations WHERE kind=? AND item_id=? AND side=? AND pulled_ts IS NULL "
+            "AND (acted IS NULL OR acted = FALSE) ORDER BY last_ts DESC LIMIT 1",
+            [r["kind"], r["item_id"], r["side"]]).fetchone()
+        if row:
+            self.con.execute(
+                f"UPDATE recommendations SET last_ts=?, runs=runs+1, {','.join(c + '=?' for c in self._REC_DYN)} "
+                "WHERE rec_id=?", [ts, *[r.get(c) for c in self._REC_DYN], row[0]])
+            return row[0]
+        rid = uuid.uuid4().hex
+        self.con.execute(
+            "INSERT INTO recommendations (rec_id, device, first_ts, last_ts, runs, kind, item_id, side, "
+            f"name, {','.join(self._REC_DYN)}, acted) VALUES (?,?,?,?,1,?,?,?,?,"
+            f"{','.join('?' for _ in self._REC_DYN)},FALSE)",
+            [rid, self.device_id(), ts, ts, r["kind"], r["item_id"], r["side"], r.get("name"),
+             *[r.get(c) for c in self._REC_DYN]])
+        return rid
+
+    def mark_rec_acted(self, item_id: int, side: str, ts: int, attempt_id: str) -> bool:
+        """Link a placement to the open rec that advised buying this item+side (any kind)."""
+        row = self.con.execute(
+            "SELECT rec_id FROM recommendations WHERE item_id=? AND side=? AND pulled_ts IS NULL "
+            "AND (acted IS NULL OR acted = FALSE) ORDER BY last_ts DESC LIMIT 1", [item_id, side]).fetchone()
+        if not row:
+            return False
+        self.con.execute("UPDATE recommendations SET acted=TRUE, acted_ts=?, attempt_id=? WHERE rec_id=?",
+                         [ts, attempt_id, row[0]])
+        return True
+
+    def pull_recommendations(self, active_keys: set, ts: int, reasons: dict) -> int:
+        """Mark open, un-acted rec episodes no longer in the current plan as PULLED, with a reason."""
+        n = 0
+        for r in self.open_recommendations():
+            key = (r["kind"], r["item_id"], r["side"])
+            if key in active_keys:
+                continue
+            self.con.execute("UPDATE recommendations SET pulled_ts=?, pull_reason=? WHERE rec_id=?",
+                             [ts, reasons.get(key, "outranked"), r["rec_id"]])
+            n += 1
+        return n
+
+    def recommendation_stats(self) -> dict[str, Any]:
+        """Totals for the `recs` view: acted / pulled counts + pull-reason breakdown."""
+        one = lambda q: self.con.execute(q).fetchone()[0]  # noqa: E731
+        return {
+            "total": one("SELECT COUNT(*) FROM recommendations"),
+            "acted": one("SELECT COUNT(*) FROM recommendations WHERE acted=TRUE"),
+            "pulled": one("SELECT COUNT(*) FROM recommendations WHERE pulled_ts IS NOT NULL"),
+            "reasons": dict(self.con.execute(
+                "SELECT pull_reason, COUNT(*) FROM recommendations WHERE pulled_ts IS NOT NULL "
+                "GROUP BY pull_reason").fetchall()),
+        }
 
     def sync_positions_to_bag(self, holdings: dict[int, int], fills) -> list[tuple[str, int, int]]:
         """Bag = ground truth for held QUANTITY (you keep flip stock in your bag). Set each position's
