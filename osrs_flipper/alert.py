@@ -304,3 +304,14 @@ def edit_bot(message_id: str, content: str) -> bool:
 def notify(content: str) -> bool:
     """Push a discrete alert — via the bot if configured, else the webhook."""
     return (post_bot(content)[0] if bot_enabled() else post_discord(content)[0])
+
+
+def set_status(text: str, msg_id: str | None = None) -> str | None:
+    """Post-or-edit the single live status message (the auto-mirrored dashboard). Edits `msg_id` in
+    place when given and still editable, else posts a new one. Returns the (new) id, or None on failure."""
+    if not bot_enabled():
+        return None
+    if msg_id and edit_bot(msg_id, text):
+        return msg_id
+    ok, mid = post_bot(text)
+    return mid if ok else None
