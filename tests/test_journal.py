@@ -1,5 +1,7 @@
 """Journal P&L math: weighted-average cost, taxed sells, realised P&L, equity."""
 
+import time
+
 import pytest
 
 from osrs_flipper.journal import Journal
@@ -141,6 +143,61 @@ def test_record_attempt_persists_the_prediction_columns(j):
     row = j.con.execute("SELECT pred_eta_h, pred_p_fill, pred_ev, status, resolved_ts "
                         "FROM attempts WHERE attempt_id=?", [aid]).fetchone()
     assert row == (1.5, 0.8, 1234.0, "open", None)
+
+
+def _attempt(j, item_id=2, side="BUY", qty=100):
+    return j.record_attempt(item_id, "Item", side, qty, 50, horizon_h=1.0, avg_low=48, avg_high=52,
+                            vol_1h_binding=5000)
+
+
+def test_offer_events_log_placed_then_filled_and_set_resolved_ts(j):
+    aid = _attempt(j)
+    ft = int(time.time()) + 100                                      # fill must be at/after placement
+    j.record_event(aid, "placed", qty=100, price=50)
+    j.reconcile_fill(2, True, 100, 50, fill_ts=ft)                   # full fill → filled + resolved_ts
+    assert j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                        [aid]).fetchone() == ("filled", ft)
+    assert [e["event"] for e in j.offer_timeline(aid)] == ["placed", "filled"]
+
+
+def test_partial_fill_defers_resolution_until_complete(j):
+    aid = _attempt(j)
+    t1, t2 = int(time.time()) + 100, int(time.time()) + 200
+    j.reconcile_fill(2, True, 40, 50, fill_ts=t1)                    # partial → no resolution yet
+    assert j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                        [aid]).fetchone() == ("partial", None)
+    j.reconcile_fill(2, True, 60, 50, fill_ts=t2)                    # completes
+    assert j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                        [aid]).fetchone() == ("filled", t2)
+    assert [e["event"] for e in j.offer_timeline(aid)] == ["partial", "filled"]
+
+
+def test_expire_sets_resolved_ts_and_logs_event(j):
+    aid = _attempt(j)
+    future = int(time.time()) + 4000                                # past the 1h horizon
+    assert j.expire_stale_attempts(future) == 1
+    assert j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                        [aid]).fetchone() == ("expired", future)
+    assert [e["event"] for e in j.offer_timeline(aid)] == ["expired"]
+
+
+def test_resolve_attempt_cancels_with_event(j):
+    aid = _attempt(j)
+    j.resolve_attempt(aid, "cancelled", 1234, event="cancelled")
+    assert j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                        [aid]).fetchone() == ("cancelled", 1234)
+    assert [e["event"] for e in j.offer_timeline(aid)] == ["cancelled"]
+
+
+def test_unresolved_attempts_covers_open_and_partial(j):
+    a_open = _attempt(j, item_id=2)
+    a_part = _attempt(j, item_id=3)
+    a_done = _attempt(j, item_id=4)
+    ft = int(time.time()) + 100
+    j.reconcile_fill(3, True, 40, 50, fill_ts=ft)                    # partial
+    j.reconcile_fill(4, True, 100, 50, fill_ts=ft)                   # filled
+    ids = {a["attempt_id"] for a in j.unresolved_attempts()}
+    assert a_open in ids and a_part in ids and a_done not in ids
 
 
 def test_blacklist_add_list_remove_roundtrip(j):

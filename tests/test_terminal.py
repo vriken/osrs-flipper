@@ -192,6 +192,43 @@ def test_rebalance_ignores_a_nearly_filled_buy(monkeypatch):
                                daytime=True, hours=5.0) == []   # 90% filled → don't churn it
 
 
+# --- cancel detection: vanished offer + a cancel in history → terminal-state it ---------------------
+
+def _mk_attempt(j, item_id=100):
+    return j.record_attempt(item_id, "Raw halibut", "BUY", 1000, 50, horizon_h=1.0, avg_low=48,
+                            avg_high=52, vol_1h_binding=5000)
+
+
+def test_detect_cancels_marks_a_vanished_cancelled_offer(tmp_path, monkeypatch):
+    from osrs_flipper.runelite import Fill
+    j = Journal(path=str(tmp_path / "c.duckdb"))
+    aid = _mk_attempt(j)
+    cancel = Fill(uuid="", item_id=100, name="Raw halibut", is_buy=True, qty=0, price=50,
+                  state="CANCELLED_BUY", t_ms=0)
+    monkeypatch.setattr(term_mod.datasource, "active",
+                        lambda: types.SimpleNamespace(completed_offers=lambda: [cancel]))
+    Terminal._detect_cancels(types.SimpleNamespace(j=j), offers=[])   # no live offer → vanished
+    status, resolved = j.con.execute("SELECT status, resolved_ts FROM attempts WHERE attempt_id=?",
+                                     [aid]).fetchone()
+    assert status == "cancelled" and resolved is not None
+    assert "cancelled" in [e["event"] for e in j.offer_timeline(aid)]
+    j.con.close()
+
+
+def test_detect_cancels_spares_a_still_live_offer(tmp_path, monkeypatch):
+    from osrs_flipper.runelite import Fill
+    j = Journal(path=str(tmp_path / "c2.duckdb"))
+    aid = _mk_attempt(j)
+    cancel = Fill(uuid="", item_id=100, name="Raw halibut", is_buy=True, qty=0, price=50,
+                  state="CANCELLED_BUY", t_ms=0)
+    monkeypatch.setattr(term_mod.datasource, "active",
+                        lambda: types.SimpleNamespace(completed_offers=lambda: [cancel]))
+    live = [Offer(slot=0, item_id=100, is_buy=True, state="BUYING", qty=1000, price=50)]
+    Terminal._detect_cancels(types.SimpleNamespace(j=j), offers=live)  # still live → leave open
+    assert j.con.execute("SELECT status FROM attempts WHERE attempt_id=?", [aid]).fetchone()[0] == "open"
+    j.con.close()
+
+
 def _stub(j, offers=()):
     return types.SimpleNamespace(
         j=j, _snapshot=lambda iid: {"avg_low": 100, "avg_high": 110, "vol_1h_binding": 5000},

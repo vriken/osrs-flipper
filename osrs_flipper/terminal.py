@@ -350,6 +350,7 @@ class Terminal:
                 self.j.reconcile_fill(f.item_id, f.is_buy, delta, f.price,
                                       int(f.t_ms / 1000) or int(time.time()))
         self._autodetect_placements()
+        self._detect_cancels(self._active_offers())  # terminal-state vanished offers seen cancelled in history
         # POSITIONS: the live bag is ground truth for held quantity (you keep flip stock in your
         # bag), with cost from your buy history — one idempotent, self-healing pass. Falls back to
         # the offer-history net only when the bag snapshot isn't live (exporter off / logged out).
@@ -400,10 +401,11 @@ class Terminal:
                     pv = q.ev
             except Exception:  # noqa: BLE001 — a prediction is best-effort; never block logging the attempt
                 pass
-            self.j.record_attempt(o.item_id, names.get(o.item_id, str(o.item_id)), side, o.qty,
-                                  o.price, horizon_h=1.0, avg_low=snap["avg_low"],
-                                  avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"],
-                                  pred_eta_h=pe, pred_p_fill=pp, pred_ev=pv)
+            aid = self.j.record_attempt(o.item_id, names.get(o.item_id, str(o.item_id)), side, o.qty,
+                                        o.price, horizon_h=1.0, avg_low=snap["avg_low"],
+                                        avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"],
+                                        pred_eta_h=pe, pred_p_fill=pp, pred_ev=pv)
+            self.j.record_event(aid, "placed", qty=o.qty, price=o.price)
             open_keys.add((o.item_id, side))
             n += 1
         if n:
@@ -449,6 +451,27 @@ class Terminal:
             if in_avg > 0:
                 print(f"  decant detected: {decanted:,} {p.name} → {out_qty:,} {out_name} "
                       f"(basis {moved:,.0f} gp moved onto the (4)s, avg {navg:,.0f}/ea)")
+
+    def _detect_cancels(self, offers: list) -> None:
+        """An open/partial attempt whose live offer has VANISHED and which shows a CANCELLED_* in the
+        trade history is a cancel — terminal-state it (status + resolved_ts + event) so its live-time is
+        learnable. Conservative: fires only on a positive cancel signal, so a just-filled offer awaiting
+        import (or a transient snapshot) is never mislabelled a cancel."""
+        unresolved = self.j.unresolved_attempts()
+        if not unresolved:
+            return
+        live = {(o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
+        try:
+            completed = datasource.active().completed_offers()
+        except Exception:  # noqa: BLE001 — no history available → skip (an unfilled offer still expires)
+            return
+        cancelled = {(f.item_id, "BUY" if f.is_buy else "SELL") for f in completed
+                     if getattr(f, "state", "") in ("CANCELLED_BUY", "CANCELLED_SELL")}
+        now = int(time.time())
+        for a in unresolved:
+            key = (a["item_id"], a["side"])
+            if key not in live and key in cancelled:
+                self.j.resolve_attempt(a["attempt_id"], "cancelled", now, event="cancelled")
 
     def _rebalance(self, offers: list, cash: int, held: list, net_worth: int,
                    daytime: bool, hours: float) -> list[str]:
