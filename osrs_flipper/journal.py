@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS manual_fills (
 );
 CREATE TABLE IF NOT EXISTS offer_progress (uuid TEXT PRIMARY KEY, accounted_qty BIGINT);
 CREATE TABLE IF NOT EXISTS blacklist (item_id INTEGER PRIMARY KEY, name TEXT);
+CREATE TABLE IF NOT EXISTS offer_events (
+    attempt_id TEXT, ts BIGINT, event TEXT, qty BIGINT, price BIGINT, note TEXT
+);
 CREATE TABLE IF NOT EXISTS offer_seen (
     slot INTEGER, item_id INTEGER, placed_at BIGINT, observed BOOLEAN,
     is_buy BOOLEAN, qty BIGINT, price BIGINT, filled BIGINT,
@@ -537,23 +540,25 @@ class Journal:
         new_filled = prior_filled + qty
         vwap = (prior_filled * prior_px + qty * price) / new_filled if new_filled else float(price)
         status = "filled" if new_filled >= target_qty else "partial"
+        resolved = fill_ts if status == "filled" else None  # a completed fill is a terminal state
         self.con.execute(
-            "UPDATE attempts SET filled_qty=?, fill_px=?, filled_ts=?, status=? WHERE attempt_id=?",
-            [new_filled, vwap, fill_ts, status, aid])
+            "UPDATE attempts SET filled_qty=?, fill_px=?, filled_ts=?, status=?, resolved_ts=? "
+            "WHERE attempt_id=?", [new_filled, vwap, fill_ts, status, resolved, aid])
+        self.record_event(aid, status, ts=fill_ts, qty=qty, price=price)
         return aid
 
     def expire_stale_attempts(self, now_ts: int) -> int:
         """Mark open attempts past their horizon as expired — these never-filled cases are
         first-class calibration data (they keep the fill-rate estimate from being optimistic).
         Returns how many were expired by this call."""
-        n = self.con.execute(
-            "SELECT COUNT(*) FROM attempts WHERE status='open' AND ts + horizon_h*3600 < ?",
-            [now_ts]).fetchone()[0]
-        if n:
-            self.con.execute(
-                "UPDATE attempts SET status='expired' WHERE status='open' AND ts + horizon_h*3600 < ?",
-                [now_ts])
-        return n
+        rows = self.con.execute(
+            "SELECT attempt_id FROM attempts WHERE status='open' AND ts + horizon_h*3600 < ?",
+            [now_ts]).fetchall()
+        for (aid,) in rows:
+            self.con.execute("UPDATE attempts SET status='expired', resolved_ts=? WHERE attempt_id=?",
+                             [now_ts, aid])
+            self.record_event(aid, "expired", ts=now_ts)
+        return len(rows)
 
     def open_attempts(self) -> list[dict[str, Any]]:
         rows = self.con.execute(
@@ -562,12 +567,40 @@ class Journal:
         return [{"attempt_id": r[0], "item_id": r[1], "name": r[2], "side": r[3], "qty": r[4],
                  "limit_px": r[5], "filled_qty": r[6]} for r in rows]
 
-    def calibration_rows(self) -> list[dict[str, Any]]:
-        """Resolved attempts (filled / partial / expired) with snapshot + outcome for calibration."""
-        cols = ["side", "qty", "limit_px", "avg_low", "avg_high", "spread", "vol_1h_binding",
-                "pred_p_fill", "filled_qty", "fill_px", "status"]
+    def unresolved_attempts(self) -> list[dict[str, Any]]:
+        """Open OR partial attempts (still working) — for disappearance-based cancel detection."""
         rows = self.con.execute(
-            f"SELECT {','.join(cols)} FROM attempts WHERE status IN ('filled','partial','expired')"
+            "SELECT attempt_id,item_id,name,side,qty,filled_qty,ts FROM attempts "
+            "WHERE status IN ('open','partial') ORDER BY ts").fetchall()
+        return [{"attempt_id": r[0], "item_id": r[1], "name": r[2], "side": r[3], "qty": r[4],
+                 "filled_qty": r[5], "ts": r[6]} for r in rows]
+
+    def resolve_attempt(self, attempt_id: str, status: str, resolved_ts: int,
+                        *, event: str | None = None) -> None:
+        """Terminal-state an attempt (e.g. 'cancelled') with a resolution time + a lifecycle event."""
+        self.con.execute("UPDATE attempts SET status=?, resolved_ts=? WHERE attempt_id=?",
+                         [status, resolved_ts, attempt_id])
+        self.record_event(attempt_id, event or status, ts=resolved_ts)
+
+    # --- offer lifecycle event log (append-only timeline per attempt) --------
+    def record_event(self, attempt_id: str, event: str, *, ts: int | None = None,
+                     qty: int = 0, price: int = 0, note: str = "") -> None:
+        self.con.execute("INSERT INTO offer_events VALUES (?,?,?,?,?,?)",
+                         [attempt_id, ts if ts is not None else int(time.time()), event, qty, price, note])
+
+    def offer_timeline(self, attempt_id: str) -> list[dict[str, Any]]:
+        rows = self.con.execute(
+            "SELECT ts,event,qty,price,note FROM offer_events WHERE attempt_id=? ORDER BY ts",
+            [attempt_id]).fetchall()
+        return [{"ts": r[0], "event": r[1], "qty": r[2], "price": r[3], "note": r[4]} for r in rows]
+
+    def calibration_rows(self) -> list[dict[str, Any]]:
+        """Resolved attempts with snapshot + outcome + timing for β / fill-rate / fill-time calibration."""
+        cols = ["side", "qty", "limit_px", "avg_low", "avg_high", "spread", "vol_1h_binding",
+                "pred_p_fill", "pred_eta_h", "filled_qty", "fill_px", "status", "ts", "filled_ts",
+                "resolved_ts"]
+        rows = self.con.execute(
+            f"SELECT {','.join(cols)} FROM attempts WHERE status IN ('filled','partial','expired','cancelled')"
         ).fetchall()
         return [dict(zip(cols, r, strict=True)) for r in rows]
 
