@@ -555,3 +555,14 @@ def test_acted_recommendation_is_not_pulled(j):
     assert j.pull_recommendations(set(), 1060, {}) == 0          # an acted rec is never pulled
     st = j.recommendation_stats()
     assert st["acted"] == 1 and st["pulled"] == 0
+
+
+def test_pull_evaluation_flow(j):
+    j.upsert_recommendation(_rec(item_id=7), 1000)
+    j.pull_recommendations(set(), 1000, {("flip", 7, "BUY"): "outranked"})
+    assert j.pulls_awaiting_eval(now_ts=1100, min_age_s=1800) == []          # too fresh to judge
+    pend = j.pulls_awaiting_eval(now_ts=3000, min_age_s=1800)                # matured
+    assert len(pend) == 1 and pend[0]["item_id"] == 7 and pend[0]["pull_reason"] == "outranked"
+    j.set_rec_eval(pend[0]["rec_id"], "regret", 3000)
+    assert j.pulls_awaiting_eval(now_ts=4000, min_age_s=1800) == []          # already evaluated
+    assert j.pull_quality() == [("outranked", "regret", 1)]

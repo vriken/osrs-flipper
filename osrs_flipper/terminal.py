@@ -1025,6 +1025,23 @@ class Terminal:
             net = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
             reasons[key] = "margin_gone" if (net is not None and net <= 0) else "outranked"
         self.j.pull_recommendations(active, now, reasons)
+        self._evaluate_pulls(hr)
+
+    def _evaluate_pulls(self, hr: dict) -> None:
+        """Grade matured pulls: did the flip we dropped degrade (good_pull) or hold (regret)? Compares the
+        item's CURRENT spread to its pull-time snapshot. Heuristic — a rate to watch, not a per-pull verdict."""
+        from . import regret
+        from .tax import post_tax_received
+        now = int(time.time())
+        for r in self.j.pulls_awaiting_eval(now, config.PULL_EVAL_DELAY_S):
+            h = hr.get(r["item_id"], {})
+            ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
+            cur = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
+            snap = (post_tax_received(int(r["snap_high"]), item_id=r["item_id"]) - int(r["snap_low"])
+                    if r["snap_high"] and r["snap_low"] else None)
+            verdict = regret.classify_pull(snap, cur, min_net=config.MIN_NET_MARGIN)
+            if verdict:
+                self.j.set_rec_eval(r["rec_id"], verdict, now)
 
     @staticmethod
     def _print_plan(chosen: list, buy_slots: int, daytime: bool, hours: float, fcal: dict) -> None:
@@ -1848,6 +1865,24 @@ class Terminal:
         if s["reasons"]:
             print("  pulled by reason: "
                   + " · ".join(f"{k} {v}" for k, v in sorted(s["reasons"].items(), key=lambda kv: -kv[1])))
+        # pull-quality scorecard: of the pulls old enough to judge, how many were good vs regret, by reason
+        quality = self.j.pull_quality()
+        if quality:
+            by_reason: dict[str, dict[str, int]] = {}
+            for reason, verdict, cnt in quality:
+                by_reason.setdefault(reason, {})[verdict] = cnt
+            good = sum(v.get("good_pull", 0) for v in by_reason.values())
+            regret = sum(v.get("regret", 0) for v in by_reason.values())
+            tot = good + regret
+            if tot:
+                print(f"  PULL QUALITY: {good}/{tot} good pulls ({good / tot * 100:.0f}%), "
+                      f"{regret} regret (a still-good flip we dropped)")
+                for reason, v in sorted(by_reason.items(), key=lambda kv: -(kv[1].get("regret", 0))):
+                    g, rg = v.get("good_pull", 0), v.get("regret", 0)
+                    flag = "  ⚠ over-pulling?" if rg > g and (g + rg) >= 3 else ""
+                    print(f"    {reason:>11}: {g} good · {rg} regret{flag}")
+                print("  regret = the flip held up after we pulled it — a hint a gate or scan churn is too "
+                      "eager. good_pull = the spread degraded, so dropping it dodged a dud.")
 
     def cmd_blacklist(self, args: list[str]) -> None:
         """Never recommend an item again (e.g. one whose spread never fills). It's dropped at the feature
