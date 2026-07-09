@@ -479,3 +479,27 @@ def test_auto_tick_is_a_noop_when_off_or_no_channel(monkeypatch):
     nochan = _autopush_stub(["D"])                             # enabled but no channel
     Terminal._auto_tick(nochan)
     assert posted == []
+
+
+def test_compact_status_keeps_actions_drops_noise():
+    from osrs_flipper.terminal import _compact_status
+    dash = "\n".join([
+        "  === 12:00 · cash 1,274,300 · 2/8 slots free · ☀️ day ===",
+        "  holdings: 0 in bank · 3 listed in GE  (`inv` for detail)",
+        "  ACTIVE OFFERS:",
+        "    0  Granite boots    SELL  50%  0.4h  🟢 on track",
+        "    2  White lily seed  BUY   0%   0.4h  🟠 MARGIN GONE — cancel",
+        "         → no spread to buy into now — cancel the buy",
+        "  BEST FOR YOUR 2 FREE SLOT(S) · ☀️ day — flips cycle  (using 2)",
+        "    # type   trade   ~gp  slots  detail",
+        "    1 ⚡flip  Adamant dart tip  145,771  1  buy 188 → sell 195 × 3,389",
+        "    * best-case (β=0, fill AT the bid/ask); EV haircut ×0.55",
+        "    (flips auto-calibrated from 18 attempts: β 0.53)",
+        "  NEXT: place buy #1-#2 now",
+    ])
+    out = _compact_status(dash)
+    assert "cash 1,274,300" in out and "MARGIN GONE" in out           # header + attention offer kept
+    assert "Adamant dart tip" in out and "NEXT: place buy" in out     # pick + next kept
+    for noise in ("on track", "holdings:", "auto-calibrated", "→ no spread", "# type", "best-case"):
+        assert noise not in out
+    assert len(out.splitlines()) < len(dash.splitlines())             # genuinely shorter

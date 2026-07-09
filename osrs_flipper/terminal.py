@@ -47,6 +47,25 @@ from .quote import optimal_quote
 _BOND = config.BOND_ITEM_ID
 
 
+_STATUS_DROP_STARTS = ("→", "KEY", "ACTIVE OFFERS", "holdings:", "#", "(flips", "(", "*")
+_STATUS_DROP_CONTAINS = ("on track", "auto-calibrated", "best-case", "scores shrunk",
+                         "reserved for the sell", "priced to sell", "check back")
+
+
+def _compact_status(dash: str) -> str:
+    """Trim the full console dashboard to the actionable essentials for a phone-friendly Discord message:
+    keep the cash/slots header, offers that NEED action, the sell/decant/buy picks and NEXT — drop
+    on-track offers, the holdings line, table legends, calibration footnotes and inline hint lines."""
+    out = []
+    for ln in dash.splitlines():
+        s = ln.strip()
+        if not s or any(s.startswith(p) for p in _STATUS_DROP_STARTS) \
+                or any(t in ln for t in _STATUS_DROP_CONTAINS):
+            continue
+        out.append(ln.rstrip())
+    return "\n".join(out)
+
+
 class _Tee:
     """A stdout proxy that writes to several streams at once — used to capture the `go` dashboard into a
     buffer while still printing it to the console (interactive `go`)."""
@@ -1320,11 +1339,13 @@ class Terminal:
         return buf.getvalue()
 
     def _go(self, args: list) -> None:
-        """Interactive `go`: print locally AND (if pushing is on) mirror the dashboard to the bot."""
+        """Interactive `go`: print the full dashboard locally AND (if pushing is on) mirror a COMPACT
+        version to the bot's live status message."""
         dash = self._render_go(echo=True, args=args)
-        if self._auto_push and alert.bot_enabled() and dash:
-            self._status_msg_id = alert.set_status(dash, self._status_msg_id)
-            self._last_dash = dash
+        compact = _compact_status(dash)
+        if self._auto_push and alert.bot_enabled() and compact:
+            self._status_msg_id = alert.set_status(compact, self._status_msg_id)
+            self._last_dash = compact
 
     def _push_transition_pings(self) -> None:
         """Discrete Discord pings on real transitions — you PLACED an offer, or one now needs you
@@ -1354,11 +1375,11 @@ class Terminal:
             return
         try:
             self._push_transition_pings()
-            dash = self._render_go(echo=False)
-            if dash and dash != self._last_dash:
+            compact = _compact_status(self._render_go(echo=False))
+            if compact and compact != self._last_dash:
                 if alert.bot_enabled():
-                    self._status_msg_id = alert.set_status(dash, self._status_msg_id)
-                self._last_dash = dash
+                    self._status_msg_id = alert.set_status(compact, self._status_msg_id)
+                self._last_dash = compact
         except Exception:  # noqa: BLE001 — a push failure must never break the REPL
             pass
 
