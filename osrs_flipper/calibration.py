@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import statistics
 
+from .config import IMPACT_K
+
 _BUCKETS = ("low", "med", "high")
 
 
@@ -228,3 +230,57 @@ def eta_multiplier(cal: dict | None, price: float, volume: float, *, lo: float =
     bucket = cal.get("buckets", {}).get(pv_bucket(price, volume))
     c = bucket["shrunk"] if bucket else cal.get("global", 1.0)
     return max(lo, min(hi, c if c is not None else 1.0))
+
+
+# --- market-impact calibration: does fill quality degrade at HIGH participation (size / volume)? -----
+_IMPACT_P_LO = 0.03   # participation below this = "a small share of the flow"
+_IMPACT_P_HI = 0.08   # participation at/above this = "a large share of the flow"
+
+
+def _participation(row: dict) -> float | None:
+    """Order size as a fraction of the contra-side volume that traded — the market-impact regressor."""
+    qty, vol = row.get("qty") or 0, row.get("vol_1h_binding") or 0
+    return qty / vol if (qty > 0 and vol > 0) else None
+
+
+def calibrate_impact(rows: list[dict], *, prior_k: float = IMPACT_K, k: int = 20) -> dict:
+    """Effective market-impact slope K, measured from fills: does fill quality (actual ÷ predicted fill
+    fraction) degrade at HIGH participation (order size / contra volume) vs LOW?
+
+    Uses the high-vs-low RATIO of fill quality, which cancels the overall fill-level bias that
+    `calibrate_fill` already corrects — isolating the participation-specific slope, so this does NOT
+    double-count that correction. The ratio is solved into the model's K (impact mult = 1/(1+K·p)) and
+    shrunk toward the config prior. Dormant — returns the prior K — until BOTH buckets have samples.
+    `k_measured` is the raw read; `k` the shrunk value `effective_impact_k` actually uses."""
+    lo, hi = [], []
+    for r in rows:
+        p, ff, pred = _participation(r), _fill_frac(r), r.get("pred_p_fill")
+        if p is None or ff is None or not pred or pred <= 0:
+            continue
+        q = ff / pred  # fill quality: 1.0 = filled as predicted, <1 = worse
+        if p < _IMPACT_P_LO:
+            lo.append((p, q))
+        elif p >= _IMPACT_P_HI:
+            hi.append((p, q))
+    out: dict = {"n": len(lo) + len(hi), "n_lo": len(lo), "n_hi": len(hi),
+                 "prior_k": prior_k, "k_measured": None, "k": prior_k}
+    if len(lo) >= 3 and len(hi) >= 3:
+        q_lo, q_hi = statistics.median(q for _, q in lo), statistics.median(q for _, q in hi)
+        p_lo, p_hi = statistics.median(p for p, _ in lo), statistics.median(p for p, _ in hi)
+        if q_lo > 0 and q_hi > 0 and p_hi > p_lo:
+            ratio = q_hi / q_lo                        # <1 ⇒ big orders fill worse ⇒ impact is real
+            denom = ratio * p_hi - p_lo                # from m(p_lo)/m(p_hi) = ratio, m(p)=1/(1+K·p)
+            if denom > 1e-9:
+                km = max(0.0, (1.0 - ratio) / denom)
+                out["k_measured"] = km
+                out["k"] = max(0.0, shrink(km, prior_k, len(lo) + len(hi), k))
+    return out
+
+
+def effective_impact_k(cal: dict | None, fallback: float = IMPACT_K, *, hi: float = 10.0) -> float:
+    """The market-impact slope K to actually use = the calibrated (shrunk) value, clamped to [0, hi].
+    Falls back to the config prior when there's no calibration yet (mirrors `effective_beta`)."""
+    if not cal:
+        return fallback
+    kk = cal.get("k")
+    return max(0.0, min(hi, kk if kk is not None else fallback))
