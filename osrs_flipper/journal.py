@@ -97,6 +97,8 @@ class Journal:
         self.con.execute(_SCHEMA)
         # migrate older journals that created `predictions` before `source` existed
         self.con.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'quote'")
+        # resolved_ts: when an attempt reached a terminal state (fill collected / cancelled) — for fill-time
+        self.con.execute("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS resolved_ts BIGINT")
         self._repair_phantom_realized()
 
     def _repair_phantom_realized(self) -> int:
@@ -510,8 +512,11 @@ class Journal:
         model prediction. Reconciled against real fills later. Returns a short attempt id."""
         aid = uuid.uuid4().hex[:8]
         spread = (avg_high or 0) - (avg_low or 0)
+        # explicit columns (not positional) so schema-migration columns like resolved_ts default to NULL
         self.con.execute(
-            "INSERT INTO attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO attempts (attempt_id, ts, item_id, name, side, qty, limit_px, horizon_h, "
+            "avg_low, avg_high, spread, vol_1h_binding, pred_p_fill, pred_eta_h, pred_ev, "
+            "filled_qty, fill_px, filled_ts, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [aid, int(time.time()), item_id, name, side.upper(), qty, limit_px, horizon_h,
              avg_low, avg_high, spread, vol_1h_binding, pred_p_fill, pred_eta_h, pred_ev,
              0, None, None, "open"])

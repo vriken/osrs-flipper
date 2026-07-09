@@ -134,6 +134,15 @@ def test_realized_history_sorts_out_of_order_fills():
     assert [r[0] for r in rows] == [1, 3]                     # replayed in time order (buy before sell)
 
 
+def test_record_attempt_persists_the_prediction_columns(j):
+    # the model's prediction must be stored so it can be graded later (ETA + fill-rate calibration)
+    aid = j.record_attempt(2, "Item", "BUY", 100, 50, horizon_h=1.0, avg_low=48, avg_high=52,
+                           vol_1h_binding=5000, pred_p_fill=0.8, pred_eta_h=1.5, pred_ev=1234.0)
+    row = j.con.execute("SELECT pred_eta_h, pred_p_fill, pred_ev, status, resolved_ts "
+                        "FROM attempts WHERE attempt_id=?", [aid]).fetchone()
+    assert row == (1.5, 0.8, 1234.0, "open", None)
+
+
 def test_blacklist_add_list_remove_roundtrip(j):
     assert j.blacklist_ids() == set()
     j.blacklist_add(4151, "Abyssal whip")
