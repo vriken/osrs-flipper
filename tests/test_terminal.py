@@ -503,9 +503,9 @@ def test_compact_status_keeps_actions_drops_noise():
         "  === 12:00 · cash 1,274,300 · 2/8 slots free · ☀️ day ===",
         "  holdings: 0 in bank · 3 listed in GE  (`inv` for detail)",
         "  ACTIVE OFFERS:",
-        "    0  Granite boots    SELL  50%  0.4h  🟢 on track",
-        "    2  White lily seed  BUY   0%   0.4h  🟠 MARGIN GONE — cancel",
-        "         → no spread to buy into now — cancel the buy",
+        "    0  Granite boots    SELL  50%  0.4h  \033[32m🟢 on track\033[0m",
+        "    2  White lily seed  BUY   0%   0.4h  \033[31m🟠 MARGIN GONE — cancel\033[0m",
+        "\033[1m         → no spread to buy into now — cancel the buy\033[0m",   # ANSI-wrapped like the real tty
         "  BEST FOR YOUR 2 FREE SLOT(S) · ☀️ day — flips cycle  (using 2)",
         "    # type   trade   ~gp  slots  detail",
         "    1 ⚡flip  Adamant dart tip  145,771  1  buy 188 → sell 195 × 3,389",
@@ -596,3 +596,16 @@ def test_transition_ping_carries_target_and_drops_false_alarms(monkeypatch):
     s2 = stub(lambda off, v, **k: ("ontrack", ""))
     term_mod.Terminal._push_transition_pings(s2)
     assert sent == []                                                        # slow-but-fine → no false ping
+
+
+def test_print_plan_labels_multi_window_overnight(capsys):
+    from osrs_flipper.planner import Candidate
+    c = Candidate(kind="flip", key="Maple longbow (u)", slots=1, window_gp=93936, patient=False,
+                  item_ids=(62,), payload={"buy": 78, "sell": 87, "qty": 11742, "windows": 2})
+    Terminal._print_plan([c], buy_slots=1, daytime=False, hours=8.0, fcal={})
+    out = capsys.readouterr().out
+    assert "× 11,742" in out and "2× buy-limit windows" in out    # overnight >1-window qty is labelled
+    c1 = Candidate(kind="flip", key="Yew logs", slots=1, window_gp=100, patient=False,
+                   item_ids=(1,), payload={"buy": 10, "sell": 12, "qty": 5000, "windows": 1})
+    Terminal._print_plan([c1], buy_slots=1, daytime=True, hours=4.0, fcal={})
+    assert "buy-limit windows" not in capsys.readouterr().out     # single-window flip: no label

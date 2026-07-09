@@ -63,8 +63,8 @@ def _compact_status(dash: str) -> str:
     On-track offers, the holdings line, table legends and calibration footnotes are all dropped."""
     header, attention, body = "", [], []
     for ln in dash.splitlines():
-        s = ln.strip()
-        if not s:
+        s = alert.plain(ln).strip()  # strip ANSI FIRST — in the REPL stdout is a tty, so hint lines are
+        if not s:                    # colour-wrapped and a raw `startswith("→")` would miss them
             continue
         if "===" in s:                                        # header → one terse line
             header = (s.strip("= ").replace("cash ", "").replace(" slots free", " free")
@@ -979,7 +979,7 @@ class Terminal:
                     window_gp=float(r["profit"]), patient=False, item_ids=(int(r["item_id"]),),
                     cost=float(r["buy"] * r["qty"]),
                     payload={"buy": r["buy"], "sell": r["sell"], "qty": r["qty"], "gp": r["profit"],
-                             "item_id": int(r["item_id"])}))
+                             "item_id": int(r["item_id"]), "windows": r.get("windows", 1)}))
 
         # gear (patient, best-case): one-shot expected profit
         g = self._gear_rows(lat, hr, mp, cash, limit_used)
@@ -1158,6 +1158,8 @@ class Terminal:
                 detail = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
             else:
                 detail = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {d['qty']:,}"
+                if d.get("windows", 1) > 1:  # overnight qty spans >1 buy-limit window (fills across resets)
+                    detail += f"  · {d['windows']}× buy-limit windows (overnight)"
                 gf = d.get("gone_frac")
                 if gf is not None and gf >= 0.3:  # margin was gone ≥30% of the last hour at 5m resolution
                     detail += f"  ⚠ fleeting ({gf * 100:.0f}% gone)"
@@ -1468,6 +1470,8 @@ class Terminal:
             body = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
         else:
             body = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {int(d['qty']):,}"
+            if d.get("windows", 1) > 1:
+                body += f" ({d['windows']}× limit windows, overnight)"
         return f"{tag} {str(c.key)[:28]}: {body}  (~{gp:,})"
 
     def _push_buy_opportunity(self) -> None:
@@ -1582,8 +1586,12 @@ class Terminal:
             # expected overnight profit = net/unit × qty × P(fill). Don't floor a single unit's
             # fractional expected fill to 0 — int(1 × 0.73) = 0 made a fat-spread ring show +0.
             profit = round(q.net_unit * aqty * q.p_buy)
+            # how many 4h buy-limit windows this qty spans — the overnight cap is ~2 windows, and one GE
+            # offer keeps filling past a window reset, so a >1-window qty is fillable but must be labelled.
+            one_window = max(0, (meta.get("limit") or 0) - limit_used.get(iid, 0))
+            windows = -(-aqty // one_window) if one_window else 1
             rows.append({"item_id": iid, "name": q.name, "buy": q.buy_px, "sell": q.sell_px, "qty": aqty,
-                         "deploy": deploy, "fill8h": q.p_buy, "profit": profit})
+                         "deploy": deploy, "fill8h": q.p_buy, "profit": profit, "windows": windows})
             exclude.add(iid)
             remaining -= deploy
             slots_left -= 1
