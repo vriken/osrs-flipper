@@ -81,6 +81,20 @@ your bankroll is to a **bond** (the F2P → members milestone).
   free-spread fantasy — trust its live-scanner EV, not a backtest, until you've
   collected weeks of 5m data with `collect`.
 
+## What to expect (honest caveats)
+
+- **Cold start — early recommendations are prior-driven, not measured.** The fill model ships with
+  parameter *priors* (spread haircut β, fill capture α/γ, and the market-impact & hung-leg slopes).
+  Three of them — β, the fill-rate correction, and fill-time — self-calibrate from your real fills,
+  re-measured and shrunk toward the prior every `CALIBRATE_EVERY_TRADES` (default 10) resolved attempts;
+  the market-impact and hung-leg terms are currently fixed priors. Until fills accumulate the EV is as
+  honest as its priors, no more — early picks are educated guesses that get truer as you log trades.
+- **You read the same public feed as the bots — so speed is not the edge.** Everything is derived from
+  the OSRS Wiki real-time API, which is delayed and read by everyone flipping the same items. Racing a
+  fast-margin staple often just makes you someone else's exit liquidity. The durable edge is *patience*:
+  buy-limit arbitrage and fat-margin holds on items too slow or annoying for bots to bother with — which
+  is why the overnight/patient plan bids low and waits, and the fast/online mode is the most exposed.
+
 ## Layout
 
 ```

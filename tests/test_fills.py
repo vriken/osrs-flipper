@@ -5,6 +5,9 @@ from osrs_flipper.fills import (
     completion_probability,
     fill_units,
     haircut_prices,
+    hung_leg_mult,
+    leg_fill_prob,
+    market_impact_mult,
 )
 
 
@@ -38,7 +41,41 @@ def test_capacity_takes_the_binding_constraint():
     assert capacity_units(10_000, 1_000_000, 1_000, 5) == 200  # capital binds here
 
 
+def test_leg_fill_prob_is_the_shared_linear_capped_shape():
+    # fraction of the target cleared by α·rate over the horizon, capped at 1 — the same shape the
+    # quote uses, so snapshot ordering agrees with the deep re-price.
+    assert leg_fill_prob(1000, 500, 2.0, capture=0.1) == 0.1      # 0.1·500·2/1000
+    assert leg_fill_prob(1000, 50_000, 2.0, capture=0.1) == 1.0   # saturates (capped at 1)
+    assert leg_fill_prob(0, 500, 2.0) == 0.0                       # no target
+    assert leg_fill_prob(1000, 0, 2.0) == 0.0                      # no rate
+    assert leg_fill_prob(1000, 500, 0) == 0.0                      # no time
+
+
 def test_completion_probability_bounded_and_monotonic():
     low = completion_probability(1000, 500, 500)
     high = completion_probability(1000, 50_000, 50_000)
     assert 0.0 <= low <= high <= 1.0
+
+
+def test_market_impact_is_penalty_only_and_monotone():
+    assert market_impact_mult(0, 1000) == 1.0        # no position → no penalty
+    assert market_impact_mult(100, 0) == 1.0         # no volume estimate → neutral, never punish blindly
+    small = market_impact_mult(10, 100_000)          # a sip of the flow
+    big = market_impact_mult(20_000, 100_000)        # 20% of the flow
+    assert small > big                                # a bigger share of volume → a bigger haircut
+    assert 0.0 < big < 1.0 and small <= 1.0
+    # never docks below the floor, and k=0 disables it entirely
+    assert market_impact_mult(10**9, 1, k=1.0, floor=0.5) == 0.5
+    assert market_impact_mult(10**9, 1, k=0.0) == 1.0
+
+
+def test_hung_leg_penalises_thin_shaky_spares_fat_reliable():
+    fat = hung_leg_mult(p_sell=0.9, margin_pct=0.10)     # reliable sell, fat margin
+    thin = hung_leg_mult(p_sell=0.5, margin_pct=0.02)    # shaky sell, thin margin
+    assert fat > thin
+    assert fat > 0.98                                     # fat + reliable → barely touched
+    assert thin <= 0.5 + 1e-9                             # thin + shaky → floored (heavy penalty)
+    assert hung_leg_mult(0.9, 0.05) > hung_leg_mult(0.6, 0.05)   # more reliable sell → smaller penalty
+    assert hung_leg_mult(0.7, 0.10) > hung_leg_mult(0.7, 0.03)   # fatter margin → smaller penalty
+    assert hung_leg_mult(0.5, 0.02, frac=0.0) == 1.0      # disabled
+    assert hung_leg_mult(0.0, 0.05) == 1.0                # no sell-prob info → neutral

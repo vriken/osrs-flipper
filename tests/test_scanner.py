@@ -50,6 +50,13 @@ def test_mode_weights():
     assert MODE_WEIGHTS == {"online": 1.0, "balanced": 0.5, "offline": 0.0}
 
 
+def test_variance_tilt_off_by_default_and_favours_reliable_when_on(monkeypatch):
+    assert scanner._variance_tilt(0.4) == 1.0          # default λ=0 → no-op, ranking unchanged
+    monkeypatch.setattr(config, "VARIANCE_AVERSION", 1.0)
+    assert scanner._variance_tilt(0.9) > scanner._variance_tilt(0.4)  # reliable completion favoured
+    assert scanner._variance_tilt(1.0) == 1.0          # a certain flip is never penalised
+
+
 def test_shrink_pulls_unreliable_to_median():
     # an inflated but unreliable estimate (1000, reliability 0) collapses to the median
     out = _shrink([1000, 100, 100, 100, 100], [0.0, 1.0, 1.0, 1.0, 1.0])
@@ -103,10 +110,21 @@ def test_schedule_queues_extra_buys_until_a_slot_frees():
 
 
 def test_allocate_fair_share_prevents_one_slot_soaking_all():
-    # two deep-liquidity picks: fair share splits the pile rather than the first eating it
+    # two deep-liquidity picks of EQUAL capital efficiency: the concentration cap splits the pile
     out, idle = _allocate([_pick(1, 10**9, 1), _pick(1, 10**9, 1)], 100)
     assert out[0]["deploy"] == 50 and out[1]["deploy"] == 50
     assert idle == 0
+
+
+def test_allocate_concentrates_on_the_higher_roi_pick_within_the_cap():
+    # three deep-liquidity picks; the higher-ROI one gets MORE than an even 1/3 share (compounding),
+    # but no more than the concentration ceiling of the pile.
+    picks = [_pick(100, 10**9, 20), _pick(100, 10**9, 5), _pick(100, 10**9, 5)]  # ROI 20% vs 5% vs 5%
+    out, idle = _allocate(picks, 300_000, max_frac=0.5)
+    deploys = [p["deploy"] for p in out]
+    assert deploys[0] > 100_000                          # beats the even 1/3 share (100k)
+    assert deploys[0] <= 150_000                          # but capped at 50% of the 300k pile
+    assert abs(sum(deploys) + idle - 300_000) < 100       # cash conserved
 
 
 def _candidate(iid, name, buy, sell, margin_abs, margin_fast, *, vol=50_000, limit=50_000, fill_mult=1.0):
@@ -230,6 +248,47 @@ def test_build_portfolio_scales_gp_by_fill_mult(monkeypatch):
     picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     p = picks[0]
     assert abs(p["gp"] - 10 * p["qty"] * 0.9 * 0.5) < 1   # margin × qty × p_complete × fill_mult
+
+
+def test_buyable_head_filters_knives_and_backfills_to_top():
+    # the --no-persistence path now drops pumps/knives from the snapshot, same as the deep path.
+    df = pd.DataFrame([_candidate(i, f"i{i}", 100, 110, 10, 5) for i in range(1, 11)])
+    knives = {2, 4}  # not buyable (pump / falling knife)
+    out = scanner._buyable_head(df, top=3, buyable=lambda iid: iid not in knives)
+    assert list(out["item_id"]) == [1, 3, 5]  # 2 and 4 skipped, backfilled with the next buyable rows
+    # nothing buyable → empty frame but columns preserved (callers still get a valid DataFrame)
+    empty = scanner._buyable_head(df, top=3, buyable=lambda iid: False)
+    assert empty.empty and list(empty.columns) == list(df.columns)
+
+
+def test_build_portfolio_scales_gp_by_impact_mult(monkeypatch):
+    # a flip whose intended size is a big share of volume takes a price-impact haircut on its gp
+    df = pd.DataFrame([_candidate(1, "A", 100, 110, margin_abs=10, margin_fast=5)])
+    df["impact_mult"] = 0.8
+    monkeypatch.setattr(scanner, "scan", lambda **kw: df)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    p = picks[0]
+    assert abs(p["gp"] - 10 * p["qty"] * 0.9 * 0.8) < 1  # margin × qty × p_complete × impact_mult
+
+
+def test_build_portfolio_hung_leg_hits_active_not_holds(monkeypatch):
+    # an active flip with a shaky sell leg takes the hung-leg haircut on its gp…
+    active = pd.DataFrame([_candidate(1, "Active", 100, 110, margin_abs=10, margin_fast=5)])
+    active["hung_mult"] = 0.7
+    monkeypatch.setattr(scanner, "scan", lambda **kw: active)
+    picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    p = picks[0]
+    assert p["tier"] != "hold"
+    assert abs(p["gp"] - 10 * p["qty"] * 0.9 * 0.7) < 1   # active gp = margin × qty × p_complete × hung_mult
+
+    # …but a hold sells over later cycles, so the hung-leg term does not apply to it
+    hold = pd.DataFrame([_candidate(2, "Hold", 100, 107, margin_abs=6, margin_fast=-1)])  # 6% → hold
+    hold["hung_mult"] = 0.7
+    monkeypatch.setattr(scanner, "scan", lambda **kw: hold)
+    picks2, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
+    h = picks2[0]
+    assert h["tier"] == "hold"
+    assert abs(h["gp"] - 6 * h["qty"]) < 1                # hold gp ignores hung_mult (fill=1.0, sells over time)
 
 
 def test_placement_order_ranks_by_roi_not_just_speed(monkeypatch):

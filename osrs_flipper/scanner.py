@@ -9,6 +9,7 @@ import pandas as pd
 
 from . import anomaly, api, calibration, config
 from .features import build_features
+from .fills import hung_leg_mult, market_impact_mult
 from .persistence import fetch_persistence, fetch_reliability
 
 RANK_COL = "score"
@@ -66,6 +67,17 @@ def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float,
     return 0.0  # can't estimate fill time and time matters → unrankable
 
 
+def _variance_tilt(p_complete: float) -> float:
+    """Optional variance-aversion multiplier on the ranking score: favour reliable-completion flips (a
+    near-certain small gain compounds a bond faster than a high-variance gamble). Returns p_complete^λ,
+    so λ = config.VARIANCE_AVERSION = 0 (default) is a no-op. Overlaps the hung-leg / shrink risk terms
+    on purpose — a blunt global dial on top. Applied to the SCORE only, never to the EV estimate."""
+    lam = config.VARIANCE_AVERSION
+    if not lam:
+        return 1.0
+    return max(0.0, float(p_complete)) ** lam
+
+
 def _shrink(scores: list[float], reliabilities: list[float]) -> list[float]:
     """Shrink each estimate toward the cross-sectional median, scaled by reliability.
 
@@ -77,6 +89,31 @@ def _shrink(scores: list[float], reliabilities: list[float]) -> list[float]:
         return []
     med = statistics.median(scores)
     return [med + (s - med) * r for s, r in zip(scores, reliabilities, strict=False)]
+
+
+def _buyable_head(df: pd.DataFrame, top: int, *, buyable=None) -> pd.DataFrame:
+    """Take the top `top` ranked rows that survive the anomaly BUY gate — skip pumps, slow
+    pumps, and still-falling dumps. The deep persistence path already applies this gate
+    (`_apply_persistence`, scanner.py); this brings the same safety to the quick
+    `--no-persistence` snapshot path, which otherwise returns raw rankings that can include
+    a falling knife.
+
+    Bounded to the head so the "fast" path stays fast: at most ~2×top items are checked (each
+    is one cached /timeseries read). `buyable(item_id) -> bool` is injectable for tests; the
+    default consults the live anomaly assessment (the lean, one-fetch `assess`)."""
+    if df.empty:
+        return df
+    if buyable is None:
+        def buyable(iid: int) -> bool:
+            return anomaly.is_buyable(anomaly.assess(iid, api.latest(), api.one_hour(), api.timeseries))
+    budget = min(len(df), top * 2 + 5)  # cap fetches even if the head is unusually knife-heavy
+    keep = []
+    for _, row in df.head(budget).iterrows():
+        if buyable(int(row["item_id"])):
+            keep.append(row)
+            if len(keep) >= top:
+                break
+    return pd.DataFrame(keep).reset_index(drop=True) if keep else df.iloc[0:0]
 
 
 def scan(
@@ -141,13 +178,20 @@ def scan(
     # decaying, floored — never a permanent ban). 1.0 when there's no edge history for the item.
     em = edges or {}
     df["edge_mult"] = [float(em.get(int(i), {}).get("edge_mult", 1.0)) for i in df["item_id"]]
-    df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"] * df["edge_mult"]
-    df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"] * df["edge_mult"]
+    # price-impact haircut: your intended size vs the volume that trades — a large share walks the
+    # price against you (distinct from fill probability). Deflates EV where a position is a big
+    # fraction of flow; ≈1 for small bankroll-bound stacks and deep commodities.
+    df["impact_mult"] = [market_impact_mult(c, v)
+                         for c, v in zip(df["capacity"], df["vol_1h_binding"], strict=False)]
+    df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"] * df["edge_mult"] * df["impact_mult"]
+    df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"] * df["edge_mult"] * df["impact_mult"]
 
     # stack-aware ROI tilt: small stack compounds on margin%, large stack ranks on throughput (mode floor)
     roi_weight = _stack_roi_weight(mode, net_worth if net_worth is not None else bankroll)
     df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=roi_weight)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
+    if config.VARIANCE_AVERSION:  # optional risk-averse dial: favour reliable-completion flips
+        df["score"] = [s * _variance_tilt(p) for s, p in zip(df["score"], df["p_complete"], strict=False)]
     df = df[df["score"] > 0]
     if df.empty:
         return df
@@ -155,7 +199,7 @@ def scan(
     if not persistence:
         if min_gp:
             df = df[df[base_col] >= min_gp]
-        return df.head(top)
+        return _buyable_head(df, top)  # snapshot path still skips pumps/knives (deep path does too)
 
     out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges, roi_weight)
     if min_gp and not out.empty:
@@ -198,7 +242,9 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
         reliab_mult = rel["reliab_mult"] if rel else 1.0
         edge_mult = float((edges or {}).get(iid, {}).get("edge_mult", 1.0))
         fmult = calibration.fill_multiplier(fill_cal, row.get("turnover_1h") or 0)
-        mult = fmult * edge_mult * reliab_mult  # fill cal × realized-edge × margin-reliability — EV, gp, score
+        impact = market_impact_mult(int(row["capacity"]), row.get("vol_1h_binding") or 0)
+        hung = hung_leg_mult(q.p_sell, q.net_unit / q.buy_px if q.buy_px else 0.0)
+        mult = fmult * edge_mult * reliab_mult * impact * hung  # fill×edge×reliability×impact×hung-leg — EV, gp, score
         reliability = st["persist_factor"] * reliab_mult * min(1.0, q.p_round / 0.5)
         rows.append({
             **row.to_dict(),
@@ -208,10 +254,11 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
             "p_complete": q.p_round, "fill_eta_h": q.t_buy_h + q.t_sell_h,
             "persist": st["persist"], "realizable_spread": st["realizable_spread"],
             "exp_gp_cycle_adj": q.ev * mult, "reliability": reliability,
-            "fill_mult": fmult, "edge_mult": edge_mult, "reliab_mult": reliab_mult,
+            "fill_mult": fmult, "edge_mult": edge_mult, "reliab_mult": reliab_mult, "impact_mult": impact,
+            "hung_mult": hung,
             "reliab_uptime": rel["uptime"] if rel else None,
             "reliab_gone_frac": rel["gone_frac"] if rel else None,
-            "raw_score": q.ev / horizon * mult * _roi_mult(
+            "raw_score": q.ev / horizon * mult * _variance_tilt(q.p_round) * _roi_mult(
                 q.net_unit / q.buy_px if q.buy_px else None,
                 _mode_roi_weight(mode) if roi_weight is None else roi_weight),
         })
@@ -222,28 +269,58 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
     return out.sort_values(RANK_COL, ascending=False)
 
 
-def _allocate(picks: list[dict], bankroll: float) -> tuple[list[dict], float]:
-    """Split cash across picks by FAIR SHARE so no single position soaks the whole pile.
+def _alloc_weight(p: dict) -> float:
+    """Capital-efficiency weight for allocation: expected RETURN PER GP of capital deployed
+    (ROI × fill × the EV multipliers). A capital-bound stack compounds fastest by concentrating
+    capital in its highest-return flips, so budget is shared in proportion to this — not evenly."""
+    buy = p.get("buy_px") or 0
+    if buy <= 0:
+        return 0.0
+    fill = p["p_complete"] if p.get("tier") != "hold" else 1.0
+    mults = p.get("fill_mult", 1.0) * p.get("edge_mult", 1.0) * p.get("impact_mult", 1.0)
+    if p.get("tier") != "hold":
+        mults *= p.get("hung_mult", 1.0)  # sell-hang risk is an active-flip cost
+    return max(0.0, (p["margin_abs"] / buy) * fill * mults)
 
-    Each position's budget is its even share of the cash still unallocated, capped by its
-    own `cap_units` (fast-fill liquidity for active flips; buy limit for accumulation).
-    Underused budget spills forward. Returns (allocated picks, idle cash).
-    """
+
+def _allocate(picks: list[dict], bankroll: float, *, max_frac: float | None = None) -> tuple[list[dict], float]:
+    """Split cash across ranked picks by CAPITAL EFFICIENCY, concentrating on the best while capping
+    single-position risk — replacing the old even fair-share, which capped the best flip at 1/N and
+    diluted the compounding edge a small stack lives on.
+
+    Pass 1: each pick's budget is its weight-proportional slice of the cash still unallocated (weight =
+    expected return per gp, see `_alloc_weight`), capped by its own liquidity (`cap_units`) AND by a
+    concentration ceiling (`max_frac` of the pile). Pass 2: any leftover tops up picks that still have
+    liquidity room — best-first, ignoring the ceiling — so the cap concentrates capital WITHOUT idling
+    gold when nothing else can absorb it. Returns (allocated picks, idle cash).
+
+    `max_frac` defaults to config.MAX_ALLOC_FRAC; 1.0 (or 0) disables the ceiling (weight-proportional
+    with spillover). Picks arrive ranked best-first, so the ceiling and the top-up both favour them."""
     remaining = float(bankroll)
+    max_frac = config.MAX_ALLOC_FRAC if max_frac is None else max_frac
+    conc_cap = max_frac * bankroll if (max_frac and 0 < max_frac < 1) else float("inf")
+    pend = [p for p in picks if (p.get("buy_px") or 0) > 0]
+    weights = [_alloc_weight(p) for p in pend]
+
     out = []
-    for i, p in enumerate(picks):
+    for i, p in enumerate(pend):  # pass 1 — weighted, capped by liquidity and the concentration ceiling
         buy = p["buy_px"]
-        slots_left = len(picks) - i
-        if buy <= 0 or remaining <= 0 or slots_left <= 0:
-            continue
-        budget = remaining / slots_left  # fair share of what's left (spillover-aware)
-        alloc = min(budget, p["cap_units"] * buy)
-        qty = int(alloc // buy)
-        if qty <= 0:
-            continue
+        wsum = sum(weights[i:]) or 1.0
+        share = remaining * (weights[i] / wsum) if remaining > 0 and weights[i] > 0 else 0.0
+        budget = min(remaining, share, conc_cap, p["cap_units"] * buy)
+        qty = max(0, int(budget // buy))
         out.append({**p, "qty": qty, "deploy": qty * buy})
         remaining -= qty * buy
-    return out, remaining
+    for o in out:  # pass 2 — deploy leftover into any pick with liquidity room, best-first (over idle)
+        if remaining <= 0:
+            break
+        buy, room = o["buy_px"], o["cap_units"] - o["qty"]
+        add = min(int(remaining // buy), room) if (buy > 0 and room > 0) else 0
+        if add > 0:
+            o["qty"] += add
+            o["deploy"] += add * buy
+            remaining -= add * buy
+    return [o for o in out if o["qty"] > 0], remaining
 
 
 def _pick_row(row, tier: str, cap_units: int) -> dict:
@@ -253,6 +330,7 @@ def _pick_row(row, tier: str, cap_units: int) -> dict:
         "margin_abs": int(row["margin_abs"]), "p_complete": float(row["p_complete"]),
         "cap_units": max(0, cap_units), "buy_rate": float(row.get("buy_rate", 0.0)),
         "fill_mult": float(row.get("fill_mult", 1.0)), "edge_mult": float(row.get("edge_mult", 1.0)),
+        "impact_mult": float(row.get("impact_mult", 1.0)), "hung_mult": float(row.get("hung_mult", 1.0)),
         "reliab_mult": float(row.get("reliab_mult", 1.0)), "reliab_gone_frac": row.get("reliab_gone_frac"),
     }
 
@@ -314,7 +392,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     picks: list[dict] = []
     for role in roles:  # active: best worth-it flip for the role
         for _, row in rankings[role].iterrows():
-            fm = float(row.get("fill_mult", 1.0)) * float(row.get("edge_mult", 1.0))  # fill × realized-edge
+            fm = (float(row.get("fill_mult", 1.0)) * float(row.get("edge_mult", 1.0))
+                  * float(row.get("impact_mult", 1.0)) * float(row.get("hung_mult", 1.0)))  # + hung-leg (active)
             if ok(row, fast=True) and _worth_gp(row, int(row["liq_units"]), role) * fm >= min_gp:
                 picks.append(_pick_row(row, role, int(row["liq_units"])))
                 taken.add(int(row["item_id"]))
@@ -326,7 +405,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
         # HOLD_MIN_MARGIN. Below that, leave the gold liquid to recycle rather than churn junk.
         if (ok(row, fast=False) and float(row["margin_pct"]) >= config.HOLD_MIN_MARGIN
                 and _worth_gp(row, int(row["hold_units"]), "hold")
-                * float(row.get("fill_mult", 1.0)) * float(row.get("edge_mult", 1.0)) >= min_gp):
+                * float(row.get("fill_mult", 1.0)) * float(row.get("edge_mult", 1.0))
+                * float(row.get("impact_mult", 1.0)) >= min_gp):
             picks.append(_pick_row(row, "hold", int(row["hold_units"])))  # cap by realizable volume
             taken.add(int(row["item_id"]))
 
@@ -407,7 +487,10 @@ def _finalize_gp(picks: list[dict]) -> None:
     spread × fill; a hold's is the full spread captured once it sells (no queue-jump discount)."""
     for p in picks:
         fill = p["p_complete"] if p["tier"] != "hold" else 1.0
-        p["gp"] = p["margin_abs"] * p["qty"] * fill * p.get("fill_mult", 1.0) * p.get("edge_mult", 1.0)
+        # sell-hang risk is a time-bounded ACTIVE-flip cost; a hold sells over later cycles (fill=1.0)
+        hung = p.get("hung_mult", 1.0) if p["tier"] != "hold" else 1.0
+        p["gp"] = (p["margin_abs"] * p["qty"] * fill
+                   * p.get("fill_mult", 1.0) * p.get("edge_mult", 1.0) * p.get("impact_mult", 1.0) * hung)
         br = p.get("buy_rate", 0.0)
         p["buy_eta_h"] = p["qty"] / br if br > 0 else float("inf")
 
