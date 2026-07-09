@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 
 import pandas as pd
@@ -26,6 +27,24 @@ FAST_MODES = {"online", "balanced"}  # throughput trading — where a minutes-sc
 def _mode_roi_weight(mode: str) -> float:
     """ROI tilt for a scan mode: volume/throughput by day (online/balanced), margin% overnight."""
     return MODE_ROI_WEIGHT.get(mode, config.SCORE_ROI_WEIGHT)
+
+
+def _stack_roi_weight(mode: str, net_worth: int | None) -> float:
+    """ROI-tilt exponent as a function of stack size — capital-awareness baked into the ranking, always on.
+
+    A small stack is capital-bound, so it compounds fastest by tilting HARD to ROI% (favour margin%); a
+    large stack can't push size through shallow high-ROI items, so the tilt fades to the mode's throughput
+    floor. Mode still sets that floor (overnight keeps favouring fat margins). Log-interpolated across
+    [ROI_STACK_LO, ROI_STACK_HI] on net worth, since a stack spans orders of magnitude."""
+    floor = _mode_roi_weight(mode)                 # large-stack weight (0 day, 0.5 overnight)
+    small = config.ROI_WEIGHT_SMALL_STACK
+    nw = float(net_worth or 0)
+    if nw <= config.ROI_STACK_LO:
+        return small
+    if nw >= config.ROI_STACK_HI:
+        return floor
+    t = (math.log(nw) - math.log(config.ROI_STACK_LO)) / (math.log(config.ROI_STACK_HI) - math.log(config.ROI_STACK_LO))
+    return small + (floor - small) * t             # small stack → `small`, large → mode `floor`
 
 
 def _roi_mult(margin_pct: float | None, roi_weight: float) -> float:
@@ -74,6 +93,7 @@ def scan(
     fill_cal: dict | None = None,
     edges: dict | None = None,
     beta: float | None = None,
+    net_worth: int | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -123,7 +143,8 @@ def scan(
     df["exp_gp_cycle"] = df["exp_gp_cycle"] * df["fill_mult"] * df["edge_mult"]
     df["exp_gp_cycle_fast"] = df["exp_gp_cycle_fast"] * df["fill_mult"] * df["edge_mult"]
 
-    roi_weight = _mode_roi_weight(mode)  # volume by day (online/balanced), margin overnight (offline)
+    # stack-aware ROI tilt: small stack compounds on margin%, large stack ranks on throughput (mode floor)
+    roi_weight = _stack_roi_weight(mode, net_worth if net_worth is not None else bankroll)
     df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=roi_weight)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
     df = df[df["score"] > 0]
@@ -135,14 +156,15 @@ def scan(
             df = df[df[base_col] >= min_gp]
         return df.head(top)
 
-    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges)
+    out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges, roi_weight)
     if min_gp and not out.empty:
         out = out[out["exp_gp_cycle_adj"] >= min_gp]  # drop flips too small to be worth a slot
     return out.head(top).reset_index(drop=True)
 
 
 def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
-                       fill_cal: dict | None = None, edges: dict | None = None) -> pd.DataFrame:
+                       fill_cal: dict | None = None, edges: dict | None = None,
+                       roi_weight: float | None = None) -> pd.DataFrame:
     """Deep-check the top snapshot candidates: re-price each with the quote optimiser (one
     source of truth — price-specific fills), then shrink the scores against the curse.
 
@@ -189,7 +211,8 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
             "reliab_uptime": rel["uptime"] if rel else None,
             "reliab_gone_frac": rel["gone_frac"] if rel else None,
             "raw_score": q.ev / horizon * mult * _roi_mult(
-                q.net_unit / q.buy_px if q.buy_px else None, _mode_roi_weight(mode)),
+                q.net_unit / q.buy_px if q.buy_px else None,
+                _mode_roi_weight(mode) if roi_weight is None else roi_weight),
         })
     if not rows:
         return pd.DataFrame()
@@ -270,7 +293,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
-                        fill_cal=fill_cal, edges=edges, beta=beta)
+                        fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth)
                 for m in modes}
     # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks —
     # derived live from net worth and the ROI the market is paying (see slot_worth_floor).

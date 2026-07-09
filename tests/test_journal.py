@@ -134,6 +134,16 @@ def test_realized_history_sorts_out_of_order_fills():
     assert [r[0] for r in rows] == [1, 3]                     # replayed in time order (buy before sell)
 
 
+def test_blacklist_add_list_remove_roundtrip(j):
+    assert j.blacklist_ids() == set()
+    j.blacklist_add(4151, "Abyssal whip")
+    j.blacklist_add(100, "Raw halibut")
+    assert j.blacklist_ids() == {4151, 100}
+    assert {n for _, n in j.blacklist_items()} == {"Abyssal whip", "Raw halibut"}
+    j.blacklist_remove(100)
+    assert j.blacklist_ids() == {4151}
+
+
 def test_cannot_oversell(j):
     j.record_buy(GOLD_BAR, "Gold bar", 100, 97)
     proceeds, realized = j.record_sell(GOLD_BAR, "Gold bar", 999, 101)

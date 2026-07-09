@@ -181,6 +181,17 @@ HIGH_VALUE_THRESHOLD = 250_000_000  # above this, effective tax dips below 2%
 ROI_WEIGHT_FAST = float(os.environ.get("OSRS_FLIPPER_ROI_WEIGHT_FAST", 0.0))
 ROI_WEIGHT_SLOW = float(os.environ.get("OSRS_FLIPPER_ROI_WEIGHT_SLOW", 0.5))
 SCORE_ROI_WEIGHT = float(os.environ.get("OSRS_FLIPPER_SCORE_ROI_WEIGHT", ROI_WEIGHT_FAST))  # fallback
+# Stack-aware ROI tilt: the roi_weight above is the LARGE-stack floor (mode sets it). A small stack is
+# capital-bound, so it compounds fastest by tilting HARD to ROI% — we lift roi_weight to
+# ROI_WEIGHT_SMALL_STACK when broke and fade it (log-interpolated over net worth) down to the mode floor
+# as you scale, because a big stack can't push size through shallow high-ROI items. Always on, no flag.
+ROI_WEIGHT_SMALL_STACK = float(os.environ.get("OSRS_FLIPPER_ROI_WEIGHT_SMALL_STACK", 0.6))
+ROI_STACK_LO = int(os.environ.get("OSRS_FLIPPER_ROI_STACK_LO", 300_000))       # ≤ this → full small-stack tilt
+ROI_STACK_HI = int(os.environ.get("OSRS_FLIPPER_ROI_STACK_HI", 20_000_000))    # ≥ this → mode floor
+# Never-recommend list: item ids the scanner/gear/combos drop at the source (build_features). Seed via
+# OSRS_FLIPPER_BLACKLIST="123,456"; the terminal `blacklist` command adds/removes at runtime (persisted).
+BLACKLIST_IDS: set[int] = {int(x) for x in os.environ.get("OSRS_FLIPPER_BLACKLIST", "").replace(",", " ").split()
+                           if x.isdigit()}
 # Daytime HOLD (accumulate) quality floor: don't park overflow cash in a slow hold unless it
 # clears this ROI. Stricter than the 1% active floor — a hold ties capital up for hours, so it
 # must earn its keep; below this, leave the cash liquid to recycle through the active slots.
