@@ -155,16 +155,11 @@ class Terminal:
         self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
         self._cal_eta: dict = {}       # live fill-time (ETA) correction by price×volume, auto-applied
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
-        # auto-push: mirror the full `go` dashboard to Discord on an idle tick (main thread — no DB race)
+        # auto-push: repost the compact `go` board to Discord on an idle tick (main thread — no DB race).
+        # The board is the single message; it reposts at the bottom only when its actionable content changes.
         self._auto_push = False        # enabled flag (`alerts on/off`); auto-on at startup if a channel is set
-        self._status_msg_id: str | None = None   # the live status message we edit in place
-        self._last_dash = ""           # last dashboard text pushed (push only when it changes)
-        self._alerted: dict = {}       # deduped attention pings (collect/margin/stale) until they clear
-        self._seen_offers: set | None = None      # for placed / slot-freed transition detection
-        self._pinged_buy: tuple | None = None     # last buy-opportunity ping's picks (dedupe until they change)
-        self._banked: dict = {}                   # slow partial buys already pinged "bank it" (until cleared)
-        self._plan_chosen: list = []              # picks from the last `go` (for the buy-opportunity ping)
-        self._plan_buy_slots = 0
+        self._status_msg_id: str | None = None   # the current board message (deleted + reposted on change)
+        self._last_dash = ""           # last board's actionable signature (repost only when it changes)
         # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
         self._cut_bounce: dict[int, bool | None] = {}
         self._cut_better: bool | None = None
@@ -818,7 +813,6 @@ class Terminal:
         (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         self._cut_bounce, self._cut_better = {}, None  # fresh per-invocation cut-policy caches
-        self._plan_chosen, self._plan_buy_slots = [], 0  # reset stashed plan (set by _plan_buys if slots free)
         hour = datetime.now().hour
         coins, tied = self._sync_cash()  # live coins on hand + gold tied up in open offers
         cash = int(self.j.cash()) or config.BANKROLL
@@ -859,7 +853,8 @@ class Terminal:
         rows = self._review_offers()  # ACTIVE offers + verdicts (the old `review`)
         refined = []  # verdicts re-checked against a fresh quote so we never churn a priced-right offer
         if rows:
-            names = {r["id"]: r["name"] for r in api.mapping()}
+            mp = {r["id"]: r for r in api.mapping()}
+            names = {i: r["name"] for i, r in mp.items()}
             print("  ACTIVE OFFERS:")
             for o, v, elapsed_h, eta_h, prog in sorted(rows, key=lambda x: x[0].slot):
                 hint = ""
@@ -882,6 +877,21 @@ class Terminal:
                 if hint:
                     print(hint)
                 refined.append((o, v, elapsed_h, eta_h, prog))
+            # bank-a-partial: a partial buy where waiting is pointless — it's flagged (slow/stale/margin)
+            # or it HIT the 4h buy limit (rest blocked ~4h). Bank the filled units now (same margin,
+            # sooner) & free the slot, when it's worth a material sum. One line, shows on the board too.
+            bank_min = net_worth * config.BANK_PARTIAL_MIN_FRAC
+            for o, v, *_ in refined:
+                if (bpq := self._bank_partial(o)) is None or bpq[2] < bank_min:
+                    continue
+                lim = int((mp.get(o.item_id) or {}).get("limit") or 0)
+                limit_hit = bool(lim and lim <= o.filled < o.qty)
+                if v not in ("slow", "stale", "margin") and not limit_hit:
+                    continue
+                sell_px, net_now, gp = bpq
+                note = " · buy limit hit, rest blocked ~4h" if limit_hit else ""
+                print(alert.color(f"  💰 bank slot {o.slot} {names.get(o.item_id, o.item_id)}: {o.filled:,} "
+                                  f"filled @ {sell_px:,} (net {net_now:,}/ea ≈ {gp:,}) & free the slot{note}", "yellow"))
             swaps = self._rebalance(offers, cash, held, net_worth, daytime, hours_until_sleep)  # a better slot use → swap
             if swaps:
                 print("  REBALANCE (a better use of these slots — what `go` would deploy):")
@@ -1082,7 +1092,6 @@ class Terminal:
                               exclude_ids=exclude_ids, budget=float(cash), verify=verify)
         self._log_recommendations(chosen, net_worth, buy_slots, daytime, lat, hr)
         self._print_plan(chosen, buy_slots, daytime, hours, fcal)
-        self._plan_chosen, self._plan_buy_slots = chosen, buy_slots  # for the auto-push buy-opportunity ping
         return [{"name": c.key, "kind": c.kind, "place_at_h": 0} for c in chosen]
 
     def _log_recommendations(self, chosen: list, net_worth: int, free_slots: int, daytime: bool,
@@ -1293,17 +1302,10 @@ class Terminal:
             # sell into; only under-bidding by MORE than tick jitter (won't fill) or over-paying (no
             # margin) needs a re-quote. The deadband stops a 1gp book wiggle triggering a chase.
             net_at_mine = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
-            # a partial buy filling slowly: you can bank what's ALREADY filled at the same margin right
-            # now and free the slot + unfilled capital, instead of waiting for the slow remainder. Same
-            # gp/unit — the win is speed. Only worth showing when the filled units sell for a profit.
-            bank = ""
-            if 0 < o.filled < o.qty and net_at_mine > 0:
-                bank = alert.color(f"  ↳ or bank the {o.filled:,} filled now: sell @ {q.sell_px:,} "
-                                   f"(net {net_at_mine:,}/ea ≈ {net_at_mine * o.filled:,}) & free the slot", "yellow")
             tol = q.buy_px * config.REPRICE_DEADBAND
             if o.price >= q.buy_px - tol and net_at_mine > 0:
-                return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green") + bank
-            return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold") + bank
+                return "ontrack", alert.color(f"         → your bid {o.price:,} still clears (sell ~{q.sell_px:,}, net {net_at_mine}/ea) — just slow; hold", "green")
+            return verdict, alert.color(f"         → re-quote: buy {q.buy_px:,} / sell {q.sell_px:,}  (net {q.net_unit}/ea)", "bold")
         # SELL: reference the 5m average buy price BLENDED toward the last tick (so noise is
         # smoothed but a genuine sharp drop still moves it), and only advise a re-list when you're
         # above that by more than the deadband.
@@ -1413,18 +1415,14 @@ class Terminal:
         return buf.getvalue()
 
     def _go(self, args: list) -> None:
-        """Interactive `go`: print the full dashboard locally AND (if pushing is on) mirror a COMPACT
-        version to the bot's live status message."""
-        dash = self._render_go(echo=True, args=args)
-        compact = _compact_status(dash)
-        if self._auto_push and alert.bot_enabled() and compact:
-            self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
-            self._last_dash = compact
+        """Interactive `go`: print the full dashboard locally AND (if pushing is on) repost the compact
+        board to Discord — but only when its actionable content changed (see _status_sig)."""
+        self._maybe_repost(_compact_status(self._render_go(echo=True, args=args)))
 
     def _bank_partial(self, o) -> tuple[int, int, int] | None:
         """For a partially-filled BUY, the profit of banking the already-filled units at the competitive
-        sell RIGHT NOW: (sell_px, net/unit, total gp). None if not a partial buy or not profitable. Uses
-        the same optimal_quote as _refine_verdict so the ping and the terminal hint show identical numbers."""
+        sell RIGHT NOW: (sell_px, net/unit, total gp). None if not a partial buy or not profitable. Reuses
+        the same optimal_quote as _refine_verdict so the board's bank line matches the re-quote figures."""
         if not (o.is_buy and 0 < o.filled < o.qty and o.price > 0):
             return None
         from .quote import optimal_quote
@@ -1435,124 +1433,35 @@ class Terminal:
         net_now = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
         return (int(q.sell_px), int(net_now), int(net_now * o.filled)) if net_now > 0 else None
 
-    def _push_transition_pings(self) -> None:
-        """Event-driven Discord pings — fire ONLY when something newly needs action: you PLACED an offer,
-        or one now needs you (collect / margin gone / stale). Each is deduped until it clears, so you're
-        told once per occurrence, not on a schedule. Every flagged offer is re-checked against fresh prices
-        (the same refine the `go` dashboard uses): the ping carries the concrete re-quote/re-list TARGET,
-        and a priced-right-but-slow offer downgrades to on-track and is dropped rather than pinged. Runs on
-        the main thread, so the cost-basis journal reads for loss-aware sell advice are safe."""
-        offers = self._active_offers()
-        mp = {r["id"]: r for r in api.mapping()}
-        names = {i: r["name"] for i, r in mp.items()}
-        cash = int(self.j.cash()) or config.BANKROLL
-        lat = api.latest()
-        rows = monitor.review_offers(offers, api.one_hour(), lat, int(time.time() * 1000))
-        keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
-        if self._seen_offers is not None and (placed := keys - self._seen_offers):
-            lines = [f"placed {s} {names.get(iid, iid)} (slot {sl})" for (sl, iid, s) in placed]
-            alert.notify("\U0001f4e5 offer placed:\n" + "\n".join(lines))
-        self._seen_offers = keys
-        bids = {p.item_id: (lat.get(p.item_id) or {}).get("low") for p in self.j.positions()}
-        bank_min = int(self.j.equity(bids)) * config.BANK_PARTIAL_MIN_FRAC  # "material" = frac of net worth
-        # refine each flagged offer against fresh prices → an actionable target, drop false alarms
-        # (priced-right-but-slow → on-track); collect out (no re-quote). Also collect slow partial buys.
-        refined, hints, banks = [], {}, {}
-        for o, v, eh, eta, prog in rows:
-            raw_v = v
-            if v in monitor.ATTENTION and v != "collect":
-                kw = self._sell_cut_context(o, cash) if not o.is_buy else {}
-                v, hint = self._refine_verdict(o, v, **kw)
-                if hint:
-                    hints[(o.slot, o.item_id)] = alert.plain(hint).strip()
-            # bank-a-partial: a partial buy where waiting is pointless — either it's merely SLOW (stale/
-            # margin already carry the bank hint via the needs-you ping), or it HIT the 4h buy limit
-            # (filled ≥ the whole limit with units still outstanding → the rest is blocked ~4h, a
-            # certainty, not a heuristic). Ping when banking the filled units clears the material threshold.
-            lim = int(mp.get(o.item_id, {}).get("limit") or 0)
-            limit_hit = bool(lim and 0 < lim <= o.filled < o.qty)
-            if (raw_v == "slow" or limit_hit) and (bp := self._bank_partial(o)) and bp[2] >= bank_min:
-                banks[(o.slot, o.item_id)] = (o, bp, limit_hit)
-            refined.append((o, v, eh, eta, prog))
-        current = monitor.attention_events(refined)
-        for k in [k for k in self._alerted if k not in current]:
-            del self._alerted[k]  # cleared → re-arm
-        new = monitor.diff_new(current, self._alerted)
-        if new:
-            lines = [f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}"
-                     + (f"\n    {hints[(slot, iid)]}" if hints.get((slot, iid)) else "")
-                     for ((slot, iid), v) in new]
-            if alert.notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
-                self._alerted.update(dict(new))
-        # bank-a-partial ping, deduped until it clears (fills / cancels / no longer material)
-        for k in [k for k in self._banked if k not in banks]:
-            del self._banked[k]
-        fresh = [k for k in banks if k not in self._banked]
-        if fresh:
-            lines = []
-            for k in fresh:
-                o, (sell_px, net_now, gp), limit_hit = banks[k]
-                note = " (buy limit hit — rest blocked ~4h)" if limit_hit else ""
-                lines.append(f"slot {o.slot}: {names.get(o.item_id, o.item_id)} — bank {o.filled:,} filled "
-                             f"@ {sell_px:,} (net {net_now:,}/ea ≈ {gp:,}) & free the slot{note}")
-            if alert.notify("\U0001f4b0 bank a partial fill?\n" + "\n".join(lines)):
-                self._banked.update({k: True for k in fresh})
+    def _maybe_repost(self, compact: str) -> None:
+        """Repost the board as a fresh message at the bottom (deleting the previous one) ONLY when its
+        ACTIONABLE content changed — that's everything but the first line (the header's cash / net worth /
+        slots / regime tick constantly), so a bare cash tick never reposts. Bot only — a webhook can't
+        delete/edit, so it gets no live board."""
+        if not (self._auto_push and alert.bot_enabled() and compact):
+            return
+        sig = compact.split("\n", 1)[1] if "\n" in compact else compact  # drop the volatile header line
+        if sig != self._last_dash:
+            self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
+            self._last_dash = sig
 
     def _auto_tick(self) -> None:
-        """Idle tick (main thread): keep the journal fresh, ping real transitions + buy opportunities, and
-        edit the live status message with the full `go` dashboard — but only when it changed. Silent
-        locally. No-op unless auto-push is on with a channel."""
+        """Idle tick (main thread): keep the journal fresh, then repost the board to Discord — but only
+        when its actionable content changed (not on a bare cash tick). Silent locally; no-op unless
+        auto-push is on with a channel. The board is the SINGLE Discord message — it carries attention
+        offers (with re-quote targets), bank-a-partial, sells, the buy plan and NEXT. No separate pings."""
         if not self._auto_push or not (config.DISCORD_WEBHOOK_URL or alert.bot_enabled()):
             return
         try:
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    self._autosync()  # import fills / reconcile bag / detect decants so the pushed
-                    #                    dashboard (holdings, sells, decants) isn't frozen at last input
-            except Exception:  # noqa: BLE001 — a sync hiccup must still let the last-known dashboard push
+                    self._autosync()  # import fills / reconcile bag / detect decants so the board isn't
+                    #                    frozen at the last typed command
+            except Exception:  # noqa: BLE001 — a sync hiccup must still let the last-known board post
                 pass
-            self._push_transition_pings()
-            compact = _compact_status(self._render_go(echo=False))  # runs cmd_go → refreshes self._plan_chosen
-            if compact and compact != self._last_dash:
-                if alert.bot_enabled():
-                    self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
-                self._last_dash = compact
-            self._push_buy_opportunity()
+            self._maybe_repost(_compact_status(self._render_go(echo=False)))
         except Exception:  # noqa: BLE001 — a push failure must never break the REPL
             pass
-
-    @staticmethod
-    def _pick_ping_line(c) -> str:
-        """One compact line describing a buy pick, for the free-slots deploy ping."""
-        tag = {"flip": "⚡", "gear": "🕰", "set": "🧩", "decant": "🧪"}.get(c.kind, "")
-        d, gp = c.payload, int(c.window_gp)
-        if c.kind == "decant":
-            bt, st = d["in_qty"] * d["conv"], d["out_qty"] * d["conv"]
-            body = (f"buy {bt:,} ({d['in_dose']})@{int(d['in_px']):,} → sell {st:,} "
-                    f"({d['out_dose']})@{int(d['out_px']):,}")
-        elif c.kind == "set":
-            body = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
-        else:
-            body = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {int(d['qty']):,}"
-            if d.get("windows", 1) > 1:
-                body += f" ({d['windows']}× limit windows, overnight)"
-        return f"{tag} {str(c.key)[:28]}: {body}  (~{gp:,})"
-
-    def _push_buy_opportunity(self) -> None:
-        """Ping when you have free slot(s) AND the plan has something to deploy — the "idle cash, buy this"
-        nudge. Deduped on the chosen picks so it fires when the picks CHANGE or slots newly free, not every
-        tick. The live status message carries this too, but edits don't notify — this one does."""
-        picks = getattr(self, "_plan_chosen", []) or []
-        slots = getattr(self, "_plan_buy_slots", 0) or 0
-        if not picks or slots <= 0:
-            self._pinged_buy = None  # nothing to deploy → re-arm for the next opportunity
-            return
-        key = tuple(str(c.key) for c in picks)
-        if key == self._pinged_buy:
-            return  # already nudged this exact set of picks
-        lines = [self._pick_ping_line(c) for c in picks[:3]]
-        if alert.notify(f"\U0001f6d2 {slots} slot(s) free — deploy:\n" + "\n".join(lines)):
-            self._pinged_buy = key
 
     def cmd_alerts(self, args: list[str]) -> None:
         """Background Discord alerts when an offer needs you (filled/margin-gone/stale).
