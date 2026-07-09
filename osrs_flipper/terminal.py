@@ -388,9 +388,22 @@ class Terminal:
             if names is None:
                 names = {r["id"]: r["name"] for r in api.mapping()}
             snap = self._snapshot(o.item_id)
+            # record what the MODEL predicted for this offer so it can later be graded (ETA + fill-rate
+            # calibration). Leg-specific: a BUY grades the buy leg, a SELL the sell leg. Best-effort.
+            pe = pp = pv = None
+            try:
+                from .quote import optimal_quote
+                q = optimal_quote(o.item_id, o.qty, name=names.get(o.item_id), horizon_h=1.0)
+                if q:
+                    pe = q.t_buy_h if o.is_buy else q.t_sell_h
+                    pp = q.p_buy if o.is_buy else q.p_sell
+                    pv = q.ev
+            except Exception:  # noqa: BLE001 — a prediction is best-effort; never block logging the attempt
+                pass
             self.j.record_attempt(o.item_id, names.get(o.item_id, str(o.item_id)), side, o.qty,
                                   o.price, horizon_h=1.0, avg_low=snap["avg_low"],
-                                  avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"])
+                                  avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"],
+                                  pred_eta_h=pe, pred_p_fill=pp, pred_ev=pv)
             open_keys.add((o.item_id, side))
             n += 1
         if n:
