@@ -72,7 +72,7 @@ def watch_loop(stop, *, interval_s: int | None = None, webhook: str | None = Non
     """Blocking poll loop (run in a daemon thread): push a Discord alert when an offer newly
     needs attention. Resilient — a transient API/RuneLite error never kills the loop. State
     that clears (offer collected / re-priced) is forgotten so a later re-entry alerts again."""
-    from .alert import post_discord
+    from .alert import notify
 
     interval_s = interval_s or config.ALERT_POLL_S
     names: dict[int, str] = {}
@@ -88,8 +88,7 @@ def watch_loop(stop, *, interval_s: int | None = None, webhook: str | None = Non
             if new:
                 lines = [f"slot {slot}: {names.get(iid, iid)} — {ATTENTION[v]}"
                          for ((slot, iid), v) in new]
-                ok, _detail = post_discord("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines), webhook)
-                if ok:
+                if notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
                     alerted.update(dict(new))  # only mark sent on success → failed push retries
         except Exception:
             pass  # a watcher that dies silently is worse than one that retries next tick
