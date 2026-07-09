@@ -28,6 +28,16 @@ def test_fresh_liquid_item_is_tradeable():
     assert df.loc[0, "margin_abs"] > 0
 
 
+def test_blacklisted_item_is_dropped_at_the_source(monkeypatch):
+    from osrs_flipper import config
+    monkeypatch.setattr(config, "BLACKLIST_IDS", {1})   # never-recommend id 1
+    m = [_mapping(1, "Never fills"), _mapping(2, "Oak logs")]
+    lat = {1: _latest(33, 29, 60), 2: _latest(33, 29, 60)}
+    hr = {1: _hourly(33, 29, 5000, 5000), 2: _hourly(33, 29, 5000, 5000)}
+    ids = set(build_features(lat, hr, m, now_ts=NOW)["item_id"])
+    assert 1 not in ids and 2 in ids                    # blacklisted item never enters the feature table
+
+
 def test_stale_item_is_not_tradeable():
     m = [_mapping(1, "Ghost")]
     df = build_features({1: _latest(33, 29, 999_999)}, {1: _hourly(33, 29, 5000, 5000)}, m, now_ts=NOW)

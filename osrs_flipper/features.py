@@ -45,6 +45,8 @@ def build_features(
 
     for meta in mapping:
         iid = meta["id"]
+        if iid in config.BLACKLIST_IDS:
+            continue  # never-recommend list (e.g. an item that never fills) — drop at the source
         lp = latest.get(iid)
         hp = hourly.get(iid)
         if not lp or not hp:

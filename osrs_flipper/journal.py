@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS manual_fills (
     ts BIGINT, item_id INTEGER, name TEXT, is_buy BOOLEAN, qty BIGINT, price BIGINT
 );
 CREATE TABLE IF NOT EXISTS offer_progress (uuid TEXT PRIMARY KEY, accounted_qty BIGINT);
+CREATE TABLE IF NOT EXISTS blacklist (item_id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS offer_seen (
     slot INTEGER, item_id INTEGER, placed_at BIGINT, observed BOOLEAN,
     is_buy BOOLEAN, qty BIGINT, price BIGINT, filled BIGINT,
@@ -249,6 +250,19 @@ class Journal:
         self.con.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?,?,?)",
                          [int(time.time()), out_id, out_name, "DECANT", out_qty, int(round(navg)), 0, 0.0, 0.0])
         return moved, navg, in_avg
+
+    # --- blacklist (never-recommend list) ------------------------------------
+    def blacklist_ids(self) -> set[int]:
+        return {r[0] for r in self.con.execute("SELECT item_id FROM blacklist").fetchall()}
+
+    def blacklist_items(self) -> list[tuple[int, str]]:
+        return self.con.execute("SELECT item_id, name FROM blacklist ORDER BY name").fetchall()
+
+    def blacklist_add(self, item_id: int, name: str) -> None:
+        self.con.execute("INSERT OR REPLACE INTO blacklist VALUES (?,?)", [item_id, name])
+
+    def blacklist_remove(self, item_id: int) -> None:
+        self.con.execute("DELETE FROM blacklist WHERE item_id=?", [item_id])
 
     def sync_positions_to_bag(self, holdings: dict[int, int], fills) -> list[tuple[str, int, int]]:
         """Bag = ground truth for held QUANTITY (you keep flip stock in your bag). Set each position's

@@ -145,6 +145,21 @@ def test_blended_ref_is_relative_smooths_noise_reacts_to_a_crash():
     assert scanner.blended_ref(None, 60, 0.08) == 60 and scanner.blended_ref(100, None, 0.08) == 100
 
 
+def test_stack_roi_weight_scales_with_net_worth():
+    import math
+
+    from osrs_flipper import config
+    # small stack → hard ROI tilt (compound); large stack → mode throughput floor; mid interpolates (log)
+    assert scanner._stack_roi_weight("online", config.ROI_STACK_LO) == config.ROI_WEIGHT_SMALL_STACK
+    assert scanner._stack_roi_weight("online", config.ROI_STACK_HI) == config.ROI_WEIGHT_FAST  # 0 by day
+    mid = scanner._stack_roi_weight("online", int(round(math.sqrt(config.ROI_STACK_LO * config.ROI_STACK_HI))))
+    assert config.ROI_WEIGHT_FAST < mid < config.ROI_WEIGHT_SMALL_STACK
+    # mode still nudges the FLOOR: a large overnight stack keeps favouring fat margins
+    assert scanner._stack_roi_weight("offline", config.ROI_STACK_HI) == config.ROI_WEIGHT_SLOW
+    # a tiny stack tilts to the small-stack weight regardless of mode
+    assert scanner._stack_roi_weight("offline", 1) == config.ROI_WEIGHT_SMALL_STACK
+
+
 def test_roi_per_hour_floors_fill_time_so_near_instant_flips_dont_explode():
     # the reported bug: a 1.9% flip "in 0.0h" must NOT out-rate a 4% flip in 0.9h (was "1780× faster")
     fast = scanner.roi_per_hour(0.019, 0.0, 0.25)   # 0.019 / max(0, 0.25) = 0.076

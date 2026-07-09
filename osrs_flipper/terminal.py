@@ -1651,6 +1651,37 @@ class Terminal:
             print(f"  decanted {count:,} {src['name']} → {out_qty:,} {out['name']} · moved {moved:,.0f} gp basis "
                   f"→ avg {navg:,.0f}/ea (cash & tax unchanged; the sell will now book real P&L)")
 
+    def cmd_blacklist(self, args: list[str]) -> None:
+        """Never recommend an item again (e.g. one whose spread never fills). It's dropped at the feature
+        source, so it vanishes from `go`, `scan`, `gear`, `sets` and `decant` alike. Persisted across sessions.
+          blacklist                 list the blacklist
+          blacklist <item>          add (name or id)
+          blacklist rm <item>       remove"""
+        if not args:
+            items = self.j.blacklist_items()
+            if not items:
+                print("  blacklist empty — `blacklist <item>` to never see an item recommended again")
+                return
+            print("  BLACKLIST (never recommended):")
+            for iid, name in items:
+                print(f"    {iid:>7}  {name}")
+            return
+        op = args[0].lower()
+        rest = args[1:] if op in ("add", "rm", "remove") else args
+        meta = self.resolve(" ".join(rest))
+        if not meta:
+            print("  item not found — name it exactly, or pass its id")
+            return
+        if op in ("rm", "remove"):
+            self.j.blacklist_remove(meta["id"])
+            config.BLACKLIST_IDS.discard(meta["id"])
+            print(f"  removed {meta['name']} from the blacklist — it can be recommended again")
+        else:
+            self.j.blacklist_add(meta["id"], meta["name"])
+            config.BLACKLIST_IDS.add(meta["id"])
+            print(f"  blacklisted {meta['name']} — never recommended again "
+                  f"(`blacklist rm {meta['name']}` to undo)")
+
     def cmd_audit(self, args: list[str]) -> None:
         """Full reconciliation from the authoritative sources — RuneLite's complete buy/sell history
         (the trades file) + your live bag. Per item: total bought, total sold, history net, what you
@@ -1886,6 +1917,7 @@ class Terminal:
         for w in src.warnings():
             print(alert.color(f"  ⚠ data looks wrong: {w}. Slot/limit advice may be unsafe — "
                               f"pass free slots explicitly (`port <n>`).", "red"))
+        config.BLACKLIST_IDS |= self.j.blacklist_ids()  # persisted never-recommend list → live filter
         n0 = self._autosync()
         if n0:
             print(f"  (auto-synced {n0} fill(s) from RuneLite)")
@@ -1907,6 +1939,7 @@ class Terminal:
             # rare / maintenance (hidden from `help`; shown in `help all`)
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "hold": lambda a: self.cmd_hold(a), "forget": lambda a: self.cmd_forget(a),
+            "blacklist": lambda a: self.cmd_blacklist(a),
             "audit": lambda a: self.cmd_audit(a), "calibrate": lambda a: self.cmd_calibrate(a),
             "preds": lambda a: self.cmd_preds(a), "alerts": lambda a: self.cmd_alerts(a),
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
