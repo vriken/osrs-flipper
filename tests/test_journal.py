@@ -526,3 +526,32 @@ def test_slot_turnover_detected_by_fill_reset(j):
     new = _offer(started_ms=later, observed=True, filled=0)               # fresh order, same item/price/qty
     j.remember_offer_ages([new], later)
     assert new.started_ms == later
+
+
+def _rec(item_id=5, kind="flip"):
+    return {"kind": kind, "item_id": item_id, "side": "BUY", "name": "Yew logs", "buy_px": 100,
+            "sell_px": 110, "qty": 50, "pred_eta_h": 1.0, "pred_gp": 500, "score": 500,
+            "net_worth": 1_000_000, "free_slots": 3, "mode": "online", "snap_low": 100,
+            "snap_high": 110, "snap_vol": 5000}
+
+
+def test_recommendation_episode_upsert_and_pull(j):
+    rid1 = j.upsert_recommendation(_rec(), 1000)
+    rid2 = j.upsert_recommendation(_rec(), 1060)                 # still recommended → same episode
+    assert rid1 == rid2
+    assert j.con.execute("SELECT runs FROM recommendations WHERE rec_id=?", [rid1]).fetchone()[0] == 2
+    assert [r["item_id"] for r in j.open_recommendations()] == [5]
+    # dropped from the plan, never acted → pulled with a reason
+    assert j.pull_recommendations(set(), 1120, {("flip", 5, "BUY"): "margin_gone"}) == 1
+    assert j.open_recommendations() == []
+    st = j.recommendation_stats()
+    assert st == {"total": 1, "acted": 1 - 1, "pulled": 1, "reasons": {"margin_gone": 1}}
+
+
+def test_acted_recommendation_is_not_pulled(j):
+    j.upsert_recommendation(_rec(), 1000)
+    assert j.mark_rec_acted(5, "BUY", 1030, "aid123") is True
+    assert j.open_recommendations() == []                        # acted → closed
+    assert j.pull_recommendations(set(), 1060, {}) == 0          # an acted rec is never pulled
+    st = j.recommendation_stats()
+    assert st["acted"] == 1 and st["pulled"] == 0

@@ -475,6 +475,7 @@ class Terminal:
                                         avg_high=snap["avg_high"], vol_1h_binding=snap["vol_1h_binding"],
                                         pred_eta_h=pe, pred_p_fill=pp, pred_ev=pv)
             self.j.record_event(aid, "placed", qty=o.qty, price=o.price)
+            self.j.mark_rec_acted(o.item_id, side, int(time.time()), aid)  # link the placement to its rec
             open_keys.add((o.item_id, side))
             n += 1
         if n:
@@ -983,8 +984,47 @@ class Terminal:
         chosen = planner.rank(cands, free_slots=buy_slots,
                               patient_confidence=config.PATIENT_EV_CONFIDENCE,
                               exclude_ids=exclude_ids, verify=verify)
+        self._log_recommendations(chosen, net_worth, buy_slots, daytime, lat, hr)
         self._print_plan(chosen, buy_slots, daytime, hours, fcal)
         return [{"name": c.key, "kind": c.kind, "place_at_h": 0} for c in chosen]
+
+    def _log_recommendations(self, chosen: list, net_worth: int, free_slots: int, daytime: bool,
+                             lat: dict, hr: dict) -> None:
+        """Ledger every buy the plan recommends (episode upsert + market snapshot), then mark PULLS —
+        open recs no longer chosen and not acted on — with a reason. So we can later audit what you
+        acted on and whether pulling a rec was a good call (see the `recs` view / pull-evaluation)."""
+        from .tax import post_tax_received
+        now = int(time.time())
+        mode = "online" if daytime else "offline"
+        active: set = set()
+        for c in chosen:
+            if not c.item_ids:
+                continue
+            iid = int(c.item_ids[0])
+            d = c.payload
+            active.add((c.kind, iid, "BUY"))
+            h = hr.get(iid, {})
+            self.j.upsert_recommendation({
+                "kind": c.kind, "item_id": iid, "side": "BUY", "name": str(c.key),
+                "buy_px": int(d.get("buy") or d.get("cost") or d.get("in_px") or 0),
+                "sell_px": int(d.get("sell") or d.get("proceeds") or d.get("out_px") or 0),
+                "qty": int(d.get("qty") or d.get("conv") or 0),
+                "pred_eta_h": c.fill_eta_h, "pred_gp": float(c.window_gp), "score": float(c.window_gp),
+                "net_worth": int(net_worth), "free_slots": int(free_slots), "mode": mode,
+                "snap_low": h.get("avgLowPrice"), "snap_high": h.get("avgHighPrice"),
+                "snap_vol": min(h.get("highPriceVolume") or 0, h.get("lowPriceVolume") or 0),
+            }, now)
+        # pull the open recs that dropped out this run — reason from the item's CURRENT spread
+        reasons: dict = {}
+        for r in self.j.open_recommendations():
+            key = (r["kind"], r["item_id"], r["side"])
+            if key in active:
+                continue
+            h = hr.get(r["item_id"], {})
+            ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
+            net = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
+            reasons[key] = "margin_gone" if (net is not None and net <= 0) else "outranked"
+        self.j.pull_recommendations(active, now, reasons)
 
     @staticmethod
     def _print_plan(chosen: list, buy_slots: int, daytime: bool, hours: float, fcal: dict) -> None:
@@ -1794,6 +1834,21 @@ class Terminal:
             else:
                 print("  nothing new to import (no other-device files in sync/, or all already merged)")
 
+    def cmd_recs(self, args: list[str]) -> None:
+        """Recommendation ledger: how many buys the engine advised, how many you acted on, and how many
+        it pulled (with the reason). Pull QUALITY — whether pulling was the right call — lands with the
+        regret scorecard in `analyze`."""
+        s = self.j.recommendation_stats()
+        if not s["total"]:
+            print("  no recommendations logged yet — run `go` a few times and they accrue.")
+            return
+        acted_pct = s["acted"] / s["total"] * 100
+        print(f"  RECOMMENDATIONS: {s['total']} logged · {s['acted']} acted ({acted_pct:.0f}%) · "
+              f"{s['pulled']} pulled")
+        if s["reasons"]:
+            print("  pulled by reason: "
+                  + " · ".join(f"{k} {v}" for k, v in sorted(s["reasons"].items(), key=lambda kv: -kv[1])))
+
     def cmd_blacklist(self, args: list[str]) -> None:
         """Never recommend an item again (e.g. one whose spread never fills). It's dropped at the feature
         source, so it vanishes from `go`, `scan`, `gear`, `sets` and `decant` alike. Persisted across sessions.
@@ -2083,6 +2138,7 @@ class Terminal:
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "hold": lambda a: self.cmd_hold(a), "forget": lambda a: self.cmd_forget(a),
             "blacklist": lambda a: self.cmd_blacklist(a), "sync": lambda a: self.cmd_sync(a),
+            "recs": lambda a: self.cmd_recs(a),
             "audit": lambda a: self.cmd_audit(a), "calibrate": lambda a: self.cmd_calibrate(a),
             "preds": lambda a: self.cmd_preds(a), "alerts": lambda a: self.cmd_alerts(a),
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
