@@ -202,3 +202,13 @@ def test_now_default_runs():
     df = build_features({1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}, m,
                         now_ts=int(time.time()))
     assert len(df) == 1
+
+
+def test_cal_eta_stretches_fill_eta_at_the_source():
+    # a learned 2× fill-time correction (this price×volume bucket fills slower than modelled) must
+    # double fill_eta_h, so ranking/scheduling/stale-timing all inherit the corrected clock
+    m = [_mapping(1, "Oak logs")]
+    lat, hr = {1: _latest(33, 29, 60)}, {1: _hourly(33, 29, 5000, 5000)}
+    base = build_features(lat, hr, m, now_ts=NOW).loc[0, "fill_eta_h"]
+    slow = build_features(lat, hr, m, now_ts=NOW, cal_eta={"buckets": {}, "global": 2.0}).loc[0, "fill_eta_h"]
+    assert abs(slow - 2 * base) < 1e-6

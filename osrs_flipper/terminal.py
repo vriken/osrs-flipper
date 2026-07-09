@@ -80,6 +80,7 @@ class Terminal:
         self._cal_at = -1             # resolved-attempt count at last calibration (-1 = never)
         self._cal_beta = config.BETA   # live spread haircut, auto-applied
         self._cal_fill: dict = {}      # live fill-rate correction, auto-applied
+        self._cal_eta: dict = {}       # live fill-time (ETA) correction by price×volume, auto-applied
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
         self._alert_stop = threading.Event()
         self._alert_thread: threading.Thread | None = None
@@ -119,7 +120,7 @@ class Terminal:
         bankroll = int(self.j.cash()) or config.BANKROLL
         print(f"  scanning ({mode})…")
         df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
-                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
+                          fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -260,7 +261,7 @@ class Terminal:
         net_worth = int(self.j.equity(bids) + src.tied_gold())
         picks, idle, _ = scanner.build_portfolio(
             bankroll=cash, held_ids=exclude, free_slots=buy_slots, limit_used=self._limit_used(),
-            net_worth=net_worth, fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
+            net_worth=net_worth, fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
         print(alert.format_portfolio(picks, cash, held, idle, free_slots=buy_slots, slot_source=source))
         nudge = self._attention_nudge()
         if nudge:
@@ -283,13 +284,20 @@ class Terminal:
             return
         new_beta = calibration.effective_beta(calibration.calibrate_beta(rows, prior=config.BETA), config.BETA)
         self._cal_fill = calibration.calibrate_fill(rows)
+        self._cal_eta = calibration.calibrate_eta(rows)  # realized fill-time vs predicted, by price×volume
         self._cal_edges = analysis.item_edges(analysis.collect_fills())  # per-item realized-edge (JSON audit)
         if self._cal_at >= 0:  # not the first (silent) computation → announce the refresh
             fg = self._cal_fill.get("global") or 1.0
+            eg = self._cal_eta.get("global") or 1.0
             print(f"  🔧 recalibrated ({n} resolved trades): β {self._cal_beta:.2f}→{new_beta:.2f} · "
-                  f"fill ×{fg:.2f} (auto-applied)")
+                  f"fill ×{fg:.2f} · eta ×{eg:.2f} (auto-applied)")
         self._cal_beta = new_beta
         self._cal_at = n
+
+    def _eta_cal(self) -> dict:
+        """Live (cached) fill-time calibration (realized vs predicted ETA), auto-applied to the ETA model."""
+        self._ensure_calibration()
+        return self._cal_eta
 
     def _fill_cal(self) -> dict:
         """Live (cached) fill-rate calibration, auto-applied to EV/ranking."""
@@ -1130,7 +1138,7 @@ class Terminal:
         res = False
         try:
             df = scanner.scan(mode="balanced", bankroll=max(1, cash), top=5, limit_used=self._limit_used(),
-                              fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta())
+                              fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal())
             for _, r in df.iterrows():
                 eta = float(r.get("fill_eta_h") or 0)
                 roi = float(r.get("margin_pct") or 0)
