@@ -609,3 +609,18 @@ def test_print_plan_labels_multi_window_overnight(capsys):
                    item_ids=(1,), payload={"buy": 10, "sell": 12, "qty": 5000, "windows": 1})
     Terminal._print_plan([c1], buy_slots=1, daytime=True, hours=4.0, fcal={})
     assert "buy-limit windows" not in capsys.readouterr().out     # single-window flip: no label
+
+
+def test_refine_verdict_offers_to_bank_a_partial_buy(monkeypatch):
+    # a partially-filled slow buy: offer to bank what's filled now (same margin, frees the slot) instead
+    # of waiting for the rest. A fully-unfilled buy has nothing to bank.
+    from osrs_flipper import quote as quote_mod
+    Q = types.SimpleNamespace(buy_px=100, sell_px=130, net_unit=27, t_buy_h=1.0, t_sell_h=0.5,
+                              ev=100.0, p_round=0.8, p_buy=0.8, qty=100, name="Nature rune")
+    monkeypatch.setattr(quote_mod, "optimal_quote", lambda *a, **k: Q)
+    o = Offer(slot=2, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=60)
+    _v, hint = Terminal._refine_verdict(o, "stale")
+    assert "bank the 60" in hint and "sell @ 130" in hint
+    o0 = Offer(slot=3, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=0)
+    _v0, hint0 = Terminal._refine_verdict(o0, "stale")
+    assert "bank the" not in hint0
