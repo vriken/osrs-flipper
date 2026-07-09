@@ -36,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import io
 import queue
+import re
 import sys
 import threading
 import time
@@ -47,23 +48,41 @@ from .quote import optimal_quote
 _BOND = config.BOND_ITEM_ID
 
 
-_STATUS_DROP_STARTS = ("→", "KEY", "ACTIVE OFFERS", "holdings:", "#", "(flips", "(", "*")
+_STATUS_DROP_STARTS = ("→", "KEY", "ACTIVE OFFERS", "REBALANCE", "holdings:", "#", "BEST FOR",
+                       "(flips", "(", "*")
 _STATUS_DROP_CONTAINS = ("on track", "auto-calibrated", "best-case", "scores shrunk",
-                         "reserved for the sell", "priced to sell", "check back")
+                         "reserved for the sell", "priced to sell", "check back", "sell@")
+_VERDICT_WORD = {"📦": "collect", "🟠": "margin gone", "🔴": "stale", "🟡": "re-price"}
+_OFFER_RE = re.compile(r"^(\d+)\s+(.+?)\s+(BUY|SELL)\b")
 
 
 def _compact_status(dash: str) -> str:
-    """Trim the full console dashboard to the actionable essentials for a phone-friendly Discord message:
-    keep the cash/slots header, offers that NEED action, the sell/decant/buy picks and NEXT — drop
-    on-track offers, the holdings line, table legends, calibration footnotes and inline hint lines."""
-    out = []
+    """Trim the full console dashboard to a phone-friendly Discord status: a terse cash/slots header, ONE
+    'needs you' line summarising the offers that want action (their per-offer columns and hint sub-lines
+    are dropped — the discrete pings already carry that detail), then the sell/decant/buy picks and NEXT.
+    On-track offers, the holdings line, table legends and calibration footnotes are all dropped."""
+    header, attention, body = "", [], []
     for ln in dash.splitlines():
         s = ln.strip()
-        if not s or any(s.startswith(p) for p in _STATUS_DROP_STARTS) \
-                or any(t in ln for t in _STATUS_DROP_CONTAINS):
+        if not s:
             continue
-        out.append(ln.rstrip())
-    return "\n".join(out)
+        if "===" in s:                                        # header → one terse line
+            header = (s.strip("= ").replace("cash ", "").replace(" slots free", " free")
+                      .removesuffix(" day").removesuffix(" — flips cycle").strip())
+            continue
+        m = _OFFER_RE.match(s)
+        if m:                                                 # an active-offer line
+            emoji = next((e for e in _VERDICT_WORD if e in s), None)
+            if emoji:                                         # needs action → collapse to one short tag
+                attention.append(f"slot {m.group(1)} {m.group(2).strip()} ({_VERDICT_WORD[emoji]})")
+            continue                                          # on-track / open offers: drop from status
+        if s.startswith(_STATUS_DROP_STARTS) or any(t in s for t in _STATUS_DROP_CONTAINS):
+            continue
+        body.append(s)
+    lines = ([header] if header else []) \
+        + (["⚠ needs you: " + " · ".join(attention)] if attention else []) \
+        + body
+    return "\n".join(lines)
 
 
 class _Tee:
@@ -129,6 +148,9 @@ class Terminal:
         self._last_dash = ""           # last dashboard text pushed (push only when it changes)
         self._alerted: dict = {}       # deduped attention pings (collect/margin/stale) until they clear
         self._seen_offers: set | None = None      # for placed / slot-freed transition detection
+        self._pinged_buy: tuple | None = None     # last buy-opportunity ping's picks (dedupe until they change)
+        self._plan_chosen: list = []              # picks from the last `go` (for the buy-opportunity ping)
+        self._plan_buy_slots = 0
         # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
         self._cut_bounce: dict[int, bool | None] = {}
         self._cut_better: bool | None = None
@@ -550,8 +572,12 @@ class Terminal:
             rc = by_input.get(p.item_id)
             if rc is None:
                 continue
-            decanted = (p.qty - bag.get(p.item_id, 0)) + bought_since.get(p.item_id, 0) \
-                - sold_since.get(p.item_id, 0)
+            # p.qty is read AFTER this sync's GE fills were applied (account_fill_delta → record_buy/
+            # record_sell, above), so it already reflects buys/sells. The low-dose units missing from the
+            # live bag beyond what we still track were removed by a non-GE route = decanted. Adding
+            # bought_since/sold_since here would double-count deltas already baked into p.qty and fabricate
+            # a decant on an ordinary buy (they cancel out algebraically — see the audit).
+            decanted = p.qty - bag.get(p.item_id, 0)
             if decanted <= 0:
                 continue
             oid = rc.output_id
@@ -635,11 +661,15 @@ class Terminal:
                                                    daytime, hours, lat, hr, mp)
         exclude_ids = {h.item_id for h in held} | {o.item_id for o in offers}
         ranked = planner.rank(cands, free_slots=n, patient_confidence=config.PATIENT_EV_CONFIDENCE,
-                              exclude_ids=exclude_ids, verify=verify)
+                              exclude_ids=exclude_ids, budget=float(cash + freed_capital), verify=verify)
         if not ranked:
             return []
+        # the nudge is 1 cancel → 1 deploy, so only single-slot candidates qualify: a set that ties up N
+        # slots can't be deployed by freeing ONE, and pairing it 1:1 would mislabel it as a one-slot swap.
         cand_val = [(c, planner.per_slot_score(c, patient_confidence=config.PATIENT_EV_CONFIDENCE))
-                    for c in ranked]
+                    for c in ranked if c.slots == 1]
+        if not cand_val:
+            return []
         out, used = [], 0
         for s in sorted(stuck, key=lambda x: x["keep_gp"]):   # worst-kept buy first
             if used >= len(cand_val):
@@ -774,6 +804,7 @@ class Terminal:
         (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         self._cut_bounce, self._cut_better = {}, None  # fresh per-invocation cut-policy caches
+        self._plan_chosen, self._plan_buy_slots = [], 0  # reset stashed plan (set by _plan_buys if slots free)
         hour = datetime.now().hour
         coins, tied = self._sync_cash()  # live coins on hand + gold tied up in open offers
         cash = int(self.j.cash()) or config.BANKROLL
@@ -938,6 +969,7 @@ class Terminal:
                 cands.append(planner.Candidate(kind="flip", key=str(p["name"]), slots=1,
                     window_gp=self._flip_window_gp(p, hours), patient=False,
                     item_ids=(int(p["item_id"]),), fill_eta_h=p.get("buy_eta_h"),
+                    cost=float((p.get("buy_px") or 0) * (p.get("qty") or 0)),
                     payload={"buy": p.get("buy_px"), "sell": p.get("sell_px"), "qty": p.get("qty"),
                              "gp": p.get("gp"), "item_id": int(p["item_id"]),
                              "gone_frac": p.get("reliab_gone_frac")}))
@@ -945,6 +977,7 @@ class Terminal:
             for r in self._overnight_rows(cash, buy_slots, exclude_ids):
                 cands.append(planner.Candidate(kind="flip", key=str(r["name"]), slots=1,
                     window_gp=float(r["profit"]), patient=False, item_ids=(int(r["item_id"]),),
+                    cost=float(r["buy"] * r["qty"]),
                     payload={"buy": r["buy"], "sell": r["sell"], "qty": r["qty"], "gp": r["profit"],
                              "item_id": int(r["item_id"])}))
 
@@ -958,7 +991,7 @@ class Terminal:
                     continue
                 cands.append(planner.Candidate(kind="gear", key=str(r["name"]), slots=1,
                     window_gp=float(r["margin_abs"]) * qty, patient=True, item_ids=(int(r["item_id"]),),
-                    fill_eta_h=r.get("fill_eta_h"),
+                    fill_eta_h=r.get("fill_eta_h"), cost=float(bpx * qty),
                     payload={"buy": bpx, "sell": int(r["sell_px"]), "qty": qty,
                              "gp": int(r["margin_abs"]) * qty, "item_id": int(r["item_id"])}))
 
@@ -976,7 +1009,7 @@ class Terminal:
             wg = float(r["profit_per_conv"]) * conv
             cands.append(planner.Candidate(kind="set", key=f"{r['name']} · {r['direction']}",
                 slots=len(legs), window_gp=wg, patient=True, item_ids=legs,
-                fill_eta_h=r.get("fill_eta_h"),
+                fill_eta_h=r.get("fill_eta_h"), cost=float(r["cost_per_conv"] * conv),
                 payload={"cost": r["cost_per_conv"], "proceeds": r["proceeds_per_conv"],
                          "conv": conv, "gp": wg}))
 
@@ -1001,6 +1034,7 @@ class Terminal:
                 cands.append(planner.Candidate(kind="decant", key=str(r["name"]), slots=1,
                     window_gp=b["wg"], patient=True, item_ids=(int(r["bought_ids"][0]),),
                     fill_eta_h=r.get("fill_eta_h"),
+                    cost=float(r["in_unit_px"] * r["in_qty"] * b["conv"]),
                     payload={"in_qty": r["in_qty"], "in_px": r["in_unit_px"], "out_qty": r["out_qty"],
                              "out_px": r["out_unit_px"], "in_dose": r["in_dose"], "out_dose": r["out_dose"],
                              "conv": b["conv"], "gp": b["wg"]}))
@@ -1028,9 +1062,10 @@ class Terminal:
                                                       daytime, hours, lat, hr, mp)
         chosen = planner.rank(cands, free_slots=buy_slots,
                               patient_confidence=config.PATIENT_EV_CONFIDENCE,
-                              exclude_ids=exclude_ids, verify=verify)
+                              exclude_ids=exclude_ids, budget=float(cash), verify=verify)
         self._log_recommendations(chosen, net_worth, buy_slots, daytime, lat, hr)
         self._print_plan(chosen, buy_slots, daytime, hours, fcal)
+        self._plan_chosen, self._plan_buy_slots = chosen, buy_slots  # for the auto-push buy-opportunity ping
         return [{"name": c.key, "kind": c.kind, "place_at_h": 0} for c in chosen]
 
     def _log_recommendations(self, chosen: list, net_worth: int, free_slots: int, daytime: bool,
@@ -1051,6 +1086,7 @@ class Terminal:
             h = hr.get(iid, {})
             self.j.upsert_recommendation({
                 "kind": c.kind, "item_id": iid, "side": "BUY", "name": str(c.key),
+                "leg_ids": ",".join(str(int(i)) for i in c.item_ids),  # all legs → placing any one links it
                 "buy_px": int(d.get("buy") or d.get("cost") or d.get("in_px") or 0),
                 "sell_px": int(d.get("sell") or d.get("proceeds") or d.get("out_px") or 0),
                 "qty": int(d.get("qty") or d.get("conv") or 0),
@@ -1059,17 +1095,23 @@ class Terminal:
                 "snap_low": h.get("avgLowPrice"), "snap_high": h.get("avgHighPrice"),
                 "snap_vol": min(h.get("highPriceVolume") or 0, h.get("lowPriceVolume") or 0),
             }, now)
-        # pull the open recs that dropped out this run — reason from the item's CURRENT spread
+        # pull the open recs that dropped out this run. margin_gone is only sound for single-item flip/gear,
+        # where the rec's item IS the traded spread — for a set/decant the stored item_id is just the first
+        # leg you buy, so its own avgHigh/avgLow says nothing about the combo's margin; default those to
+        # "outranked" rather than asserting margin_gone on the wrong instrument.
         reasons: dict = {}
         for r in self.j.open_recommendations():
             key = (r["kind"], r["item_id"], r["side"])
             if key in active:
                 continue
-            h = hr.get(r["item_id"], {})
-            ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
-            net = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
-            reasons[key] = "margin_gone" if (net is not None and net <= 0) else "outranked"
-        self.j.pull_recommendations(active, now, reasons)
+            if r["kind"] in ("flip", "gear"):
+                h = hr.get(r["item_id"], {})
+                ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
+                net = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
+                reasons[key] = "margin_gone" if (net is not None and net <= 0) else "outranked"
+            else:
+                reasons[key] = "outranked"
+        self.j.pull_recommendations(active, now, reasons, grace_s=config.PULL_GRACE_S)
         self._evaluate_pulls(hr)
 
     def _evaluate_pulls(self, hr: dict) -> None:
@@ -1079,6 +1121,12 @@ class Terminal:
         from .tax import post_tax_received
         now = int(time.time())
         for r in self.j.pulls_awaiting_eval(now, config.PULL_EVAL_DELAY_S):
+            if r["kind"] not in ("flip", "gear"):
+                # a set/decant rec's margin is the COMBO's, not the stored first-leg item's spread — we
+                # can't cheaply recompute it here, so grade it "unrated" (recorded, excluded from the
+                # scorecard) rather than fabricating a good_pull/regret verdict off the wrong instrument.
+                self.j.set_rec_eval(r["rec_id"], "unrated", now)
+                continue
             h = hr.get(r["item_id"], {})
             ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
             cur = post_tax_received(int(ah), item_id=r["item_id"]) - int(al) if (ah and al) else None
@@ -1352,7 +1400,8 @@ class Terminal:
         (collect / margin gone / stale). Deduped until the state clears. Offers-only (no journal)."""
         offers = self._active_offers()
         names = {r["id"]: r["name"] for r in api.mapping()}
-        rows = monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
+        lat = api.latest()
+        rows = monitor.review_offers(offers, api.one_hour(), lat, int(time.time() * 1000))
         keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
         if self._seen_offers is not None and (placed := keys - self._seen_offers):
             lines = [f"placed {s} {names.get(iid, iid)} (slot {sl})" for (sl, iid, s) in placed]
@@ -1363,25 +1412,68 @@ class Terminal:
             del self._alerted[k]  # cleared → re-arm
         new = monitor.diff_new(current, self._alerted)
         if new:
-            lines = [f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}"
-                     for ((slot, iid), v) in new]
+            by_key = {(o.slot, o.item_id): o for o in offers}
+            lines = []
+            for ((slot, iid), v) in new:
+                o = by_key.get((slot, iid))
+                hint = f"  {monitor.reprice_hint(o, lat)}" if (o is not None and v == "stale") else ""
+                lines.append(f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}{hint}")
             if alert.notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
                 self._alerted.update(dict(new))
 
     def _auto_tick(self) -> None:
-        """Idle tick (main thread): ping transitions + edit the live status message with the full `go`
-        dashboard, but only when it changed. Silent locally. No-op unless auto-push is on with a channel."""
+        """Idle tick (main thread): keep the journal fresh, ping real transitions + buy opportunities, and
+        edit the live status message with the full `go` dashboard — but only when it changed. Silent
+        locally. No-op unless auto-push is on with a channel."""
         if not self._auto_push or not (config.DISCORD_WEBHOOK_URL or alert.bot_enabled()):
             return
         try:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self._autosync()  # import fills / reconcile bag / detect decants so the pushed
+                    #                    dashboard (holdings, sells, decants) isn't frozen at last input
+            except Exception:  # noqa: BLE001 — a sync hiccup must still let the last-known dashboard push
+                pass
             self._push_transition_pings()
-            compact = _compact_status(self._render_go(echo=False))
+            compact = _compact_status(self._render_go(echo=False))  # runs cmd_go → refreshes self._plan_chosen
             if compact and compact != self._last_dash:
                 if alert.bot_enabled():
                     self._status_msg_id = alert.set_status(compact, self._status_msg_id)
                 self._last_dash = compact
+            self._push_buy_opportunity()
         except Exception:  # noqa: BLE001 — a push failure must never break the REPL
             pass
+
+    @staticmethod
+    def _pick_ping_line(c) -> str:
+        """One compact line describing a buy pick, for the free-slots deploy ping."""
+        tag = {"flip": "⚡", "gear": "🕰", "set": "🧩", "decant": "🧪"}.get(c.kind, "")
+        d, gp = c.payload, int(c.window_gp)
+        if c.kind == "decant":
+            bt, st = d["in_qty"] * d["conv"], d["out_qty"] * d["conv"]
+            body = (f"buy {bt:,} ({d['in_dose']})@{int(d['in_px']):,} → sell {st:,} "
+                    f"({d['out_dose']})@{int(d['out_px']):,}")
+        elif c.kind == "set":
+            body = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
+        else:
+            body = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {int(d['qty']):,}"
+        return f"{tag} {str(c.key)[:28]}: {body}  (~{gp:,})"
+
+    def _push_buy_opportunity(self) -> None:
+        """Ping when you have free slot(s) AND the plan has something to deploy — the "idle cash, buy this"
+        nudge. Deduped on the chosen picks so it fires when the picks CHANGE or slots newly free, not every
+        tick. The live status message carries this too, but edits don't notify — this one does."""
+        picks = getattr(self, "_plan_chosen", []) or []
+        slots = getattr(self, "_plan_buy_slots", 0) or 0
+        if not picks or slots <= 0:
+            self._pinged_buy = None  # nothing to deploy → re-arm for the next opportunity
+            return
+        key = tuple(str(c.key) for c in picks)
+        if key == self._pinged_buy:
+            return  # already nudged this exact set of picks
+        lines = [self._pick_ping_line(c) for c in picks[:3]]
+        if alert.notify(f"\U0001f6d2 {slots} slot(s) free — deploy:\n" + "\n".join(lines)):
+            self._pinged_buy = key
 
     def cmd_alerts(self, args: list[str]) -> None:
         """Background Discord alerts when an offer needs you (filled/margin-gone/stale).
@@ -2164,7 +2256,7 @@ class Terminal:
         except Exception:  # noqa: BLE001 — a datasource hiccup just means fall back to the ledger
             completed = []
         if completed:
-            rows = realized_history_from_fills(completed)
+            rows = realized_history_from_fills(completed, self.j.decant_events())
         if len(rows) < 2:  # no live RuneLite history → the typed buy/sell/decant ledger
             rows = self.j.con.execute("SELECT ts, cash_delta, realized_pnl FROM ledger ORDER BY ts").fetchall()
         if len(rows) < 2:

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS offer_events (
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS recommendations (
     rec_id TEXT PRIMARY KEY, device TEXT, first_ts BIGINT, last_ts BIGINT, runs BIGINT,
-    kind TEXT, item_id INTEGER, side TEXT, name TEXT,
+    kind TEXT, item_id INTEGER, leg_ids TEXT, side TEXT, name TEXT,
     buy_px BIGINT, sell_px BIGINT, qty BIGINT, pred_eta_h DOUBLE, pred_gp DOUBLE, score DOUBLE,
     net_worth BIGINT, free_slots INTEGER, mode TEXT, snap_low BIGINT, snap_high BIGINT, snap_vol BIGINT,
     acted BOOLEAN DEFAULT FALSE, acted_ts BIGINT, attempt_id TEXT,
@@ -72,7 +72,8 @@ class Position:
     avg_cost: float
 
 
-def realized_history_from_fills(fills: list) -> list[tuple[int, float, float]]:
+def realized_history_from_fills(fills: list,
+                                decants: list[tuple[int, int, int, float]] = ()) -> list[tuple[int, float, float]]:
     """Replay authoritative completed fills (buys + sells) chronologically into (ts, cash_delta,
     realized_pnl) rows — the SAME shape the `ledger` table yields — on an avg-cost basis.
 
@@ -81,12 +82,25 @@ def realized_history_from_fills(fills: list) -> list[tuple[int, float, float]]:
     the same series from RuneLite's completed-offer history instead. Mirrors record_buy / record_sell
     exactly: buys move cash out untaxed and set avg cost; a sell books post-tax proceeds and realises
     qty×(net−avg), or 0 when there's no tracked basis (an early buy that rolled out of RuneLite's
-    retained window) — never the whole sale, which would inflate P&L."""
+    retained window) — never the whole sale, which would inflate P&L.
+
+    `decants` = (ts, out_id, out_qty, out_avg) rows from the DECANT ledger. Decanting leaves no GE fill,
+    so without folding these in the (4)s produced by decanting carry avg 0 in the replay and their later
+    sale books 0 realised — understating a documented workflow. We adopt the authoritative post-decant
+    avg (`out_avg` from record_decant) and add the decanted units, cash/P&L-neutral (no row emitted)."""
     avg: dict[int, float] = {}
     qty: dict[int, int] = {}
     rows: list[tuple[int, float, float]] = []
-    for f in sorted(fills, key=lambda x: x.t_ms):
-        ts = int(f.t_ms / 1000)
+    # unify fills and decants into one chronological stream so avg-cost is correct at each sell
+    events = [(int(f.t_ms / 1000), "fill", f) for f in fills]
+    events += [(int(d[0]), "decant", d) for d in decants]
+    for ts, kind, obj in sorted(events, key=lambda e: e[0]):
+        if kind == "decant":
+            _ts, out_id, out_qty, out_avg = obj
+            qty[out_id] = qty.get(out_id, 0) + int(out_qty)
+            avg[out_id] = float(out_avg)  # post-decant blended basis is authoritative (incl. any GE (4)s)
+            continue
+        f = obj
         if f.is_buy:
             prev_q = qty.get(f.item_id, 0)
             new_q = prev_q + f.qty
@@ -113,6 +127,8 @@ class Journal:
         self.con.execute("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS resolved_ts BIGINT")
         # device: which install produced a row — for cross-machine merge (imported rows tagged with origin)
         self.con.execute("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS device TEXT")
+        # leg_ids: CSV of all item ids a multi-leg rec (a GE set) buys, so placing ANY leg links the rec
+        self.con.execute("ALTER TABLE recommendations ADD COLUMN IF NOT EXISTS leg_ids TEXT")
         self._repair_phantom_realized()
 
     def _repair_phantom_realized(self) -> int:
@@ -245,6 +261,10 @@ class Journal:
         Returns (cost_moved, out_avg_cost, in_avg_used). `in_avg_used == 0` means the input had no tracked
         basis (position already synced away / bought off-journal) — the caller should warn."""
         pin = self.position(in_id)
+        # never consume more basis than we actually track — a bad in_qty (auto-detect glitch or a manual
+        # `decant log` typo) must not fabricate cost basis onto the (4)s. Clamp to the tracked position.
+        if pin and in_qty > pin.qty:
+            in_qty, out_qty = pin.qty, min(out_qty, pin.qty * out_qty // max(1, in_qty))
         in_avg = pin.avg_cost if pin else self._last_buy_price(in_id)
         moved = in_qty * in_avg
         # shrink or drop the consumed input dose (bag will confirm on next sync; avg_cost preserved on remainder)
@@ -267,6 +287,12 @@ class Journal:
                          [int(time.time()), out_id, out_name, "DECANT", out_qty, int(round(navg)), 0, 0.0, 0.0])
         return moved, navg, in_avg
 
+    def decant_events(self) -> list[tuple[int, int, int, float]]:
+        """(ts, out_id, out_qty, out_avg) from DECANT ledger rows — feeds realized_history_from_fills so
+        decant-produced (4)s carry cost basis in the progress replay (they have no GE buy fill)."""
+        return [(int(r[0]), int(r[1]), int(r[2]), float(r[3])) for r in self.con.execute(
+            "SELECT ts, item_id, qty, price FROM ledger WHERE side='DECANT' ORDER BY ts").fetchall()]
+
     # --- blacklist (never-recommend list) ------------------------------------
     def blacklist_ids(self) -> set[int]:
         return {r[0] for r in self.con.execute("SELECT item_id FROM blacklist").fetchall()}
@@ -285,11 +311,13 @@ class Journal:
                 "free_slots", "mode", "snap_low", "snap_high", "snap_vol"]
 
     def open_recommendations(self) -> list[dict[str, Any]]:
-        """Episodes still being recommended (not yet acted on or pulled)."""
+        """Episodes still being recommended (not yet acted on or pulled). `last_ts` = the last run that
+        re-chose it — the pull path uses it for hysteresis (don't pull a rec that was just chosen)."""
         rows = self.con.execute(
-            "SELECT rec_id, kind, item_id, side, name FROM recommendations "
+            "SELECT rec_id, kind, item_id, side, name, last_ts FROM recommendations "
             "WHERE pulled_ts IS NULL AND (acted IS NULL OR acted = FALSE)").fetchall()
-        return [{"rec_id": r[0], "kind": r[1], "item_id": r[2], "side": r[3], "name": r[4]} for r in rows]
+        return [{"rec_id": r[0], "kind": r[1], "item_id": r[2], "side": r[3], "name": r[4],
+                 "last_ts": r[5]} for r in rows]
 
     def upsert_recommendation(self, r: dict[str, Any], ts: int) -> str:
         """Open a rec episode on first appearance for (kind,item_id,side), or bump its last_ts/runs and
@@ -305,33 +333,47 @@ class Journal:
             return row[0]
         rid = uuid.uuid4().hex
         self.con.execute(
-            "INSERT INTO recommendations (rec_id, device, first_ts, last_ts, runs, kind, item_id, side, "
-            f"name, {','.join(self._REC_DYN)}, acted) VALUES (?,?,?,?,1,?,?,?,?,"
+            "INSERT INTO recommendations (rec_id, device, first_ts, last_ts, runs, kind, item_id, leg_ids, "
+            f"side, name, {','.join(self._REC_DYN)}, acted) VALUES (?,?,?,?,1,?,?,?,?,?,"
             f"{','.join('?' for _ in self._REC_DYN)},FALSE)",
-            [rid, self.device_id(), ts, ts, r["kind"], r["item_id"], r["side"], r.get("name"),
-             *[r.get(c) for c in self._REC_DYN]])
+            [rid, self.device_id(), ts, ts, r["kind"], r["item_id"], r.get("leg_ids"), r["side"],
+             r.get("name"), *[r.get(c) for c in self._REC_DYN]])
         return rid
 
     def mark_rec_acted(self, item_id: int, side: str, ts: int, attempt_id: str) -> bool:
-        """Link a placement to the open rec that advised buying this item+side (any kind)."""
+        """Link a placement to the open rec that advised buying this item+side (any kind). A multi-leg set
+        rec is matched when the placed item is ANY of its legs (leg_ids), not just the first — so placing
+        leg #2 of a 4-piece set still marks it acted and it's never falsely pulled mid-execution. An exact
+        single-item match is preferred over a leg match when both exist."""
         row = self.con.execute(
-            "SELECT rec_id FROM recommendations WHERE item_id=? AND side=? AND pulled_ts IS NULL "
-            "AND (acted IS NULL OR acted = FALSE) ORDER BY last_ts DESC LIMIT 1", [item_id, side]).fetchone()
+            "SELECT rec_id FROM recommendations WHERE side=? AND pulled_ts IS NULL "
+            "AND (acted IS NULL OR acted = FALSE) "
+            "AND (item_id=? OR (leg_ids IS NOT NULL AND list_contains(string_split(leg_ids, ','), ?))) "
+            "ORDER BY (item_id=?) DESC, last_ts DESC LIMIT 1",
+            [side, item_id, str(item_id), item_id]).fetchone()
         if not row:
             return False
         self.con.execute("UPDATE recommendations SET acted=TRUE, acted_ts=?, attempt_id=? WHERE rec_id=?",
                          [ts, attempt_id, row[0]])
         return True
 
-    def pull_recommendations(self, active_keys: set, ts: int, reasons: dict) -> int:
-        """Mark open, un-acted rec episodes no longer in the current plan as PULLED, with a reason."""
+    def pull_recommendations(self, active_keys: set, ts: int, reasons: dict, grace_s: int = 0) -> int:
+        """Mark open, un-acted rec episodes no longer in the current plan as PULLED, with a reason.
+
+        Hysteresis: a rec dropped merely because it was OUTRANKED this run gets a `grace_s` window before
+        it's pulled — so tick-to-tick rank flutter (the 60s auto-tick re-planning) doesn't pull-then-reopen
+        the same opportunity as a brand-new episode and manufacture regret noise. A rec whose MARGIN is
+        gone is a real state change and is pulled immediately regardless of grace."""
         n = 0
         for r in self.open_recommendations():
             key = (r["kind"], r["item_id"], r["side"])
             if key in active_keys:
                 continue
+            reason = reasons.get(key, "outranked")
+            if reason == "outranked" and grace_s and (ts - (r["last_ts"] or 0)) < grace_s:
+                continue  # give a borderline rank-flutter time to recover before pulling
             self.con.execute("UPDATE recommendations SET pulled_ts=?, pull_reason=? WHERE rec_id=?",
-                             [ts, reasons.get(key, "outranked"), r["rec_id"]])
+                             [ts, reason, r["rec_id"]])
             n += 1
         return n
 
@@ -339,11 +381,11 @@ class Journal:
         """Pulled, un-acted recs old enough to judge (the market has had time to move) and not yet
         evaluated — with the pull-time snapshot needed to classify good_pull vs regret."""
         rows = self.con.execute(
-            "SELECT rec_id, item_id, snap_low, snap_high, pull_reason FROM recommendations "
+            "SELECT rec_id, kind, item_id, snap_low, snap_high, pull_reason FROM recommendations "
             "WHERE pulled_ts IS NOT NULL AND eval IS NULL AND (acted IS NULL OR acted=FALSE) "
             "AND pulled_ts <= ?", [now_ts - min_age_s]).fetchall()
-        return [{"rec_id": r[0], "item_id": r[1], "snap_low": r[2], "snap_high": r[3],
-                 "pull_reason": r[4]} for r in rows]
+        return [{"rec_id": r[0], "kind": r[1], "item_id": r[2], "snap_low": r[3], "snap_high": r[4],
+                 "pull_reason": r[5]} for r in rows]
 
     def set_rec_eval(self, rec_id: str, verdict: str, ts: int) -> None:
         self.con.execute("UPDATE recommendations SET eval=?, eval_ts=? WHERE rec_id=?", [verdict, ts, rec_id])
@@ -352,7 +394,7 @@ class Journal:
         """(pull_reason, eval, count) over evaluated pulls — the regret scorecard's raw rows."""
         return self.con.execute(
             "SELECT COALESCE(pull_reason,'?'), eval, COUNT(*) FROM recommendations "
-            "WHERE eval IS NOT NULL GROUP BY pull_reason, eval").fetchall()
+            "WHERE eval IS NOT NULL AND eval <> 'unrated' GROUP BY pull_reason, eval").fetchall()
 
     def recommendation_stats(self) -> dict[str, Any]:
         """Totals for the `recs` view: acted / pulled counts + pull-reason breakdown."""
@@ -743,8 +785,12 @@ class Journal:
         """Portable snapshot for cross-machine merge: this device's resolved attempts (the calibration
         data) + the never-recommend blacklist. Calibration is DERIVED, so merging raw attempts on the
         other machine and recomputing yields one unified learner. offer_events (audit) aren't synced."""
+        # device IS NULL = rows THIS install produced. Imported rows carry their origin device, so
+        # excluding them stops a re-export boomerang (A→B then B→A re-adding A's own data as a new,
+        # double-weighted row) that would compound the calibration inputs over repeated syncs.
         rows = self.con.execute(
-            f"SELECT {','.join(self._ATTEMPT_COLS)} FROM attempts WHERE status IN {self._RESOLVED}"
+            f"SELECT {','.join(self._ATTEMPT_COLS)} FROM attempts "
+            f"WHERE status IN {self._RESOLVED} AND device IS NULL"
         ).fetchall()
         return {
             "device": self.device_id(),

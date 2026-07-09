@@ -92,3 +92,14 @@ def test_verify_drops_patient_pick_but_not_flips():
     assert [p.key for p in picks] == ["clean flip"]        # gear vetoed, flip (not verified) kept
     picks = rank([g, f], free_slots=1, patient_confidence=1.0, verify=lambda c: True)
     assert [p.key for p in picks] == ["pumped gear"]        # gear accepted → wins on value
+
+
+def test_budget_caps_total_committed_capital():
+    # flips are sized against the whole pile upstream while gear/set/decant take a slot's fair share, so
+    # without a shared budget the greedy pick could commit more than `cash`. The budget cap prevents it.
+    a = Candidate(kind="flip", key="a", slots=1, window_gp=1000, item_ids=(1,), cost=600)
+    b = Candidate(kind="flip", key="b", slots=1, window_gp=900, item_ids=(2,), cost=600)
+    assert [c.key for c in rank([a, b], free_slots=2, patient_confidence=1.0, budget=1000)] == ["a"]
+    # cost==0 (unknown capital) is never budget-skipped
+    z = Candidate(kind="flip", key="z", slots=1, window_gp=800, item_ids=(3,), cost=0)
+    assert {c.key for c in rank([a, z], free_slots=2, patient_confidence=1.0, budget=1000)} == {"a", "z"}

@@ -78,3 +78,12 @@ def test_status_text_renders_free_slots_offers_and_verdicts():
     o = Offer(slot=2, item_id=561, is_buy=True, state="BUYING", qty=1000, price=5, filled=600)
     txt = monitor.status_text([(o, "ontrack", 0.5, 1.2, 0.6)], {561: "Air rune"}, free=3)
     assert "3 slot(s) free" in txt and "Air rune" in txt and "BUY" in txt and "60%" in txt
+
+
+def test_reprice_hint_targets_the_competitive_side():
+    sell = Offer(slot=2, item_id=561, is_buy=False, state="SELLING", qty=10, price=8000)
+    hint = monitor.reprice_hint(sell, {561: {"low": 7600, "high": 7900}})
+    assert "re-list ~7,900" in hint and "8,000" in hint          # stale SELL → drop to current instabuy
+    buy = Offer(slot=1, item_id=561, is_buy=True, state="BUYING", qty=10, price=100)
+    assert "re-bid ~7,600" in monitor.reprice_hint(buy, {561: {"low": 7600, "high": 7900}})
+    assert monitor.reprice_hint(sell, {}) == ""                  # no live book → no hint

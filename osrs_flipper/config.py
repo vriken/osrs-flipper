@@ -16,6 +16,9 @@ DB_PATH = DATA_DIR / "osrs.duckdb"
 SYNC_DIR = Path(os.environ.get("OSRS_FLIPPER_SYNC_DIR", str(DATA_DIR.parent / "sync")))
 # how long after a pull to wait before judging whether it was a good call (give the market time to move)
 PULL_EVAL_DELAY_S = int(os.environ.get("OSRS_FLIPPER_PULL_EVAL_DELAY_S", 1800))  # 30 min
+# hysteresis: an OUTRANKED rec must stay out of the plan this long before it's pulled, so 60s-tick rank
+# flutter doesn't pull-then-reopen the same opportunity as a churny new episode (margin-gone pulls now)
+PULL_GRACE_S = int(os.environ.get("OSRS_FLIPPER_PULL_GRACE_S", 600))  # 10 min
 
 # --- API ---------------------------------------------------------------------
 API_BASE = "https://prices.runescape.wiki/api/v1/osrs"

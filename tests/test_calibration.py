@@ -132,3 +132,13 @@ def test_eta_attribution_counts():
             {"status": "expired", "filled_qty": 0, "qty": 100},
             {"status": "filled", "filled_qty": 100, "qty": 100, "pred_eta_h": 1.0, "ts": 0, "filled_ts": 7200}]
     assert calibration.eta_attribution(rows) == {"never_filled": 2, "slow": 1}
+
+
+def test_mid_falls_back_to_the_present_side():
+    # a snapshot missing one avg side must use the side it HAS, not treat the missing one as 0 (which
+    # halves the mid and can misbucket the row's liquidity).
+    assert calibration._mid(1000, None) == 1000
+    assert calibration._mid(None, 800) == 800
+    assert calibration._mid(1000, 2000) == 1500
+    assert calibration._mid(None, None) == 0
+    assert calibration._turnover({"vol_1h_binding": 50, "avg_low": 100_000, "avg_high": None}) == 5_000_000
