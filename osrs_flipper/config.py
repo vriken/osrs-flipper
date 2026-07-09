@@ -19,6 +19,9 @@ PULL_EVAL_DELAY_S = int(os.environ.get("OSRS_FLIPPER_PULL_EVAL_DELAY_S", 1800)) 
 # hysteresis: an OUTRANKED rec must stay out of the plan this long before it's pulled, so 60s-tick rank
 # flutter doesn't pull-then-reopen the same opportunity as a churny new episode (margin-gone pulls now)
 PULL_GRACE_S = int(os.environ.get("OSRS_FLIPPER_PULL_GRACE_S", 600))  # 10 min
+# a slow, partially-filled buy pings "bank the partial now" only when the bankable profit is at least
+# this fraction of net worth — so it's "a lot" relative to your bankroll, not noise on thin/slow items
+BANK_PARTIAL_MIN_FRAC = float(os.environ.get("OSRS_FLIPPER_BANK_PARTIAL_MIN_FRAC", 0.005))  # 0.5%
 
 # --- API ---------------------------------------------------------------------
 API_BASE = "https://prices.runescape.wiki/api/v1/osrs"

@@ -584,9 +584,10 @@ def test_transition_ping_carries_target_and_drops_false_alarms(monkeypatch):
 
     def stub(refine):
         return types.SimpleNamespace(
-            _active_offers=lambda: [o], j=types.SimpleNamespace(cash=lambda: 1_000_000),
-            _seen_offers={(6, 20997, "BUY")}, _alerted={},
-            _sell_cut_context=lambda off, cash: {}, _refine_verdict=refine)
+            _active_offers=lambda: [o], _seen_offers={(6, 20997, "BUY")}, _alerted={}, _banked={},
+            j=types.SimpleNamespace(cash=lambda: 1_000_000, positions=lambda: [],
+                                    equity=lambda bids: 1_000_000),
+            _sell_cut_context=lambda off, cash: {}, _refine_verdict=refine, _bank_partial=lambda off: None)
 
     s1 = stub(lambda off, v, **k: ("stale", "         → re-quote: buy 900 / sell 950  (net 40/ea)"))
     term_mod.Terminal._push_transition_pings(s1)
@@ -624,3 +625,27 @@ def test_refine_verdict_offers_to_bank_a_partial_buy(monkeypatch):
     o0 = Offer(slot=3, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=0)
     _v0, hint0 = Terminal._refine_verdict(o0, "stale")
     assert "bank the" not in hint0
+
+
+def test_bank_partial_ping_fires_on_buy_limit_hit(monkeypatch):
+    # an overnight ×2-window buy filled up to the 4h limit (10k of 11,742): the rest is blocked ~4h, so
+    # ping "bank the partial" even though the eta model still calls it on-track. Deduped after.
+    o = Offer(slot=1, item_id=62, is_buy=True, state="BUYING", qty=11742, price=78, filled=10000)
+    monkeypatch.setattr(term_mod.api, "mapping",
+                        lambda: [{"id": 62, "name": "Maple longbow (u)", "limit": 10000}])
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
+    monkeypatch.setattr(term_mod.api, "one_hour", lambda: {})
+    monkeypatch.setattr(term_mod.monitor, "review_offers", lambda *a, **k: [(o, "ontrack", 0.1, 5.0, 0.85)])
+    sent = []
+    monkeypatch.setattr(term_mod.alert, "notify", lambda c: sent.append(c) or True)
+    stub = types.SimpleNamespace(
+        _active_offers=lambda: [o], _seen_offers={(1, 62, "BUY")}, _alerted={}, _banked={},
+        j=types.SimpleNamespace(cash=lambda: 1_000_000, positions=lambda: [],
+                                equity=lambda bids: 1_000_000),
+        _sell_cut_context=lambda off, cash: {}, _refine_verdict=lambda *a, **k: ("ontrack", ""),
+        _bank_partial=lambda off: (87, 7, 70_000))
+    term_mod.Terminal._push_transition_pings(stub)
+    assert sent and "bank 10,000 filled" in sent[0] and "buy limit hit" in sent[0]
+    sent.clear()
+    term_mod.Terminal._push_transition_pings(stub)                # same state → deduped, no repeat ping
+    assert sent == []
