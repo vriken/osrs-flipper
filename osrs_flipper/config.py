@@ -14,6 +14,8 @@ DB_PATH = DATA_DIR / "osrs.duckdb"
 # cross-machine learning sync (no server): each install exports sync/<device>.json here; committing it to
 # the repo (this dir is NOT gitignored, unlike data/) carries your attempts+blacklist to the other machine.
 SYNC_DIR = Path(os.environ.get("OSRS_FLIPPER_SYNC_DIR", str(DATA_DIR.parent / "sync")))
+# how long after a pull to wait before judging whether it was a good call (give the market time to move)
+PULL_EVAL_DELAY_S = int(os.environ.get("OSRS_FLIPPER_PULL_EVAL_DELAY_S", 1800))  # 30 min
 
 # --- API ---------------------------------------------------------------------
 API_BASE = "https://prices.runescape.wiki/api/v1/osrs"

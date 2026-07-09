@@ -335,6 +335,25 @@ class Journal:
             n += 1
         return n
 
+    def pulls_awaiting_eval(self, now_ts: int, min_age_s: int) -> list[dict[str, Any]]:
+        """Pulled, un-acted recs old enough to judge (the market has had time to move) and not yet
+        evaluated — with the pull-time snapshot needed to classify good_pull vs regret."""
+        rows = self.con.execute(
+            "SELECT rec_id, item_id, snap_low, snap_high, pull_reason FROM recommendations "
+            "WHERE pulled_ts IS NOT NULL AND eval IS NULL AND (acted IS NULL OR acted=FALSE) "
+            "AND pulled_ts <= ?", [now_ts - min_age_s]).fetchall()
+        return [{"rec_id": r[0], "item_id": r[1], "snap_low": r[2], "snap_high": r[3],
+                 "pull_reason": r[4]} for r in rows]
+
+    def set_rec_eval(self, rec_id: str, verdict: str, ts: int) -> None:
+        self.con.execute("UPDATE recommendations SET eval=?, eval_ts=? WHERE rec_id=?", [verdict, ts, rec_id])
+
+    def pull_quality(self) -> list[tuple[str, str, int]]:
+        """(pull_reason, eval, count) over evaluated pulls — the regret scorecard's raw rows."""
+        return self.con.execute(
+            "SELECT COALESCE(pull_reason,'?'), eval, COUNT(*) FROM recommendations "
+            "WHERE eval IS NOT NULL GROUP BY pull_reason, eval").fetchall()
+
     def recommendation_stats(self) -> dict[str, Any]:
         """Totals for the `recs` view: acted / pulled counts + pull-reason breakdown."""
         one = lambda q: self.con.execute(q).fetchone()[0]  # noqa: E731
