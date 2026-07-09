@@ -94,6 +94,7 @@ def scan(
     edges: dict | None = None,
     beta: float | None = None,
     net_worth: int | None = None,
+    cal_eta: dict | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -103,7 +104,7 @@ def scan(
     """
     time_weight = MODE_WEIGHTS.get(mode, 0.5)
     df = build_features(api.latest(), api.one_hour(), api.mapping(), bankroll=bankroll,
-                        limit_used=limit_used, beta=beta)  # beta None → config prior (build_features default)
+                        limit_used=limit_used, beta=beta, cal_eta=cal_eta)  # beta None → config prior
     if df.empty:
         return df
 
@@ -276,7 +277,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
                     max_accumulate: int = 6, min_gp: int | None = None, min_margin: float = 0.01,
                     limit_used: dict[int, int] | None = None, net_worth: int | None = None,
                     fill_cal: dict | None = None, edges: dict | None = None,
-                    beta: float | None = None) -> tuple[list[dict], float]:
+                    beta: float | None = None, cal_eta: dict | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
                 fast-fill liquidity — what you work in your slots right now and cycle.
@@ -293,7 +294,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     roles = ["balanced"] * max(0, free_slots)
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
-                        fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth)
+                        fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth, cal_eta=cal_eta)
                 for m in modes}
     # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks —
     # derived live from net worth and the ROI the market is paying (see slot_worth_floor).

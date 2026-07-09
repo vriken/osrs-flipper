@@ -74,3 +74,41 @@ def test_beta_skips_rows_without_a_fill_price():
     out = calibration.calibrate_beta(rows, prior=0.3)
     assert out["n"] == 0
     assert out["global"] == 0.3  # falls back to the prior
+
+
+# --- fill-time (ETA) calibration -------------------------------------------------------------------
+
+def _eta_row(pred, ts, filled_ts=None, resolved_ts=None, status="filled", filled_qty=10,
+             avg_low=48, avg_high=52, vol=5000):
+    return {"pred_eta_h": pred, "ts": ts, "filled_ts": filled_ts, "resolved_ts": resolved_ts,
+            "status": status, "filled_qty": filled_qty, "avg_low": avg_low, "avg_high": avg_high,
+            "vol_1h_binding": vol}
+
+
+def test_pv_bucket_is_2d_price_x_volume():
+    assert calibration.pv_bucket(500, 500) == "cheap/thin"
+    assert calibration.pv_bucket(50_000, 5_000) == "mid/med"
+    assert calibration.pv_bucket(500_000, 50_000) == "dear/deep"
+
+
+def test_calibrate_eta_learns_a_slow_bucket():
+    # predicted 1h, actually took 2h to fill → ratio 2.0 (model too optimistic on speed)
+    rows = [_eta_row(1.0, ts=0, filled_ts=7200, status="filled") for _ in range(30)]
+    out = calibration.calibrate_eta(rows)
+    assert out["global_measured"] == 2.0 and out["global"] > 1.3   # shrunk toward 1.0 but clearly slow
+
+
+def test_calibrate_eta_uses_never_fills_as_a_lower_bound_only_when_over():
+    # a never-filled offer that sat 3× its predicted ETA and still didn't fill → pushes the ratio UP
+    over = [_eta_row(1.0, ts=0, resolved_ts=10800, status="expired", filled_qty=0) for _ in range(20)]
+    assert calibration.calibrate_eta(over)["global_measured"] == 3.0
+    # a never-fill that resolved SOONER than predicted tells us nothing about fill speed → ignored
+    under = [_eta_row(2.0, ts=0, resolved_ts=1800, status="cancelled", filled_qty=0)]
+    assert calibration.calibrate_eta(under)["n"] == 0
+
+
+def test_eta_multiplier_defaults_to_1_and_clamps():
+    assert calibration.eta_multiplier(None, 100, 5000) == 1.0
+    assert calibration.eta_multiplier({}, 100, 5000) == 1.0
+    hot = {"buckets": {"cheap/med": {"shrunk": 99.0}}, "global": 99.0}
+    assert calibration.eta_multiplier(hot, 100, 5000) == 3.0   # clamped to hi

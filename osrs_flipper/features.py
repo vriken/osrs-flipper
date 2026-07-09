@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import config
+from . import calibration, config
 from .fills import capacity_units, completion_probability, haircut_prices
 from .tax import post_tax_received
 
@@ -29,6 +29,7 @@ def build_features(
     limit_used: dict[int, int] | None = None,
     beta: float | None = None,
     staleness_max: int | None = None,
+    cal_eta: dict | None = None,
 ) -> pd.DataFrame:
     """Return a feature DataFrame (one row per item that has a /mapping entry).
 
@@ -105,9 +106,12 @@ def build_features(
         exp_gp_cycle = margin_abs * cap * p_complete
 
         # estimated real-time hours to fill both legs at a passive share (α) of volume —
-        # the throughput constraint for a time-limited trader
-        buy_rate = config.ALPHA * low_vol
-        sell_rate = config.ALPHA * high_vol
+        # the throughput constraint for a time-limited trader. The learned ETA multiplier stretches
+        # (or shrinks) the clock per price×volume bucket from your realized fill times: >1 = this kind
+        # fills slower than α·vol implies, so divide the rate → longer ETA everywhere it's consumed.
+        eta_m = calibration.eta_multiplier(cal_eta, mid, vol_binding)
+        buy_rate = config.ALPHA * low_vol / eta_m
+        sell_rate = config.ALPHA * high_vol / eta_m
         fill_eta_h = (cap / buy_rate if buy_rate > 0 else math.inf) + \
                      (cap / sell_rate if sell_rate > 0 else math.inf)
         gp_per_hour = exp_gp_cycle / fill_eta_h if math.isfinite(fill_eta_h) and fill_eta_h > 0 else 0.0

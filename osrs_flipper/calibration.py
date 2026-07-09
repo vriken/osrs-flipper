@@ -131,3 +131,69 @@ def fill_multiplier(cal: dict | None, turnover: float, *, lo: float = 0.1, hi: f
     bucket = cal.get("buckets", {}).get(liquidity_bucket(turnover))
     c = bucket["shrunk"] if bucket else cal.get("global", 1.0)
     return max(lo, min(hi, c if c is not None else 1.0))
+
+
+# --- fill-TIME (ETA) calibration: learn realized live-time vs predicted, 2D by price×volume ---------
+def _price_band(price: float) -> str:
+    return "cheap" if price < 1_000 else "mid" if price < 100_000 else "dear"
+
+
+def _vol_band(volume: float) -> str:
+    return "thin" if volume < 1_000 else "med" if volume < 20_000 else "deep"
+
+
+def pv_bucket(price: float, volume: float) -> str:
+    """2D price×volume bucket — so 'similarly priced, volumed items' share one fill-time correction
+    (a cheap-liquid item fills on a very different clock than an expensive-thin one)."""
+    return f"{_price_band(price or 0)}/{_vol_band(volume or 0)}"
+
+
+def _realized_eta_ratio(row: dict) -> tuple[str, float] | None:
+    """(bucket, realized/pred) for a resolved attempt, or None if untimeable. A filled attempt gives an
+    exact ratio; a never-filled one (expired/cancelled, 0 filled) is right-censored — a LOWER bound that
+    only informs us when it already exceeded the prediction ('took ≥X and still didn't fill' → too fast)."""
+    pred = row.get("pred_eta_h")
+    ts = row.get("ts")
+    if pred is None or pred <= 0 or ts is None:
+        return None
+    status, filled_qty = row.get("status"), row.get("filled_qty") or 0
+    if status == "filled" and row.get("filled_ts"):
+        realized = (row["filled_ts"] - ts) / 3600.0
+        censored = False
+    elif status in ("expired", "cancelled") and filled_qty == 0 and (row.get("resolved_ts") or row.get("filled_ts")):
+        realized = ((row.get("resolved_ts") or row["filled_ts"]) - ts) / 3600.0
+        censored = True
+    else:
+        return None  # partial / in-progress → ambiguous fill time, skip
+    ratio = max(0.0, realized) / pred
+    if censored and ratio <= 1.0:
+        return None  # a never-fill that resolved sooner than predicted tells us nothing about speed
+    mid = ((row.get("avg_low") or 0) + (row.get("avg_high") or 0)) / 2
+    return pv_bucket(mid, row.get("vol_1h_binding") or 0), ratio
+
+
+def calibrate_eta(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict:
+    """Realized-fill-time / predicted-ETA, median per price×volume bucket, shrunk global→prior. Same shape
+    as calibrate_fill. `>1` ⇒ items fill SLOWER than modelled (ETA too optimistic); `<1` ⇒ faster."""
+    obs = [o for r in rows if (o := _realized_eta_ratio(r)) is not None]
+    out: dict = {"n": len(obs), "prior": prior, "global_measured": None, "global": prior, "buckets": {}}
+    if obs:
+        g = statistics.median(x for _, x in obs)
+        out["global_measured"], out["global"] = g, shrink(g, prior, len(obs), k)
+        by: dict[str, list[float]] = {}
+        for b, x in obs:
+            by.setdefault(b, []).append(x)
+        for name, xs in by.items():
+            m = statistics.median(xs)
+            out["buckets"][name] = {"n": len(xs), "measured": m, "shrunk": shrink(m, out["global"], len(xs), k)}
+    return out
+
+
+def eta_multiplier(cal: dict | None, price: float, volume: float, *, lo: float = 0.5, hi: float = 3.0) -> float:
+    """Per-item ETA correction: the price×volume bucket's shrunk factor (else global, else 1.0), clamped.
+    `>1` stretches the predicted fill time (this kind fills slower than modelled)."""
+    if not cal:
+        return 1.0
+    bucket = cal.get("buckets", {}).get(pv_bucket(price, volume))
+    c = bucket["shrunk"] if bucket else cal.get("global", 1.0)
+    return max(lo, min(hi, c if c is not None else 1.0))
