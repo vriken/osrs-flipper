@@ -460,26 +460,30 @@ def test_render_go_captures_text_and_echo_controls_console(capsys):
     assert "DASHBOARD LINE" in capsys.readouterr().out         # echo=True → also printed locally
 
 
-def _autopush_stub(dash_ref):
-    return types.SimpleNamespace(_auto_push=True, _render_go=lambda echo: dash_ref[0],
-                                 _push_transition_pings=lambda: None, _status_msg_id=None, _last_dash="")
-
-
-def test_auto_tick_reposts_status_only_when_dashboard_changes(monkeypatch):
+def test_maybe_repost_gates_on_actionable_change(monkeypatch):
     monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: True)
-    monkeypatch.setattr(term_mod.config, "DISCORD_BOT_TOKEN", "x")
-    monkeypatch.setattr(term_mod.config, "DISCORD_CHANNEL_ID", "y")
     posted = []
-    monkeypatch.setattr(term_mod.alert, "repost_status", lambda t, m: (posted.append(t), "mid")[1])
-    dash = ["D1"]
-    stub = _autopush_stub(dash)
-    Terminal._auto_tick(stub)                                  # first render → repost at bottom
-    assert posted == ["D1"] and stub._status_msg_id == "mid" and stub._last_dash == "D1"
-    Terminal._auto_tick(stub)                                  # unchanged → no repost (no churn/spam)
-    assert posted == ["D1"]
-    dash[0] = "D2"
-    Terminal._auto_tick(stub)                                  # changed → repost fresh (old one deleted)
-    assert posted == ["D1", "D2"] and stub._last_dash == "D2"
+    monkeypatch.setattr(term_mod.alert, "repost_status", lambda c, m: (posted.append(c), "mid")[1])
+    s = types.SimpleNamespace(_auto_push=True, _status_msg_id=None, _last_dash="")
+    b1 = "22:00 · cash 100 · 2/8 free\n⚠ needs you:\n  slot 0 X — re-quote 5"
+    Terminal._maybe_repost(s, b1)
+    assert posted == [b1] and s._status_msg_id == "mid"
+    b2 = "22:00 · cash 200 · 2/8 free\n⚠ needs you:\n  slot 0 X — re-quote 5"   # only the header (cash) ticked
+    Terminal._maybe_repost(s, b2)
+    assert posted == [b1]                                       # same actionable body → no repost
+    b3 = "22:00 · cash 200 · 2/8 free\n⚠ needs you:\n  slot 0 X — re-quote 9"   # target moved → body changed
+    Terminal._maybe_repost(s, b3)
+    assert posted == [b1, b3]                                   # reposts fresh at the bottom
+
+
+def test_maybe_repost_noop_when_off_or_no_bot(monkeypatch):
+    posted = []
+    monkeypatch.setattr(term_mod.alert, "repost_status", lambda c, m: posted.append(c))
+    monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: True)
+    Terminal._maybe_repost(types.SimpleNamespace(_auto_push=False, _status_msg_id=None, _last_dash=""), "h\nbody")
+    monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: False)   # webhook / no bot → no live board
+    Terminal._maybe_repost(types.SimpleNamespace(_auto_push=True, _status_msg_id=None, _last_dash=""), "h\nbody")
+    assert posted == []
 
 
 def test_auto_tick_is_a_noop_when_off_or_no_channel(monkeypatch):
@@ -488,11 +492,10 @@ def test_auto_tick_is_a_noop_when_off_or_no_channel(monkeypatch):
     monkeypatch.setattr(term_mod.config, "DISCORD_WEBHOOK_URL", None)
     monkeypatch.setattr(term_mod.alert, "bot_enabled", lambda: False)
     posted = []
-    monkeypatch.setattr(term_mod.alert, "repost_status", lambda t, m: posted.append(t))
-    off = _autopush_stub(["D"])
-    off._auto_push = False
-    Terminal._auto_tick(off)                                   # push disabled
-    nochan = _autopush_stub(["D"])                             # enabled but no channel
+    monkeypatch.setattr(term_mod.alert, "repost_status", lambda c, m: posted.append(c))
+    off = types.SimpleNamespace(_auto_push=False)
+    Terminal._auto_tick(off)                                    # push disabled → guard returns
+    nochan = types.SimpleNamespace(_auto_push=True)             # enabled but no channel → guard returns
     Terminal._auto_tick(nochan)
     assert posted == []
 
@@ -572,34 +575,6 @@ def test_evaluate_pulls_marks_set_decant_unrated(tmp_path):
     j.con.close()
 
 
-def test_transition_ping_carries_target_and_drops_false_alarms(monkeypatch):
-    # a flagged offer is re-checked against fresh prices: a real mispricing pings WITH the concrete
-    # re-quote target; a priced-right-but-slow offer downgrades to on-track and is NOT pinged.
-    o = Offer(slot=6, item_id=20997, is_buy=True, state="BUYING", qty=100, price=190, started_ms=1)
-    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 20997, "name": "Twisted bow"}])
-    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
-    monkeypatch.setattr(term_mod.api, "one_hour", lambda: {})
-    monkeypatch.setattr(term_mod.monitor, "review_offers", lambda *a, **k: [(o, "stale", 5.0, 0.1, 0.0)])
-    sent = []
-    monkeypatch.setattr(term_mod.alert, "notify", lambda c: sent.append(c) or True)
-
-    def stub(refine):
-        return types.SimpleNamespace(
-            _active_offers=lambda: [o], _seen_offers={(6, 20997, "BUY")}, _alerted={}, _banked={},
-            j=types.SimpleNamespace(cash=lambda: 1_000_000, positions=lambda: [],
-                                    equity=lambda bids: 1_000_000),
-            _sell_cut_context=lambda off, cash: {}, _refine_verdict=refine, _bank_partial=lambda off: None)
-
-    s1 = stub(lambda off, v, **k: ("stale", "         → re-quote: buy 900 / sell 950  (net 40/ea)"))
-    term_mod.Terminal._push_transition_pings(s1)
-    assert sent and "slot 6" in sent[0] and "re-quote: buy 900" in sent[0]   # actionable target in the ping
-
-    sent.clear()
-    s2 = stub(lambda off, v, **k: ("ontrack", ""))
-    term_mod.Terminal._push_transition_pings(s2)
-    assert sent == []                                                        # slow-but-fine → no false ping
-
-
 def test_print_plan_labels_multi_window_overnight(capsys):
     from osrs_flipper.planner import Candidate
     c = Candidate(kind="flip", key="Maple longbow (u)", slots=1, window_gp=93936, patient=False,
@@ -613,40 +588,16 @@ def test_print_plan_labels_multi_window_overnight(capsys):
     assert "buy-limit windows" not in capsys.readouterr().out     # single-window flip: no label
 
 
-def test_refine_verdict_offers_to_bank_a_partial_buy(monkeypatch):
-    # a partially-filled slow buy: offer to bank what's filled now (same margin, frees the slot) instead
-    # of waiting for the rest. A fully-unfilled buy has nothing to bank.
+def test_bank_partial_computes_profit_of_banking_now(monkeypatch):
+    # _bank_partial: (sell_px, net/unit, total gp) for the already-filled units; None when not a partial
+    # buy. Feeds the board's "💰 bank …" line.
     from osrs_flipper import quote as quote_mod
     Q = types.SimpleNamespace(buy_px=100, sell_px=130, net_unit=27, t_buy_h=1.0, t_sell_h=0.5,
                               ev=100.0, p_round=0.8, p_buy=0.8, qty=100, name="Nature rune")
     monkeypatch.setattr(quote_mod, "optimal_quote", lambda *a, **k: Q)
+    j = types.SimpleNamespace()  # _bank_partial doesn't touch the journal
     o = Offer(slot=2, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=60)
-    _v, hint = Terminal._refine_verdict(o, "stale")
-    assert "bank the 60" in hint and "sell @ 130" in hint
+    sell_px, net_now, gp = Terminal._bank_partial(types.SimpleNamespace(j=j), o)
+    assert sell_px == 130 and net_now > 0 and gp == net_now * 60
     o0 = Offer(slot=3, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=0)
-    _v0, hint0 = Terminal._refine_verdict(o0, "stale")
-    assert "bank the" not in hint0
-
-
-def test_bank_partial_ping_fires_on_buy_limit_hit(monkeypatch):
-    # an overnight ×2-window buy filled up to the 4h limit (10k of 11,742): the rest is blocked ~4h, so
-    # ping "bank the partial" even though the eta model still calls it on-track. Deduped after.
-    o = Offer(slot=1, item_id=62, is_buy=True, state="BUYING", qty=11742, price=78, filled=10000)
-    monkeypatch.setattr(term_mod.api, "mapping",
-                        lambda: [{"id": 62, "name": "Maple longbow (u)", "limit": 10000}])
-    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
-    monkeypatch.setattr(term_mod.api, "one_hour", lambda: {})
-    monkeypatch.setattr(term_mod.monitor, "review_offers", lambda *a, **k: [(o, "ontrack", 0.1, 5.0, 0.85)])
-    sent = []
-    monkeypatch.setattr(term_mod.alert, "notify", lambda c: sent.append(c) or True)
-    stub = types.SimpleNamespace(
-        _active_offers=lambda: [o], _seen_offers={(1, 62, "BUY")}, _alerted={}, _banked={},
-        j=types.SimpleNamespace(cash=lambda: 1_000_000, positions=lambda: [],
-                                equity=lambda bids: 1_000_000),
-        _sell_cut_context=lambda off, cash: {}, _refine_verdict=lambda *a, **k: ("ontrack", ""),
-        _bank_partial=lambda off: (87, 7, 70_000))
-    term_mod.Terminal._push_transition_pings(stub)
-    assert sent and "bank 10,000 filled" in sent[0] and "buy limit hit" in sent[0]
-    sent.clear()
-    term_mod.Terminal._push_transition_pings(stub)                # same state → deduped, no repeat ping
-    assert sent == []
+    assert Terminal._bank_partial(types.SimpleNamespace(j=j), o0) is None    # nothing filled → nothing to bank
