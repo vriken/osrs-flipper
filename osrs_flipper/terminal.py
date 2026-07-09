@@ -1742,6 +1742,44 @@ class Terminal:
             print(f"  decanted {count:,} {src['name']} → {out_qty:,} {out['name']} · moved {moved:,.0f} gp basis "
                   f"→ avg {navg:,.0f}/ea (cash & tax unchanged; the sell will now book real P&L)")
 
+    def cmd_sync(self, args: list[str]) -> None:
+        """Share the learner across your machines without a server. `sync export` writes this device's
+        resolved attempts + blacklist to sync/<device>.json (commit & push it); `sync import` merges every
+        OTHER device's file from sync/ (idempotent) and recalibrates over the union; `sync` does both.
+        Calibration is derived, so merging the raw attempts gives one unified learner across machines."""
+        import json
+        op = args[0] if args else "both"
+        d = config.SYNC_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        dev = self.j.device_id()
+        if op in ("export", "both"):
+            payload = self.j.export_learning()
+            f = d / f"{dev}.json"
+            f.write_text(json.dumps(payload))
+            print(f"  exported {len(payload['attempts'])} attempt(s) + {len(payload['blacklist'])} "
+                  f"blacklisted → {f}")
+            print("  commit & push it, then run `sync import` (or just `sync`) on your other machine.")
+        if op in ("import", "both"):
+            ta = tb = 0
+            for f in sorted(d.glob("*.json")):
+                if f.stem == dev:
+                    continue
+                try:
+                    na, nb = self.j.import_learning(json.loads(f.read_text()))
+                except Exception as e:  # noqa: BLE001 — a corrupt/foreign file shouldn't abort the merge
+                    print(f"  ⚠ skipped {f.name} ({type(e).__name__})")
+                    continue
+                ta, tb = ta + na, tb + nb
+                if na or nb:
+                    print(f"  merged {f.name}: +{na} attempt(s), +{nb} blacklist")
+            if ta or tb:
+                config.BLACKLIST_IDS |= self.j.blacklist_ids()
+                self._cal_at = -1
+                self._ensure_calibration()  # recompute β / fill / fill-time over the merged union
+                print(f"  imported {ta} attempt(s) + {tb} blacklist from other devices → recalibrated")
+            else:
+                print("  nothing new to import (no other-device files in sync/, or all already merged)")
+
     def cmd_blacklist(self, args: list[str]) -> None:
         """Never recommend an item again (e.g. one whose spread never fills). It's dropped at the feature
         source, so it vanishes from `go`, `scan`, `gear`, `sets` and `decant` alike. Persisted across sessions.
@@ -2030,7 +2068,7 @@ class Terminal:
             # rare / maintenance (hidden from `help`; shown in `help all`)
             "buy": lambda a: self._trade(a, "buy"), "sell": lambda a: self._trade(a, "sell"),
             "hold": lambda a: self.cmd_hold(a), "forget": lambda a: self.cmd_forget(a),
-            "blacklist": lambda a: self.cmd_blacklist(a),
+            "blacklist": lambda a: self.cmd_blacklist(a), "sync": lambda a: self.cmd_sync(a),
             "audit": lambda a: self.cmd_audit(a), "calibrate": lambda a: self.cmd_calibrate(a),
             "preds": lambda a: self.cmd_preds(a), "alerts": lambda a: self.cmd_alerts(a),
             "update": lambda a: self.cmd_update(a), "reload": lambda a: self.cmd_reload(a),
