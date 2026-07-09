@@ -200,6 +200,17 @@ def test_unresolved_attempts_covers_open_and_partial(j):
     assert a_open in ids and a_part in ids and a_done not in ids
 
 
+def test_backfill_attempt_is_idempotent_and_feeds_eta_calibration(j):
+    from osrs_flipper import calibration
+    args = ("u1", 2, "Item", "BUY", 100, 50)
+    kw = dict(placed_ts=0, resolved_ts=7200, status="filled", pred_eta_h=1.0,
+              avg_low=48, avg_high=52, vol_1h_binding=5000)
+    assert j.backfill_attempt(*args, **kw) is True       # 7200s realized vs 1h predicted → ratio 2.0
+    assert j.backfill_attempt(*args, **kw) is False       # same trade uuid → skipped (no double-count)
+    out = calibration.calibrate_eta(j.calibration_rows())
+    assert out["n"] == 1 and out["global_measured"] == 2.0
+
+
 def test_blacklist_add_list_remove_roundtrip(j):
     assert j.blacklist_ids() == set()
     j.blacklist_add(4151, "Abyssal whip")

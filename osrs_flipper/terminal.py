@@ -193,8 +193,55 @@ class Terminal:
         return {"avg_low": hr.get("avgLowPrice"), "avg_high": hr.get("avgHighPrice"),
                 "vol_1h_binding": min(low_vol, high_vol)}
 
+    def _backfill_fill_time(self) -> None:
+        """Seed the fill-time learner from RuneLite's completed history (placedAt→completedAt = real
+        live-time). Approximate: the predicted ETA it grades against is reconstructed from CURRENT volume
+        (we didn't record the model's past prediction), so it's a warm start that forward data refines.
+        Idempotent — already-imported trades are skipped."""
+        from . import flip_exporter
+        trades = (flip_exporter.read_history() or {}).get("trades") or []
+        if not trades:
+            print("  no Flip Exporter history to backfill from (is the plugin installed / logged in?)")
+            return
+        hr = api.one_hour()
+        names = {r["id"]: r["name"] for r in api.mapping()}
+        added = skipped = 0
+        for t in trades:
+            placed, done = int(t.get("placedAt", 0) or 0), int(t.get("completedAt", 0) or 0)
+            state = t.get("state", "")
+            status = ("filled" if state in ("BOUGHT", "SOLD")
+                      else "cancelled" if state in ("CANCELLED_BUY", "CANCELLED_SELL") else None)
+            iid, qty = int(t.get("id", 0)), int(t.get("qty", 0))
+            if status is None or placed <= 0 or done <= placed or qty <= 0:
+                skipped += 1
+                continue
+            h = hr.get(iid, {})
+            ah, al = h.get("avgHighPrice"), h.get("avgLowPrice")
+            is_buy = bool(t.get("isBuy"))
+            legvol = (h.get("lowPriceVolume") if is_buy else h.get("highPriceVolume")) or 0
+            if legvol <= 0 or not ah or not al:      # can't reconstruct a prediction without live vol/price
+                skipped += 1
+                continue
+            pred = qty / (config.ALPHA * legvol)     # model's ETA at CURRENT volume (approx warm-start)
+            ok = self.j.backfill_attempt(
+                t.get("uuid") or f"{iid}:{done}", iid, names.get(iid, str(iid)),
+                "BUY" if is_buy else "SELL", qty, int(t.get("avgPrice") or al), placed // 1000,
+                done // 1000, status, pred, int(al), int(ah),
+                min(h.get("highPriceVolume") or 0, h.get("lowPriceVolume") or 0))
+            added += ok
+            skipped += not ok
+        self._cal_at = -1                            # force a recalibration that includes the backfill
+        self._ensure_calibration()
+        print(f"  backfilled {added} historical trade(s) into the fill-time learner "
+              f"({skipped} skipped — no current vol/price, or already imported).")
+        print("  ⚠ approximate: predictions were reconstructed from CURRENT volume, not the volume at the "
+              "time you traded. It's a warm start; your live fills refine it.")
+
     def cmd_calibrate(self, args: list[str]) -> None:
-        """Measure empirical β + fill correction from your real order attempts (report only)."""
+        """Measure empirical β + fill correction from your real order attempts (report only).
+        `calibrate backfill` seeds the fill-time learner from your RuneLite trade history."""
+        if args and args[0] == "backfill":
+            return self._backfill_fill_time()
         from . import calibration
         rows = self.j.calibration_rows()
         n = len(rows)
