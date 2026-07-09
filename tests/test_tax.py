@@ -71,6 +71,19 @@ def test_exempt_item_pays_nothing():
     assert ge_tax(8_000_000, item_id=bond_id, on_date=POST) == 0
 
 
+def test_common_exempt_staples_pay_no_tax():
+    # Verified GE-tradeable members of the wiki exempt category (resolved via /mapping,
+    # exact match). One representative per category — a regression guard on EXEMPT_ITEM_IDS.
+    exempt = {
+        558: "Mind rune", 882: "Bronze arrow", 886: "Steel arrow", 806: "Bronze dart",
+        2309: "Bread", 379: "Lobster", 329: "Salmon", 2347: "Hammer", 1755: "Chisel",
+        8007: "Varrock teleport (tablet)",
+    }
+    for iid, name in exempt.items():
+        assert ge_tax(1000, item_id=iid, on_date=POST) == 0, name
+        assert post_tax_received(1000, item_id=iid, on_date=POST) == 1000, name
+
+
 def test_unknown_item_is_taxed_conservatively():
     assert ge_tax(1000, item_id=999_999, on_date=POST) == 20
 

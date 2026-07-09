@@ -69,3 +69,13 @@ _Avoid_: reading SCORE as "gp"
 
 - "investment"/"hold" implied a directional bet — resolved: a **hold** is a slow flip (spread capture), not a directional position.
 - "free slots" — the journal only knows inventory-holding slots, not pending offers, so it can't compute true occupancy — resolved: read **live from RuneLite** (true occupancy) when present; else user-supplied; else an explicitly-labelled `GE_SLOTS − held` assumption.
+
+## Edge & expectations
+
+- **The edge is patience, not speed.** Prices come from the public OSRS Wiki API — delayed, and read by
+  every bot flipping the same items. You are never early to it. Durable profit comes from buy-limit
+  arbitrage and fat-margin holds on items too slow/annoying for bots, not from racing a tight staple
+  (where you tend to be someone else's exit liquidity). The overnight/patient plan leans into this.
+- **Early EV is prior-driven.** The fill model self-calibrates β, fill-rate, and fill-time from your
+  real fills (shrunk toward the config priors every `CALIBRATE_EVERY_TRADES` resolved attempts); the
+  market-impact and hung-leg terms are fixed priors for now. Trust the numbers more as fills accumulate.

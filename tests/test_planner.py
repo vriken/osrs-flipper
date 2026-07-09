@@ -94,6 +94,18 @@ def test_verify_drops_patient_pick_but_not_flips():
     assert [p.key for p in picks] == ["pumped gear"]        # gear accepted → wins on value
 
 
+def test_attention_discount_penalises_fast_cycling_flips():
+    # equal window_gp, but the flip that cycles every few minutes (constant clicking) scores below the
+    # one that fills over an hour; a row with no fill-eta (overnight/gear) is untouched.
+    churny = Candidate(kind="flip", key="churny", slots=1, window_gp=1000, item_ids=(1,), fill_eta_h=0.1)
+    calm = Candidate(kind="flip", key="calm", slots=1, window_gp=1000, item_ids=(2,), fill_eta_h=2.0)
+    none = Candidate(kind="flip", key="none", slots=1, window_gp=1000, item_ids=(3,))  # no eta → neutral
+    s_churny = per_slot_score(churny, patient_confidence=1.0)
+    s_calm = per_slot_score(calm, patient_confidence=1.0)
+    assert s_churny < s_calm < 1000                              # churny docked most, calm slightly
+    assert per_slot_score(none, patient_confidence=1.0) == 1000  # unknown fill time → no discount
+
+
 def test_budget_caps_total_committed_capital():
     # flips are sized against the whole pile upstream while gear/set/decant take a slot's fair share, so
     # without a shared budget the greedy pick could commit more than `cash`. The budget cap prevents it.

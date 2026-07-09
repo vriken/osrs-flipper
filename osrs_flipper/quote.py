@@ -21,7 +21,7 @@ import statistics
 from dataclasses import dataclass, field
 
 from . import api, config
-from .fills import capacity_units
+from .fills import capacity_units, leg_fill_prob
 from .tax import post_tax_received
 
 _BAR_HOURS = {"5m": 1 / 12, "1h": 1.0, "6h": 6.0, "24h": 24.0}
@@ -157,7 +157,7 @@ def optimal_quote(
         rb = rate_buy(b)
         if rb <= 0:
             continue
-        p_buy = min(1.0, capture * rb * horizon_h / qty)
+        p_buy = leg_fill_prob(qty, rb, horizon_h, capture=capture)
         for s in sell_grid:
             if s <= b:
                 continue
@@ -167,7 +167,7 @@ def optimal_quote(
             rs = rate_sell(s)
             if rs <= 0:
                 continue
-            p_sell = min(1.0, capture * rs * horizon_h / qty)
+            p_sell = leg_fill_prob(qty, rs, horizon_h, capture=capture)
             p_round = p_buy * p_sell
             results.append({
                 "buy": b, "sell": s, "net_unit": net,

@@ -69,12 +69,24 @@ TAX_CHANGE_DATE = dt.date(2025, 5, 29)
 TAX_CAP = 5_000_000  # max tax per item, regardless of price
 TAX_MIN_PRICE = 50  # items below this are effectively exempt (tax floors to 0)
 
-# Items fully exempt from GE tax. Bonds (13190) charge their own conversion fee;
-# the wiki also exempts ~45 new-player tools. This is intentionally a PARTIAL set:
-# unknown items default to TAXED (conservative — we'd under-rank a true exempt item
-# rather than over-rank a taxed one). Extend from:
+# Items fully exempt from GE tax — the complete GE-tradeable membership of the wiki's
+# exempt category, resolved to ids via the prices-API /mapping (exact name match, 2026-07-09).
+# Unknown items still default to TAXED (conservative — under-rank a true exempt item rather
+# than over-rank a taxed one). Four category members are dosed/charged variants whose bare
+# title doesn't pin a specific charge (Energy potion, Games necklace, Ring of dueling, Civitas
+# illa fortis teleport) — skipped rather than guess a dose. Re-resolve from:
 # https://oldschool.runescape.wiki/w/Category:Items_exempt_from_Grand_Exchange_tax
-EXEMPT_ITEM_IDS: frozenset[int] = frozenset({13190})  # Old school bond
+EXEMPT_ITEM_IDS: frozenset[int] = frozenset({
+    13190,                                       # Old school bond
+    558,                                         # Mind rune
+    882, 884, 886,                               # Bronze / Iron / Steel arrow
+    806, 807, 808,                               # Bronze / Iron / Steel dart
+    315, 329, 347, 351, 355, 361, 365, 379,      # Shrimps, Salmon, Herring, Pike, Mackerel, Tuna, Bass, Lobster
+    1891, 2140, 2142, 2309, 2327,                # Cake, Cooked chicken, Cooked meat, Bread, Meat pie
+    233, 952, 1733, 1735, 1755, 1785, 2347,      # Pestle and mortar, Spade, Needle, Shears, Chisel, Glassblowing pipe, Hammer
+    5325, 5329, 5331, 5341, 5343, 8794,          # Gardening trowel, Secateurs, Watering can, Rake, Seed dibber, Saw
+    8007, 8008, 8009, 8010, 8011, 8013, 28790,   # Varrock/Lumbridge/Falador/Camelot/Ardougne/House/Kourend teleport tablets
+})
 
 # --- Fill model parameters (see fills.py) ------------------------------------
 BETA = 0.25  # spread haircut PRIOR: buy at low+β·spread, sell at high−β·spread. The live value is
@@ -83,6 +95,31 @@ BETA = 0.25  # spread haircut PRIOR: buy at low+β·spread, sell at high−β·s
 CALIBRATE_EVERY_TRADES = int(os.environ.get("OSRS_FLIPPER_CALIBRATE_EVERY_TRADES", 10))
 GAMMA = 0.15  # per-bar fill capture as fraction of contra-volume
 ALPHA = 0.10  # capacity capture as fraction of window volume
+# Market-impact EV haircut (see fills.market_impact_mult). A resting order claims a share
+# p = size / contra-volume of what trades; taking a large share walks the price against you,
+# shrinking the realized margin — a cost distinct from fill probability (modeled separately) and
+# NOT captured by the α volume-cap alone (which limits size but still assumes you capture that
+# α-share at the quoted price). mult = 1/(1 + IMPACT_K·p), floored at IMPACT_FLOOR; penalty-only.
+# As the stack grows and more flips become α-share-bound rather than bankroll-bound, this cools the
+# ranking on high-participation positions — the exact regime where modeled and live fills diverge.
+# Starts as a static model term; IMPACT_K is the knob a future fill-calibration would tune. K=0 off.
+IMPACT_K = float(os.environ.get("OSRS_FLIPPER_IMPACT_K", 1.0))
+IMPACT_FLOOR = float(os.environ.get("OSRS_FLIPPER_IMPACT_FLOOR", 0.5))
+# Hung-leg (trapped-capital) risk (see fills.hung_leg_mult). EV = qty·net·p_round scores a
+# non-completed round as zero, but the state that actually hurts is a FILLED buy whose sell then
+# hangs — capital stuck in inventory you grind out at an opportunity + markdown cost. This restores
+# that expected cost as an EV haircut: mult = 1 − HUNG_LEG_COST_FRAC·(1−p_sell)/p_sell·(1/margin_pct),
+# floored at HUNG_LEG_FLOOR. It bites thin-margin flips with a shaky sell leg (a trapped buy wipes
+# them) and barely touches fat-margin flips with a reliable sell. p_sell is horizon-aware, so a
+# patient/overnight quote is penalised less. Active-flip cost only (holds sell over time). FRAC=0 off.
+HUNG_LEG_COST_FRAC = float(os.environ.get("OSRS_FLIPPER_HUNG_LEG_COST_FRAC", 0.01))
+HUNG_LEG_FLOOR = float(os.environ.get("OSRS_FLIPPER_HUNG_LEG_FLOOR", 0.5))
+# Representative horizon (hours) for the SNAPSHOT fill-probability estimate (fills.completion_probability).
+# The snapshot ranks mode-agnostically, so it uses one horizon as the ordering proxy — the balanced (2h)
+# day horizon — while the deep re-price uses the exact mode horizon (MODE_HORIZON). The snapshot and the
+# quote share ONE leg shape (fills.leg_fill_prob), so snapshot ordering tracks the deep re-price instead
+# of a different, harsher curve that could gate a good flip out before it's deep-checked.
+SNAPSHOT_HORIZON_H = float(os.environ.get("OSRS_FLIPPER_SNAPSHOT_HORIZON_H", 2.0))
 ADVERSE_GATE = True  # only fill in bars where price moved against you (flat-or-worse)
 WINDOW_BARS_5M = 24  # holding window = 24×5m = 2h (reset-bounded to 4h buy-limit window)
 BUY_LIMIT_WINDOW_H = 4  # rolling buy-limit window
@@ -250,6 +287,15 @@ BOND_ITEM_ID = 13190  # F2P-tradeable, tax-exempt; redeeming it converts the acc
 BANKROLL = int(os.environ.get("OSRS_FLIPPER_BANKROLL", 200_000))
 BACKTEST_BANKROLL = int(os.environ.get("OSRS_FLIPPER_BACKTEST_BANKROLL", 5_000_000))
 SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
+# ...and for the live ranking's attention discount (see planner._attention_discount): a flip that
+# only reaches its gp/hour by cycling every few minutes demands constant clicking, so its per-slot
+# score is discounted by the handling fraction of the window — ACTIONS_PER_CYCLE·(SECONDS_PER_OFFER/
+# 3600)/cycle_h (the window cancels). Gently favours fewer-click flips/holds over hyperactive churn at
+# equal gp; discounts the SCORE only, not the displayed gp. The cycle clock is floored at
+# ATTENTION_MIN_ETA_H so a near-instant fill can't nuke the score. SECONDS_PER_OFFER or
+# ACTIONS_PER_CYCLE = 0 disables it.
+ACTIONS_PER_CYCLE = int(os.environ.get("OSRS_FLIPPER_ACTIONS_PER_CYCLE", 3))  # place-buy, collect, list-sell
+ATTENTION_MIN_ETA_H = float(os.environ.get("OSRS_FLIPPER_ATTENTION_MIN_ETA_H", 0.1))
 
 # A GE slot is a scarce, reusable resource: committing it to a flip has an opportunity cost —
 # that slot could hold a far bigger position once your open offers return cash. So a new flip
@@ -261,6 +307,20 @@ SECONDS_PER_OFFER = 30  # manual click cost, for gp-per-active-minute metric
 # automatic: profit = deploy × ROI, so a small high-ROI flip still clears it. Below it, cash stays
 # liquid to consolidate rather than fragment into slot-unworthy flips.
 SLOT_WORTH_LAMBDA = float(os.environ.get("OSRS_FLIPPER_SLOT_WORTH_LAMBDA", 0.5))
+
+# Allocation concentration (see scanner._allocate). Capital is split across ranked picks in proportion
+# to capital efficiency (expected return per gp), capped so no single position exceeds this fraction of
+# the pile in the primary pass (leftover still tops up over idle cash). Lifts the best flip above the
+# old even 1/N share — the compounding edge a small stack lives on — without letting one flip soak the
+# whole pile. 1.0 disables the ceiling (pure weight-proportional-with-spillover); lower = more diversified.
+MAX_ALLOC_FRAC = float(os.environ.get("OSRS_FLIPPER_MAX_ALLOC_FRAC", 0.5))
+
+# Variance aversion (optional, OFF by default). Multiplies the ranking SCORE (not the EV estimate) by
+# p_complete^VARIANCE_AVERSION, favouring reliable-completion flips over high-variance gambles — for the
+# F2P bond grind, a steady small gain compounds to the milestone faster than a coin-flip. λ=0 is a no-op
+# (default). Deliberately blunt and overlapping the hung-leg / optimizer's-curse-shrink risk terms, which
+# price specific risks; this is a global dial on top for a risk-averse grind. Try ~0.5–1.0 to enable.
+VARIANCE_AVERSION = float(os.environ.get("OSRS_FLIPPER_VARIANCE_AVERSION", 0.0))
 
 # Per-item edge tracker: a rolling, recency-weighted (EWMA) score of each item's REALIZED profit,
 # fed into the ranking as a multiplier — so items that are actually losing you money right now get

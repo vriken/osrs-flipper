@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from . import config
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -32,10 +34,24 @@ class Candidate:
     payload: dict = field(default_factory=dict)  # underlying row for rendering / placement
 
 
+def _attention_discount(fill_eta_h: float | None) -> float:
+    """Discount a candidate's per-slot value by the manual click overhead it implies. A flip that only
+    reaches its window_gp by cycling every few minutes demands constant clicking; one that fills once
+    over hours barely any. The handling FRACTION of the window is actions·(sec_per_offer/3600)/cycle_h
+    (the window cancels), so a fast-cycling flip is discounted more than a slow hold/gear. Neutral when
+    the fill time is unknown (overnight/gear rows that don't carry it) or the click cost is disabled."""
+    if config.SECONDS_PER_OFFER <= 0 or config.ACTIONS_PER_CYCLE <= 0 or not fill_eta_h or fill_eta_h <= 0:
+        return 1.0
+    cycle_h = max(fill_eta_h, config.ATTENTION_MIN_ETA_H)  # floor so a near-instant fill can't nuke the score
+    handling_frac = config.ACTIONS_PER_CYCLE * (config.SECONDS_PER_OFFER / 3600.0) / cycle_h
+    return 1.0 / (1.0 + handling_frac)
+
+
 def per_slot_score(c: Candidate, *, patient_confidence: float) -> float:
-    """Expected gp per slot, after haircutting best-case (patient) EV. The ranking key."""
+    """Expected gp per slot, after haircutting best-case (patient) EV and the manual-handling overhead
+    a fast-cycling flip implies. The ranking key (discounts the score, not the displayed window_gp)."""
     ev = c.window_gp * (patient_confidence if c.patient else 1.0)
-    return ev / max(1, c.slots)
+    return ev / max(1, c.slots) * _attention_discount(c.fill_eta_h)
 
 
 def rank(cands: list[Candidate], *, free_slots: int, patient_confidence: float,
