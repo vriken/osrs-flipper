@@ -106,14 +106,30 @@ def test_autodecant_moves_basis_when_low_dose_leaves_bag(tmp_path, monkeypatch):
 
 
 def test_autodecant_ignores_a_ge_sale_of_the_low_dose(tmp_path, monkeypatch):
-    # the (3) left the bag because you SOLD it on GE (not decanted) — conservation nets to 0, no transfer,
-    # even though (4)s happen to be present. Prevents double-counting the sale as a decant.
+    # the (3) count dropped because you SOLD some on the GE — the fill loop already applied that sale to
+    # BOTH the tracked position AND the bag before _autodecant runs, so tracked == bag and conservation
+    # nets to 0: no decant is fabricated even with (4)s present. (Regression guard for the double-count
+    # bug: the old formula re-subtracted sold_since on top of an already-reduced position.)
     _mock_potion_api(monkeypatch)
     j = Journal(path=str(tmp_path / "ad2.duckdb"))
     j.set_cash(1_000_000)
-    j.record_buy(157, "Super strength(3)", 4, 2204)
-    Terminal._autodecant(_term_stub(j), {2440: 5}, bought_since={}, sold_since={157: 4})
-    assert j.position(157).qty == 4 and j.position(2440) is None   # untouched
+    j.record_buy(157, "Super strength(3)", 8, 2204)               # held 8
+    j.record_sell(157, "Super strength(3)", 4, 2500)              # GE-sold 4 → tracked now 4 (fill loop)
+    Terminal._autodecant(_term_stub(j), {157: 4, 2440: 5}, bought_since={}, sold_since={157: 4})
+    assert j.position(157).qty == 4 and j.position(2440) is None  # tracked==bag → untouched, no decant
+    j.con.close()
+
+
+def test_autodecant_no_fabrication_on_a_plain_buy(tmp_path, monkeypatch):
+    # the CRITICAL double-count regression: a plain GE buy of the low dose (already applied to the
+    # position by the fill loop) with the (3)s still sitting in the bag must NOT be read as a decant just
+    # because unrelated (4)s exist. tracked(4) - bag(4) == 0 → no transfer, basis intact.
+    _mock_potion_api(monkeypatch)
+    j = Journal(path=str(tmp_path / "ad6.duckdb"))
+    j.set_cash(1_000_000)
+    j.record_buy(157, "Super strength(3)", 4, 2204)              # bought 4 this sync (position now 4)
+    Terminal._autodecant(_term_stub(j), {157: 4, 2440: 5}, bought_since={157: 4}, sold_since={})
+    assert j.position(157).qty == 4                              # the 4 bought are still in the bag
     j.con.close()
 
 
@@ -498,8 +514,58 @@ def test_compact_status_keeps_actions_drops_noise():
         "  NEXT: place buy #1-#2 now",
     ])
     out = _compact_status(dash)
-    assert "cash 1,274,300" in out and "MARGIN GONE" in out           # header + attention offer kept
+    assert "1,274,300" in out and "2/8 free" in out                   # terse header (no "cash ", no "===")
+    assert "⚠ needs you:" in out and "White lily seed (margin gone)" in out   # one compact attention line
     assert "Adamant dart tip" in out and "NEXT: place buy" in out     # pick + next kept
-    for noise in ("on track", "holdings:", "auto-calibrated", "→ no spread", "# type", "best-case"):
+    for noise in ("on track", "Granite boots", "holdings:", "auto-calibrated", "→ no spread",
+                  "# type", "best-case", "MARGIN GONE — cancel"):     # verbose verdict tail gone too
         assert noise not in out
-    assert len(out.splitlines()) < len(dash.splitlines())             # genuinely shorter
+    assert len(out.splitlines()) <= 4                                 # header + needs-you + pick + NEXT
+
+
+# --- recommendation-ledger glue (previously untested: Terminal was never instantiated for these) -----
+
+def _rec_stub(j):
+    return types.SimpleNamespace(j=j, _evaluate_pulls=lambda hr: None)
+
+
+def test_log_recommendations_stores_all_set_legs(tmp_path):
+    from osrs_flipper.planner import Candidate
+    j = Journal(path=str(tmp_path / "rl.duckdb"))
+    c = Candidate(kind="set", key="Ahrim's · ASSEMBLE", slots=2, window_gp=5000, patient=True,
+                  item_ids=(10, 11), payload={"cost": 100, "proceeds": 120, "conv": 5, "gp": 5000})
+    Terminal._log_recommendations(_rec_stub(j), [c], net_worth=1_000_000, free_slots=3,
+                                  daytime=True, lat={}, hr={})
+    assert j.con.execute("SELECT leg_ids FROM recommendations WHERE kind='set'").fetchone()[0] == "10,11"
+    assert j.mark_rec_acted(11, "BUY", 1, "aid") is True     # placing the 2nd leg links the set rec
+    j.con.close()
+
+
+def test_log_recommendations_never_calls_a_set_pull_margin_gone(tmp_path):
+    # a set's stored item_id is only the FIRST leg you buy; its own spread must not decide margin_gone.
+    from osrs_flipper.planner import Candidate
+    j = Journal(path=str(tmp_path / "rl2.duckdb"))
+    stub = _rec_stub(j)
+    c = Candidate(kind="set", key="S", slots=2, window_gp=5000, patient=True, item_ids=(10, 11),
+                  payload={"cost": 100, "proceeds": 120, "conv": 5, "gp": 5000})
+    Terminal._log_recommendations(stub, [c], net_worth=1_000_000, free_slots=3, daytime=True, lat={}, hr={})
+    j.con.execute("UPDATE recommendations SET last_ts=last_ts-100000")   # age past the pull grace
+    # leg 10's naive spread is deeply negative — a flip would read margin_gone; a set must read outranked
+    Terminal._log_recommendations(stub, [], net_worth=1_000_000, free_slots=3, daytime=True,
+                                  lat={}, hr={10: {"avgHighPrice": 50, "avgLowPrice": 100}})
+    assert j.con.execute("SELECT pull_reason FROM recommendations").fetchone()[0] == "outranked"
+    j.con.close()
+
+
+def test_evaluate_pulls_marks_set_decant_unrated(tmp_path):
+    from osrs_flipper.planner import Candidate
+    j = Journal(path=str(tmp_path / "rl3.duckdb"))
+    stub = _rec_stub(j)
+    c = Candidate(kind="decant", key="Prayer", slots=1, window_gp=3000, patient=True, item_ids=(139,),
+                  payload={"in_qty": 1, "in_px": 100, "out_qty": 1, "out_px": 200, "in_dose": 3,
+                           "out_dose": 4, "conv": 10, "gp": 3000})
+    Terminal._log_recommendations(stub, [c], net_worth=1_000_000, free_slots=3, daytime=True, lat={}, hr={})
+    j.con.execute("UPDATE recommendations SET pulled_ts=1, acted=FALSE")   # force a matured pull
+    Terminal._evaluate_pulls(stub, hr={139: {"avgHighPrice": 300, "avgLowPrice": 90}})
+    assert j.con.execute("SELECT eval FROM recommendations").fetchone()[0] == "unrated"
+    j.con.close()

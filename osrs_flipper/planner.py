@@ -28,6 +28,7 @@ class Candidate:
     patient: bool = False                  # best-case (β=0) pricing → haircut applies
     item_ids: tuple[int, ...] = ()         # for dedupe across picks and vs held/offers
     fill_eta_h: float | None = None
+    cost: float = 0.0                      # gp of capital this pick ties up (0 = unknown → no budget cap)
     payload: dict = field(default_factory=dict)  # underlying row for rendering / placement
 
 
@@ -38,15 +39,19 @@ def per_slot_score(c: Candidate, *, patient_confidence: float) -> float:
 
 
 def rank(cands: list[Candidate], *, free_slots: int, patient_confidence: float,
-         exclude_ids: set[int] | None = None,
+         exclude_ids: set[int] | None = None, budget: float | None = None,
          verify: Callable[[Candidate], bool] | None = None) -> list[Candidate]:
     """Greedily fill `free_slots` with the highest per-slot-value candidates.
 
     A candidate is skipped if it doesn't fit the remaining slots, or if any of its item ids is already
     taken (by an earlier pick or by `exclude_ids` — items you already hold / have on offer). Sets consume
-    `slots` each. `verify`, if given, is called ONLY on patient candidates that would otherwise be chosen
-    (so the network-costly pump/knife gate runs lazily on the few picks that matter, not every candidate);
-    returning False drops that pick and moves on. Returns the chosen candidates in ranked order.
+    `slots` each. If `budget` is given, a candidate is also skipped when its `cost` (capital it ties up)
+    would overrun the remaining cash — different candidate kinds are sized against DIFFERENT capital
+    baselines upstream (flips split the whole pile; gear/set/decant take one slot's fair share), so
+    without a shared cash cap the greedy pick could commit more than you actually have. A candidate with
+    `cost == 0` (unknown) is never budget-skipped. `verify`, if given, is called ONLY on patient
+    candidates that would otherwise be chosen (so the network-costly pump/knife gate runs lazily on the
+    few picks that matter); returning False drops that pick. Returns the chosen candidates in ranked order.
     """
     if free_slots <= 0:
         return []
@@ -55,6 +60,7 @@ def rank(cands: list[Candidate], *, free_slots: int, patient_confidence: float,
                      reverse=True)
     chosen: list[Candidate] = []
     remaining = free_slots
+    spent = 0.0
     for c in ordered:
         if c.slots > remaining:
             continue  # doesn't fit (e.g. a 4-piece set with 2 slots left) — try the next best
@@ -62,11 +68,14 @@ def rank(cands: list[Candidate], *, free_slots: int, patient_confidence: float,
             continue
         if taken_ids.intersection(c.item_ids):
             continue  # already buying/holding one of these items — don't double up
+        if budget is not None and c.cost > 0 and spent + c.cost > budget:
+            continue  # would overrun the shared cash budget — skip and try a cheaper pick
         if c.patient and verify is not None and not verify(c):
             continue  # best-case play whose bought legs look pumped / falling — skip it
         chosen.append(c)
         taken_ids.update(c.item_ids)
         remaining -= c.slots
+        spent += c.cost
         if remaining <= 0:
             break
     return chosen

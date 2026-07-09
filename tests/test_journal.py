@@ -566,3 +566,63 @@ def test_pull_evaluation_flow(j):
     j.set_rec_eval(pend[0]["rec_id"], "regret", 3000)
     assert j.pulls_awaiting_eval(now_ts=4000, min_age_s=1800) == []          # already evaluated
     assert j.pull_quality() == [("outranked", "regret", 1)]
+
+
+def test_mark_rec_acted_links_any_set_leg(j):
+    # placing ANY leg of a multi-leg set rec (not just item_ids[0]) links it, so it's never falsely
+    # pulled while you're mid-execution.
+    j.upsert_recommendation({**_rec(item_id=10, kind="set"), "leg_ids": "10,11,12,13"}, 1000)
+    assert j.mark_rec_acted(12, "BUY", 1030, "aidX") is True                 # a non-first leg still links
+    assert j.open_recommendations() == []                                    # acted → closed
+    j.upsert_recommendation({**_rec(item_id=20, kind="flip"), "leg_ids": "20"}, 1000)
+    assert j.mark_rec_acted(999, "BUY", 1040, "aidY") is False               # unrelated item → no match
+
+
+def test_pull_grace_defers_outranked_but_not_margin_gone(j):
+    j.upsert_recommendation(_rec(item_id=8), 1000)                            # last_ts=1000
+    # merely OUTRANKED within the grace window → not pulled yet (hysteresis absorbs 60s rank flutter)
+    assert j.pull_recommendations(set(), 1100, {("flip", 8, "BUY"): "outranked"}, grace_s=600) == 0
+    assert len(j.open_recommendations()) == 1
+    # MARGIN GONE is a real state change → pulled immediately despite grace
+    assert j.pull_recommendations(set(), 1150, {("flip", 8, "BUY"): "margin_gone"}, grace_s=600) == 1
+    # a fresh rec dropped well past the grace window → pulled
+    j.upsert_recommendation(_rec(item_id=9), 1000)
+    assert j.pull_recommendations(set(), 2000, {("flip", 9, "BUY"): "outranked"}, grace_s=600) == 1
+
+
+def test_pull_quality_excludes_unrated_and_awaiting_eval_returns_kind(j):
+    j.upsert_recommendation(_rec(item_id=30, kind="decant"), 1000)
+    j.pull_recommendations(set(), 1000, {("decant", 30, "BUY"): "outranked"})
+    pend = j.pulls_awaiting_eval(now_ts=3000, min_age_s=1800)
+    assert pend[0]["kind"] == "decant"                                       # kind surfaced for the grader
+    j.set_rec_eval(pend[0]["rec_id"], "unrated", 3000)
+    assert j.pull_quality() == []                                            # 'unrated' excluded from scorecard
+
+
+def test_export_excludes_imported_rows_no_boomerang(tmp_path):
+    a = Journal(path=str(tmp_path / "ba.duckdb"))
+    b = Journal(path=str(tmp_path / "bb.duckdb"))
+    a.backfill_attempt("t1", 2, "Item", "BUY", 100, 50, placed_ts=0, resolved_ts=3600,
+                       status="filled", pred_eta_h=1.0, avg_low=48, avg_high=52, vol_1h_binding=5000)
+    b.import_learning(a.export_learning())                # B now holds A's row (tagged device=A)
+    assert len(b.calibration_rows()) == 1
+    assert b.export_learning()["attempts"] == []         # B re-exports its OWN rows only — no boomerang
+    assert a.import_learning(b.export_learning()) == (0, 0)   # so A never re-adds its own data
+    assert len(a.calibration_rows()) == 1
+    a.con.close()
+    b.con.close()
+
+
+def test_realized_history_credits_decant_basis():
+    from osrs_flipper.journal import realized_history_from_fills
+    from osrs_flipper.runelite import Fill
+    from osrs_flipper.tax import post_tax_received
+    buys = [Fill(uuid="b", item_id=157, name="p3", is_buy=True, qty=4, price=3000, state="", t_ms=1_000_000)]
+    sells = [Fill(uuid="s", item_id=2440, name="p4", is_buy=False, qty=3, price=5500, state="", t_ms=3_000_000)]
+    # without decant events the (4) sale has no tracked basis → books 0 (the pre-fix behaviour)
+    assert all(r[2] == 0 for r in realized_history_from_fills(buys + sells))
+    # fold the decant in (ts, out_id, out_qty, out_avg) — ts in seconds, between the buy (1000s) and
+    # sell (3000s) — so it credits the moved basis before the sale → true realised P&L
+    rows = realized_history_from_fills(buys + sells, [(2000, 2440, 3, 4000.0)])
+    realised = [r[2] for r in rows if r[2] != 0]
+    assert realised == [pytest.approx(3 * (post_tax_received(5500, item_id=2440) - 4000))]

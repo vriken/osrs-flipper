@@ -76,6 +76,18 @@ def status_text(rows: list[tuple], names: dict, free: int) -> str:
     return "\n".join(lines)
 
 
+def reprice_hint(o, latest: dict) -> str:
+    """A concrete re-list target for a stuck offer, read off the live book — so a STALE alert tells you
+    the NUMBER, not just 're-price'. A stale SELL drops to the current instabuy (high, still competitive);
+    a stale BUY steps up to the current instasell (low). Empty when the live book isn't available."""
+    lo = latest.get(o.item_id) or {}
+    bid, ask = lo.get("low"), lo.get("high")
+    if not bid or not ask:
+        return ""
+    tgt, verb = (bid, "re-bid") if o.is_buy else (ask, "re-list")
+    return f"→ {verb} ~{int(tgt):,} (you're @ {int(o.price):,}; mkt {int(bid):,}↔{int(ask):,})"
+
+
 def watch_loop(stop, *, interval_s: int | None = None, webhook: str | None = None) -> None:
     """Blocking poll loop (daemon thread), independent of `go`. Two outputs to Discord:
       • a LIVE STATUS message (bot only) edited in place each tick — current slots/offers/verdicts;

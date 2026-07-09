@@ -32,12 +32,17 @@ def liquidity_bucket(turnover: float) -> str:
     return "high"
 
 
+def _mid(al, ah) -> float:
+    """Mid price from a possibly-partial snapshot — average the present sides, falling back to the one
+    known side rather than treating a missing avg_low/avg_high as 0 (which halves the mid and can
+    misbucket the row's liquidity)."""
+    vals = [float(v) for v in (al, ah) if v is not None]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
 def _turnover(row: dict) -> float:
     """Binding-side gp turnover for a recorded attempt, from its decision-time snapshot."""
-    vol = row.get("vol_1h_binding") or 0
-    al, ah = row.get("avg_low"), row.get("avg_high")
-    mid = ((al or 0) + (ah or 0)) / 2 if (al is not None or ah is not None) else 0
-    return vol * mid
+    return (row.get("vol_1h_binding") or 0) * _mid(row.get("avg_low"), row.get("avg_high"))
 
 
 def _beta_of(row: dict) -> float | None:
@@ -168,7 +173,7 @@ def _realized_eta_ratio(row: dict) -> tuple[str, float] | None:
     ratio = max(0.0, realized) / pred
     if censored and ratio <= 1.0:
         return None  # a never-fill that resolved sooner than predicted tells us nothing about speed
-    mid = ((row.get("avg_low") or 0) + (row.get("avg_high") or 0)) / 2
+    mid = _mid(row.get("avg_low"), row.get("avg_high"))
     return pv_bucket(mid, row.get("vol_1h_binding") or 0), ratio
 
 
