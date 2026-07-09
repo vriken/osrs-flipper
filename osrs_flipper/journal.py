@@ -525,6 +525,29 @@ class Journal:
              0, None, None, "open"])
         return aid
 
+    def backfill_attempt(self, trade_uuid: str, item_id: int, name: str, side: str, qty: int,
+                         fill_px: int, placed_ts: int, resolved_ts: int, status: str,
+                         pred_eta_h: float, avg_low: int | None, avg_high: int | None,
+                         vol_1h_binding: int) -> bool:
+        """Insert a RESOLVED historical trade (from RuneLite history) as a graded attempt so the
+        fill-time learner starts warm. Idempotent — keyed on the trade uuid (attempt_id 'bf:<uuid>');
+        a re-run skips ones already imported. Returns True if newly inserted. The predicted ETA is
+        reconstructed by the caller (approximate — see _backfill_fill_time)."""
+        aid = f"bf:{trade_uuid}"
+        if self.con.execute("SELECT 1 FROM attempts WHERE attempt_id=?", [aid]).fetchone():
+            return False
+        spread = (avg_high or 0) - (avg_low or 0)
+        filled = status == "filled"
+        self.con.execute(
+            "INSERT INTO attempts (attempt_id, ts, item_id, name, side, qty, limit_px, horizon_h, "
+            "avg_low, avg_high, spread, vol_1h_binding, pred_p_fill, pred_eta_h, pred_ev, filled_qty, "
+            "fill_px, filled_ts, status, resolved_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [aid, placed_ts, item_id, name, side.upper(), qty, int(fill_px), 1.0, avg_low, avg_high,
+             spread, vol_1h_binding, None, pred_eta_h, None, qty if filled else 0, float(fill_px),
+             resolved_ts if filled else None, status, resolved_ts])
+        self.record_event(aid, status, ts=resolved_ts, qty=qty, price=int(fill_px), note="backfill")
+        return True
+
     def reconcile_fill(self, item_id: int, is_buy: bool, qty: int, price: int,
                        fill_ts: int) -> str | None:
         """Attach a real fill to the oldest matching OPEN attempt (same item + side, placed
