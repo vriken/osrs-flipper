@@ -19,6 +19,11 @@ def color(text: str, c: str) -> str:
     """Wrap text in an ANSI colour when stdout is a terminal (no-op when piped/tested)."""
     return f"{_ANSI[c]}{text}{_ANSI['reset']}" if _USE_COLOR and c in _ANSI else text
 
+
+def plain(text: str) -> str:
+    """Strip ANSI colour codes — for reusing a coloured console hint in a Discord message."""
+    return _ANSI_RE.sub("", text)
+
 _BASE_COLUMNS = [
     ("name", "item", 20, "s"),
     ("buy_px", "buy", 8, ",d"),

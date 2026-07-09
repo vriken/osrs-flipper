@@ -569,3 +569,30 @@ def test_evaluate_pulls_marks_set_decant_unrated(tmp_path):
     Terminal._evaluate_pulls(stub, hr={139: {"avgHighPrice": 300, "avgLowPrice": 90}})
     assert j.con.execute("SELECT eval FROM recommendations").fetchone()[0] == "unrated"
     j.con.close()
+
+
+def test_transition_ping_carries_target_and_drops_false_alarms(monkeypatch):
+    # a flagged offer is re-checked against fresh prices: a real mispricing pings WITH the concrete
+    # re-quote target; a priced-right-but-slow offer downgrades to on-track and is NOT pinged.
+    o = Offer(slot=6, item_id=20997, is_buy=True, state="BUYING", qty=100, price=190, started_ms=1)
+    monkeypatch.setattr(term_mod.api, "mapping", lambda: [{"id": 20997, "name": "Twisted bow"}])
+    monkeypatch.setattr(term_mod.api, "latest", lambda: {})
+    monkeypatch.setattr(term_mod.api, "one_hour", lambda: {})
+    monkeypatch.setattr(term_mod.monitor, "review_offers", lambda *a, **k: [(o, "stale", 5.0, 0.1, 0.0)])
+    sent = []
+    monkeypatch.setattr(term_mod.alert, "notify", lambda c: sent.append(c) or True)
+
+    def stub(refine):
+        return types.SimpleNamespace(
+            _active_offers=lambda: [o], j=types.SimpleNamespace(cash=lambda: 1_000_000),
+            _seen_offers={(6, 20997, "BUY")}, _alerted={},
+            _sell_cut_context=lambda off, cash: {}, _refine_verdict=refine)
+
+    s1 = stub(lambda off, v, **k: ("stale", "         → re-quote: buy 900 / sell 950  (net 40/ea)"))
+    term_mod.Terminal._push_transition_pings(s1)
+    assert sent and "slot 6" in sent[0] and "re-quote: buy 900" in sent[0]   # actionable target in the ping
+
+    sent.clear()
+    s2 = stub(lambda off, v, **k: ("ontrack", ""))
+    term_mod.Terminal._push_transition_pings(s2)
+    assert sent == []                                                        # slow-but-fine → no false ping
