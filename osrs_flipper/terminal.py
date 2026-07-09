@@ -1392,7 +1392,7 @@ class Terminal:
         dash = self._render_go(echo=True, args=args)
         compact = _compact_status(dash)
         if self._auto_push and alert.bot_enabled() and compact:
-            self._status_msg_id = alert.set_status(compact, self._status_msg_id)
+            self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
             self._last_dash = compact
 
     def _push_transition_pings(self) -> None:
@@ -1438,7 +1438,7 @@ class Terminal:
             compact = _compact_status(self._render_go(echo=False))  # runs cmd_go → refreshes self._plan_chosen
             if compact and compact != self._last_dash:
                 if alert.bot_enabled():
-                    self._status_msg_id = alert.set_status(compact, self._status_msg_id)
+                    self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
                 self._last_dash = compact
             self._push_buy_opportunity()
         except Exception:  # noqa: BLE001 — a push failure must never break the REPL

@@ -87,3 +87,17 @@ def test_reprice_hint_targets_the_competitive_side():
     buy = Offer(slot=1, item_id=561, is_buy=True, state="BUYING", qty=10, price=100)
     assert "re-bid ~7,600" in monitor.reprice_hint(buy, {561: {"low": 7600, "high": 7900}})
     assert monitor.reprice_hint(sell, {}) == ""                  # no live book → no hint
+
+
+def test_repost_status_posts_fresh_and_deletes_previous(monkeypatch):
+    from osrs_flipper import alert
+    monkeypatch.setattr(alert, "bot_enabled", lambda: True)
+    deleted = []
+    monkeypatch.setattr(alert, "post_bot", lambda t: (True, "new-id"))
+    monkeypatch.setattr(alert, "delete_bot", lambda m: deleted.append(m) or True)
+    assert alert.repost_status("board", "old-id") == "new-id"    # fresh message → lands at the bottom
+    assert deleted == ["old-id"]                                 # previous status removed → nothing to scroll to
+    monkeypatch.setattr(alert, "post_bot", lambda t: (False, "HTTP 500"))
+    deleted.clear()
+    assert alert.repost_status("board", "old-id") == "old-id"    # post failed → keep the old one
+    assert deleted == []
