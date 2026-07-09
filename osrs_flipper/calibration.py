@@ -189,6 +189,32 @@ def calibrate_eta(rows: list[dict], *, prior: float = 1.0, k: int = 20) -> dict:
     return out
 
 
+def attribute(row: dict) -> str | None:
+    """Why an offer resolved the way it did — from its outcome and realized-vs-predicted fill time:
+    never_filled (spread too tight / adverse) · partial (volume/α overestimated) · slow (filled but ≫
+    predicted → ETA too optimistic) · fast (≪ predicted) · on_time. None if untimeable."""
+    status, filled_qty, qty = row.get("status"), row.get("filled_qty") or 0, row.get("qty") or 0
+    if status in ("expired", "cancelled") and filled_qty == 0:
+        return "never_filled"
+    if status == "partial" or (0 < filled_qty < qty):
+        return "partial"
+    pred, ts = row.get("pred_eta_h"), row.get("ts")
+    if status == "filled" and pred and pred > 0 and ts is not None and row.get("filled_ts"):
+        r = ((row["filled_ts"] - ts) / 3600.0) / pred
+        return "slow" if r > 1.5 else "fast" if r < 0.67 else "on_time"
+    return None
+
+
+def eta_attribution(rows: list[dict]) -> dict[str, int]:
+    """Count of resolved attempts by attribution reason — the 'why' summary for `calibrate`/`analyze`."""
+    out: dict[str, int] = {}
+    for r in rows:
+        reason = attribute(r)
+        if reason:
+            out[reason] = out.get(reason, 0) + 1
+    return out
+
+
 def eta_multiplier(cal: dict | None, price: float, volume: float, *, lo: float = 0.5, hi: float = 3.0) -> float:
     """Per-item ETA correction: the price×volume bucket's shrunk factor (else global, else 1.0), clamped.
     `>1` stretches the predicted fill time (this kind fills slower than modelled)."""

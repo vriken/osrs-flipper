@@ -271,8 +271,22 @@ class Terminal:
                 b = fill["buckets"].get(name)
                 if b:
                     print(f"    {name:>4} liquidity: measured ×{b['measured']:.2f} → ×{b['shrunk']:.2f}  (n={b['n']})")
-        print(f"  both β and the fill correction are AUTO-APPLIED to EV/ranking/prices (go/scan/port), "
-              f"refreshed every {config.CALIBRATE_EVERY_TRADES} resolved trades. config.BETA is just the prior.")
+        # fill-TIME (ETA) calibration + why offers resolve as they do
+        eta = calibration.calibrate_eta(rows)
+        if eta["global_measured"] is not None:
+            gm, g = eta["global_measured"], eta["global"]
+            verdict = "fills SLOWER than modelled" if g > 1.1 else "fills faster" if g < 0.9 else "well-calibrated"
+            print(f"  fill time: measured ×{gm:.2f} → applied ×{g:.2f}  ({verdict}, n={eta['n']}, shrunk→1.0)")
+            for name, b in sorted(eta["buckets"].items()):
+                print(f"    {name:>10}: measured ×{b['measured']:.2f} → ×{b['shrunk']:.2f}  (n={b['n']})")
+        reasons = calibration.eta_attribution(rows)
+        if reasons:
+            tot = sum(reasons.values())
+            parts = " · ".join(f"{k} {v} ({v / tot * 100:.0f}%)"
+                               for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
+            print(f"  why offers resolved: {parts}")
+        print(f"  β, fill-rate AND fill-time are AUTO-APPLIED to EV/ETA/ranking (go/scan/port), refreshed "
+              f"every {config.CALIBRATE_EVERY_TRADES} resolved trades. config.BETA is just the prior.")
 
     def cmd_port(self, args: list[str]) -> None:
         cash = int(self.j.cash()) or config.BANKROLL

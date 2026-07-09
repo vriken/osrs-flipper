@@ -112,3 +112,23 @@ def test_eta_multiplier_defaults_to_1_and_clamps():
     assert calibration.eta_multiplier({}, 100, 5000) == 1.0
     hot = {"buckets": {"cheap/med": {"shrunk": 99.0}}, "global": 99.0}
     assert calibration.eta_multiplier(hot, 100, 5000) == 3.0   # clamped to hi
+
+
+def test_attribution_classifies_the_miss_reason():
+    c = calibration
+    assert c.attribute({"status": "expired", "filled_qty": 0, "qty": 100}) == "never_filled"
+    assert c.attribute({"status": "cancelled", "filled_qty": 0, "qty": 100}) == "never_filled"
+    assert c.attribute({"status": "filled", "filled_qty": 40, "qty": 100}) == "partial"
+    assert c.attribute({"status": "filled", "filled_qty": 100, "qty": 100,
+                        "pred_eta_h": 1.0, "ts": 0, "filled_ts": 7200}) == "slow"    # 2h vs 1h
+    assert c.attribute({"status": "filled", "filled_qty": 100, "qty": 100,
+                        "pred_eta_h": 2.0, "ts": 0, "filled_ts": 1800}) == "fast"    # 0.5h vs 2h
+    assert c.attribute({"status": "filled", "filled_qty": 100, "qty": 100,
+                        "pred_eta_h": 1.0, "ts": 0, "filled_ts": 3600}) == "on_time"
+
+
+def test_eta_attribution_counts():
+    rows = [{"status": "expired", "filled_qty": 0, "qty": 100},
+            {"status": "expired", "filled_qty": 0, "qty": 100},
+            {"status": "filled", "filled_qty": 100, "qty": 100, "pred_eta_h": 1.0, "ts": 0, "filled_ts": 7200}]
+    assert calibration.eta_attribution(rows) == {"never_filled": 2, "slow": 1}
