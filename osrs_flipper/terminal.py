@@ -1396,28 +1396,39 @@ class Terminal:
             self._last_dash = compact
 
     def _push_transition_pings(self) -> None:
-        """Discrete Discord pings on real transitions — you PLACED an offer, or one now needs you
-        (collect / margin gone / stale). Deduped until the state clears. Offers-only (no journal)."""
+        """Event-driven Discord pings — fire ONLY when something newly needs action: you PLACED an offer,
+        or one now needs you (collect / margin gone / stale). Each is deduped until it clears, so you're
+        told once per occurrence, not on a schedule. Every flagged offer is re-checked against fresh prices
+        (the same refine the `go` dashboard uses): the ping carries the concrete re-quote/re-list TARGET,
+        and a priced-right-but-slow offer downgrades to on-track and is dropped rather than pinged. Runs on
+        the main thread, so the cost-basis journal reads for loss-aware sell advice are safe."""
         offers = self._active_offers()
         names = {r["id"]: r["name"] for r in api.mapping()}
-        lat = api.latest()
-        rows = monitor.review_offers(offers, api.one_hour(), lat, int(time.time() * 1000))
+        cash = int(self.j.cash()) or config.BANKROLL
+        rows = monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
         keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
         if self._seen_offers is not None and (placed := keys - self._seen_offers):
             lines = [f"placed {s} {names.get(iid, iid)} (slot {sl})" for (sl, iid, s) in placed]
             alert.notify("\U0001f4e5 offer placed:\n" + "\n".join(lines))
         self._seen_offers = keys
-        current = monitor.attention_events(rows)
+        # refine each flagged offer against fresh prices → an actionable target, and drop false alarms
+        # (priced-right-but-slow → on-track). "collect" needs no re-quote, so it's left as-is.
+        refined, hints = [], {}
+        for o, v, eh, eta, prog in rows:
+            if v in monitor.ATTENTION and v != "collect":
+                kw = self._sell_cut_context(o, cash) if not o.is_buy else {}
+                v, hint = self._refine_verdict(o, v, **kw)
+                if hint:
+                    hints[(o.slot, o.item_id)] = alert.plain(hint).strip()
+            refined.append((o, v, eh, eta, prog))
+        current = monitor.attention_events(refined)
         for k in [k for k in self._alerted if k not in current]:
             del self._alerted[k]  # cleared → re-arm
         new = monitor.diff_new(current, self._alerted)
         if new:
-            by_key = {(o.slot, o.item_id): o for o in offers}
-            lines = []
-            for ((slot, iid), v) in new:
-                o = by_key.get((slot, iid))
-                hint = f"  {monitor.reprice_hint(o, lat)}" if (o is not None and v == "stale") else ""
-                lines.append(f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}{hint}")
+            lines = [f"slot {slot}: {names.get(iid, iid)} — {monitor.ATTENTION[v]}"
+                     + (f"\n    {hints[(slot, iid)]}" if hints.get((slot, iid)) else "")
+                     for ((slot, iid), v) in new]
             if alert.notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
                 self._alerted.update(dict(new))
 
