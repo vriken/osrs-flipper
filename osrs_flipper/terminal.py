@@ -57,11 +57,12 @@ _OFFER_RE = re.compile(r"^(\d+)\s+(.+?)\s+(BUY|SELL)\b")
 
 
 def _compact_status(dash: str) -> str:
-    """Trim the full console dashboard to a phone-friendly Discord status: a terse cash/slots header, ONE
-    'needs you' line summarising the offers that want action (their per-offer columns and hint sub-lines
-    are dropped — the discrete pings already carry that detail), then the sell/decant/buy picks and NEXT.
-    On-track offers, the holdings line, table legends and calibration footnotes are all dropped."""
+    """Trim the full console dashboard to a phone-friendly Discord status: a terse cash/slots header, a
+    'needs you' block (each flagged offer with its SLOT and the concrete re-quote/re-list target pulled
+    from the offer's own hint line), then the sell/decant/buy picks and NEXT. On-track offers, the
+    holdings line, table legends and calibration footnotes are all dropped."""
     header, attention, body = "", [], []
+    pending = None  # index of the attention entry awaiting its "→ …" hint line (the one right below it)
     for ln in dash.splitlines():
         s = alert.plain(ln).strip()  # strip ANSI FIRST — in the REPL stdout is a tty, so hint lines are
         if not s:                    # colour-wrapped and a raw `startswith("→")` would miss them
@@ -69,19 +70,31 @@ def _compact_status(dash: str) -> str:
         if "===" in s:                                        # header → one terse line
             header = (s.strip("= ").replace("cash ", "").replace(" slots free", " free")
                       .removesuffix(" day").removesuffix(" — flips cycle").strip())
+            pending = None
             continue
         m = _OFFER_RE.match(s)
         if m:                                                 # an active-offer line
             emoji = next((e for e in _VERDICT_WORD if e in s), None)
-            if emoji:                                         # needs action → collapse to one short tag
-                attention.append(f"slot {m.group(1)} {m.group(2).strip()} ({_VERDICT_WORD[emoji]})")
-            continue                                          # on-track / open offers: drop from status
+            if emoji:                                         # needs action → [slot, name, verdict, target]
+                attention.append([m.group(1), m.group(2).strip(), _VERDICT_WORD[emoji], ""])
+                pending = len(attention) - 1
+            else:
+                pending = None                                # on-track/open → drop its following hint
+            continue
+        if s.startswith("→"):                                 # the flagged offer's hint → attach the target
+            if pending is not None:
+                attention[pending][3] = s[1:].split("  (")[0].split(";")[0].strip()[:80]  # actionable core
+                pending = None
+            continue                                          # always drop the raw hint line
         if s.startswith(_STATUS_DROP_STARTS) or any(t in s for t in _STATUS_DROP_CONTAINS):
             continue
         body.append(s)
-    lines = ([header] if header else []) \
-        + (["⚠ needs you: " + " · ".join(attention)] if attention else []) \
-        + body
+        pending = None
+    lines = [header] if header else []
+    if attention:
+        lines.append("⚠ needs you:")
+        lines += [f"  slot {slot} {name} — {tgt or verdict}" for slot, name, verdict, tgt in attention]
+    lines += body
     return "\n".join(lines)
 
 

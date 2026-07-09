@@ -515,12 +515,13 @@ def test_compact_status_keeps_actions_drops_noise():
     ])
     out = _compact_status(dash)
     assert "1,274,300" in out and "2/8 free" in out                   # terse header (no "cash ", no "===")
-    assert "⚠ needs you:" in out and "White lily seed (margin gone)" in out   # one compact attention line
+    assert "⚠ needs you:" in out and "slot 2 White lily seed" in out  # attention entry with its slot
+    assert "no spread to buy into now" in out                         # the actionable target, from its → hint
     assert "Adamant dart tip" in out and "NEXT: place buy" in out     # pick + next kept
     for noise in ("on track", "Granite boots", "holdings:", "auto-calibrated", "→ no spread",
-                  "# type", "best-case", "MARGIN GONE — cancel"):     # verbose verdict tail gone too
+                  "# type", "best-case", "(margin gone)"):            # raw hint arrow + verdict-only tag gone
         assert noise not in out
-    assert len(out.splitlines()) <= 4                                 # header + needs-you + pick + NEXT
+    assert len(out.splitlines()) <= 5                                 # header + needs-you hdr + 1 offer + pick + NEXT
 
 
 # --- recommendation-ledger glue (previously untested: Terminal was never instantiated for these) -----
