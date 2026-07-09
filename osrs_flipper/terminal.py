@@ -149,6 +149,7 @@ class Terminal:
         self._alerted: dict = {}       # deduped attention pings (collect/margin/stale) until they clear
         self._seen_offers: set | None = None      # for placed / slot-freed transition detection
         self._pinged_buy: tuple | None = None     # last buy-opportunity ping's picks (dedupe until they change)
+        self._banked: dict = {}                   # slow partial buys already pinged "bank it" (until cleared)
         self._plan_chosen: list = []              # picks from the last `go` (for the buy-opportunity ping)
         self._plan_buy_slots = 0
         # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
@@ -1407,6 +1408,20 @@ class Terminal:
             self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
             self._last_dash = compact
 
+    def _bank_partial(self, o) -> tuple[int, int, int] | None:
+        """For a partially-filled BUY, the profit of banking the already-filled units at the competitive
+        sell RIGHT NOW: (sell_px, net/unit, total gp). None if not a partial buy or not profitable. Uses
+        the same optimal_quote as _refine_verdict so the ping and the terminal hint show identical numbers."""
+        if not (o.is_buy and 0 < o.filled < o.qty and o.price > 0):
+            return None
+        from .quote import optimal_quote
+        from .tax import post_tax_received
+        q = optimal_quote(o.item_id, max(1, o.qty - o.filled), horizon_h=1.0)
+        if not q:
+            return None
+        net_now = post_tax_received(q.sell_px, item_id=o.item_id) - o.price
+        return (int(q.sell_px), int(net_now), int(net_now * o.filled)) if net_now > 0 else None
+
     def _push_transition_pings(self) -> None:
         """Event-driven Discord pings — fire ONLY when something newly needs action: you PLACED an offer,
         or one now needs you (collect / margin gone / stale). Each is deduped until it clears, so you're
@@ -1415,23 +1430,36 @@ class Terminal:
         and a priced-right-but-slow offer downgrades to on-track and is dropped rather than pinged. Runs on
         the main thread, so the cost-basis journal reads for loss-aware sell advice are safe."""
         offers = self._active_offers()
-        names = {r["id"]: r["name"] for r in api.mapping()}
+        mp = {r["id"]: r for r in api.mapping()}
+        names = {i: r["name"] for i, r in mp.items()}
         cash = int(self.j.cash()) or config.BANKROLL
-        rows = monitor.review_offers(offers, api.one_hour(), api.latest(), int(time.time() * 1000))
+        lat = api.latest()
+        rows = monitor.review_offers(offers, api.one_hour(), lat, int(time.time() * 1000))
         keys = {(o.slot, o.item_id, "BUY" if o.is_buy else "SELL") for o in offers}
         if self._seen_offers is not None and (placed := keys - self._seen_offers):
             lines = [f"placed {s} {names.get(iid, iid)} (slot {sl})" for (sl, iid, s) in placed]
             alert.notify("\U0001f4e5 offer placed:\n" + "\n".join(lines))
         self._seen_offers = keys
-        # refine each flagged offer against fresh prices → an actionable target, and drop false alarms
-        # (priced-right-but-slow → on-track). "collect" needs no re-quote, so it's left as-is.
-        refined, hints = [], {}
+        bids = {p.item_id: (lat.get(p.item_id) or {}).get("low") for p in self.j.positions()}
+        bank_min = int(self.j.equity(bids)) * config.BANK_PARTIAL_MIN_FRAC  # "material" = frac of net worth
+        # refine each flagged offer against fresh prices → an actionable target, drop false alarms
+        # (priced-right-but-slow → on-track); collect out (no re-quote). Also collect slow partial buys.
+        refined, hints, banks = [], {}, {}
         for o, v, eh, eta, prog in rows:
+            raw_v = v
             if v in monitor.ATTENTION and v != "collect":
                 kw = self._sell_cut_context(o, cash) if not o.is_buy else {}
                 v, hint = self._refine_verdict(o, v, **kw)
                 if hint:
                     hints[(o.slot, o.item_id)] = alert.plain(hint).strip()
+            # bank-a-partial: a partial buy where waiting is pointless — either it's merely SLOW (stale/
+            # margin already carry the bank hint via the needs-you ping), or it HIT the 4h buy limit
+            # (filled ≥ the whole limit with units still outstanding → the rest is blocked ~4h, a
+            # certainty, not a heuristic). Ping when banking the filled units clears the material threshold.
+            lim = int(mp.get(o.item_id, {}).get("limit") or 0)
+            limit_hit = bool(lim and 0 < lim <= o.filled < o.qty)
+            if (raw_v == "slow" or limit_hit) and (bp := self._bank_partial(o)) and bp[2] >= bank_min:
+                banks[(o.slot, o.item_id)] = (o, bp, limit_hit)
             refined.append((o, v, eh, eta, prog))
         current = monitor.attention_events(refined)
         for k in [k for k in self._alerted if k not in current]:
@@ -1443,6 +1471,19 @@ class Terminal:
                      for ((slot, iid), v) in new]
             if alert.notify("\U0001f514 osrs-flipper needs you:\n" + "\n".join(lines)):
                 self._alerted.update(dict(new))
+        # bank-a-partial ping, deduped until it clears (fills / cancels / no longer material)
+        for k in [k for k in self._banked if k not in banks]:
+            del self._banked[k]
+        fresh = [k for k in banks if k not in self._banked]
+        if fresh:
+            lines = []
+            for k in fresh:
+                o, (sell_px, net_now, gp), limit_hit = banks[k]
+                note = " (buy limit hit — rest blocked ~4h)" if limit_hit else ""
+                lines.append(f"slot {o.slot}: {names.get(o.item_id, o.item_id)} — bank {o.filled:,} filled "
+                             f"@ {sell_px:,} (net {net_now:,}/ea ≈ {gp:,}) & free the slot{note}")
+            if alert.notify("\U0001f4b0 bank a partial fill?\n" + "\n".join(lines)):
+                self._banked.update({k: True for k in fresh})
 
     def _auto_tick(self) -> None:
         """Idle tick (main thread): keep the journal fresh, ping real transitions + buy opportunities, and
