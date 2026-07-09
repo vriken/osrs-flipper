@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS blacklist (item_id INTEGER PRIMARY KEY, name TEXT);
 CREATE TABLE IF NOT EXISTS offer_events (
     attempt_id TEXT, ts BIGINT, event TEXT, qty BIGINT, price BIGINT, note TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS offer_seen (
     slot INTEGER, item_id INTEGER, placed_at BIGINT, observed BOOLEAN,
     is_buy BOOLEAN, qty BIGINT, price BIGINT, filled BIGINT,
@@ -102,6 +103,8 @@ class Journal:
         self.con.execute("ALTER TABLE predictions ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'quote'")
         # resolved_ts: when an attempt reached a terminal state (fill collected / cancelled) — for fill-time
         self.con.execute("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS resolved_ts BIGINT")
+        # device: which install produced a row — for cross-machine merge (imported rows tagged with origin)
+        self.con.execute("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS device TEXT")
         self._repair_phantom_realized()
 
     def _repair_phantom_realized(self) -> int:
@@ -626,6 +629,58 @@ class Journal:
             f"SELECT {','.join(cols)} FROM attempts WHERE status IN ('filled','partial','expired','cancelled')"
         ).fetchall()
         return [dict(zip(cols, r, strict=True)) for r in rows]
+
+    # --- cross-machine merge (no server): stable device id + export/import of the raw learning data ----
+    _RESOLVED = ("filled", "partial", "expired", "cancelled")
+    _ATTEMPT_COLS = ["attempt_id", "ts", "item_id", "name", "side", "qty", "limit_px", "horizon_h",
+                     "avg_low", "avg_high", "spread", "vol_1h_binding", "pred_p_fill", "pred_eta_h",
+                     "pred_ev", "filled_qty", "fill_px", "filled_ts", "status", "resolved_ts"]
+
+    def device_id(self) -> str:
+        """Stable per-install id (generated once) so merged rows carry their origin machine."""
+        r = self.con.execute("SELECT value FROM settings WHERE key='device_id'").fetchone()
+        if r:
+            return r[0]
+        did = uuid.uuid4().hex[:12]
+        self.con.execute("INSERT INTO settings VALUES ('device_id', ?)", [did])
+        return did
+
+    def export_learning(self) -> dict[str, Any]:
+        """Portable snapshot for cross-machine merge: this device's resolved attempts (the calibration
+        data) + the never-recommend blacklist. Calibration is DERIVED, so merging raw attempts on the
+        other machine and recomputing yields one unified learner. offer_events (audit) aren't synced."""
+        rows = self.con.execute(
+            f"SELECT {','.join(self._ATTEMPT_COLS)} FROM attempts WHERE status IN {self._RESOLVED}"
+        ).fetchall()
+        return {
+            "device": self.device_id(),
+            "attempts": [dict(zip(self._ATTEMPT_COLS, r, strict=True)) for r in rows],
+            "blacklist": [{"item_id": i, "name": n} for i, n in self.blacklist_items()],
+        }
+
+    def import_learning(self, payload: dict[str, Any]) -> tuple[int, int]:
+        """Merge another device's export. Imported attempt ids are namespaced by the source device so they
+        can never collide with local ids; a pre-check makes re-imports idempotent. Blacklist is unioned.
+        Skips our own export. Returns (attempts_added, blacklist_added)."""
+        src = payload.get("device") or "unknown"
+        if src == self.device_id():
+            return 0, 0
+        placeholders = ",".join("?" * (len(self._ATTEMPT_COLS) + 1))  # + device
+        na = 0
+        for a in payload.get("attempts") or []:
+            aid = f"{src}:{a['attempt_id']}"
+            if self.con.execute("SELECT 1 FROM attempts WHERE attempt_id=?", [aid]).fetchone():
+                continue
+            vals = [aid] + [a.get(c) for c in self._ATTEMPT_COLS[1:]] + [src]
+            self.con.execute(
+                f"INSERT INTO attempts ({','.join(self._ATTEMPT_COLS)},device) VALUES ({placeholders})", vals)
+            na += 1
+        nb = 0
+        for b in payload.get("blacklist") or []:
+            if not self.con.execute("SELECT 1 FROM blacklist WHERE item_id=?", [b["item_id"]]).fetchone():
+                self.blacklist_add(int(b["item_id"]), b.get("name") or str(b["item_id"]))
+                nb += 1
+        return na, nb
 
     def recent(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self.con.execute(

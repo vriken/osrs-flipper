@@ -200,6 +200,22 @@ def test_unresolved_attempts_covers_open_and_partial(j):
     assert a_open in ids and a_part in ids and a_done not in ids
 
 
+def test_export_import_merges_learning_across_devices(tmp_path):
+    a = Journal(path=str(tmp_path / "a.duckdb"))
+    b = Journal(path=str(tmp_path / "b.duckdb"))
+    a.backfill_attempt("t1", 2, "Item", "BUY", 100, 50, placed_ts=0, resolved_ts=3600,
+                       status="filled", pred_eta_h=1.0, avg_low=48, avg_high=52, vol_1h_binding=5000)
+    a.blacklist_add(999, "Junk")
+    payload = a.export_learning()
+    assert b.import_learning(payload) == (1, 1)          # A's attempt + blacklist land on B
+    assert 999 in b.blacklist_ids() and len(b.calibration_rows()) == 1
+    assert b.import_learning(payload) == (0, 0)          # idempotent re-import
+    assert a.import_learning(payload) == (0, 0)          # importing your own export is a no-op
+    assert a.device_id() != b.device_id()                # distinct per-install ids
+    a.con.close()
+    b.con.close()
+
+
 def test_backfill_attempt_is_idempotent_and_feeds_eta_calibration(j):
     from osrs_flipper import calibration
     args = ("u1", 2, "Item", "BUY", 100, 50)
