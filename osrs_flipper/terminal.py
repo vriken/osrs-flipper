@@ -1275,7 +1275,7 @@ class Terminal:
 
     def _start_alerts(self) -> bool:
         """Spawn the daemon watcher (read-only: RuneLite + API, never the journal → no DB lock)."""
-        if not config.DISCORD_WEBHOOK_URL or self._alerts_running():
+        if not (config.DISCORD_WEBHOOK_URL or alert.bot_enabled()) or self._alerts_running():
             return self._alerts_running()
         self._alert_stop.clear()
         self._alert_thread = threading.Thread(target=monitor.watch_loop, args=(self._alert_stop,), daemon=True)
@@ -1290,23 +1290,28 @@ class Terminal:
         """Background Discord alerts when an offer needs you (filled/margin-gone/stale).
           alerts           status      alerts on|off    toggle      alerts test    send a test ping"""
         sub = args[0].lower() if args else "status"
+        chan = "bot" if alert.bot_enabled() else "webhook" if config.DISCORD_WEBHOOK_URL else None
         if sub == "on":
-            if not config.DISCORD_WEBHOOK_URL:
-                print("  no webhook — set OSRS_FLIPPER_DISCORD_WEBHOOK, then `reload`")
+            if not chan:
+                print("  no Discord channel — set OSRS_FLIPPER_DISCORD_BOT_TOKEN + _CHANNEL_ID "
+                      "(or OSRS_FLIPPER_DISCORD_WEBHOOK), then `reload`")
             else:
                 self._start_alerts()
-                print(f"  alerts ON — polling RuneLite every {config.ALERT_POLL_S}s, pushing to Discord")
+                print(f"  alerts ON — polling RuneLite every {config.ALERT_POLL_S}s, pushing via {chan}")
         elif sub == "off":
             self._stop_alerts()
             print("  alerts OFF")
         elif sub == "test":
-            ok, detail = alert.post_discord("\U0001f514 osrs-flipper test alert — you're wired up.")
-            print(f"  discord test: {detail}")
+            if not chan:
+                print("  no Discord channel configured — nothing to test")
+            else:
+                ok = alert.notify("\U0001f514 osrs-flipper test alert — you're wired up.")
+                print(f"  {chan} test: {'sent ✓' if ok else 'FAILED — check token/channel/permissions'}")
         else:
             state = "ON" if self._alerts_running() else "OFF"
-            hook = "configured" if config.DISCORD_WEBHOOK_URL else "NOT set (OSRS_FLIPPER_DISCORD_WEBHOOK)"
-            print(f"  alerts {state} · webhook {hook} · poll {config.ALERT_POLL_S}s")
-            print("  `alerts on|off` to toggle · `alerts test` to verify the webhook")
+            print(f"  alerts {state} · channel: {chan or 'NONE (set bot token+channel or a webhook)'} · "
+                  f"poll {config.ALERT_POLL_S}s")
+            print("  `alerts on|off` to toggle · `alerts test` to verify · margin-gone/stale/collect are pushed")
 
     def cmd_overnight(self, args: list[str]) -> None:
         """Overnight plan. No arg → diversified buys across all free slots; <item> → one big buy."""

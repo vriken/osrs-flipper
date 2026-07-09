@@ -259,3 +259,48 @@ def post_discord(content: str, webhook_url: str | None = None) -> tuple[bool, st
 def to_discord(content: str, webhook_url: str | None = None) -> bool:
     """Back-compat boolean wrapper around post_discord (True on success)."""
     return post_discord(content, webhook_url)[0]
+
+
+# --- Discord BOT push (posts as your bot; can edit a live status message) --------------------------
+_DISCORD_API = "https://discord.com/api/v10"
+
+
+def bot_enabled() -> bool:
+    return bool(config.DISCORD_BOT_TOKEN and config.DISCORD_CHANNEL_ID)
+
+
+def _fenced(content: str) -> str:
+    return f"```\n{_ANSI_RE.sub('', content)[:1900]}\n```"
+
+
+def post_bot(content: str) -> tuple[bool, str]:
+    """Post via the Discord bot REST API (as your bot). Returns (ok, message_id-or-detail)."""
+    if not bot_enabled():
+        return False, "no bot configured — set OSRS_FLIPPER_DISCORD_BOT_TOKEN + _CHANNEL_ID"
+    try:
+        r = get_session().post(
+            f"{_DISCORD_API}/channels/{config.DISCORD_CHANNEL_ID}/messages",
+            headers={"Authorization": f"Bot {config.DISCORD_BOT_TOKEN}"},
+            json={"content": _fenced(content)}, timeout=config.HTTP_TIMEOUT)
+        return (True, str(r.json().get("id"))) if r.ok else (False, f"HTTP {r.status_code}: {r.text[:120]}")
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def edit_bot(message_id: str, content: str) -> bool:
+    """Edit an existing bot message (the live status message) — how we update without spamming."""
+    if not (bot_enabled() and message_id):
+        return False
+    try:
+        r = get_session().patch(
+            f"{_DISCORD_API}/channels/{config.DISCORD_CHANNEL_ID}/messages/{message_id}",
+            headers={"Authorization": f"Bot {config.DISCORD_BOT_TOKEN}"},
+            json={"content": _fenced(content)}, timeout=config.HTTP_TIMEOUT)
+        return r.ok
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def notify(content: str) -> bool:
+    """Push a discrete alert — via the bot if configured, else the webhook."""
+    return (post_bot(content)[0] if bot_enabled() else post_discord(content)[0])

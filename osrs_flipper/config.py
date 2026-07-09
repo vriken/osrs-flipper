@@ -343,7 +343,10 @@ CUT_ALT_MAX_ETA_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MAX_ETA_H", 1.0))
 CUT_ALT_MIN_ROI_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MIN_ROI_H", 0.03))   # ≥3% ROI per hour
 
 # --- Output ------------------------------------------------------------------
-DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional
+DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional (one-way, one channel)
+# Bot push (posts AS your bot, can edit a live status message): set both. Preferred over the webhook.
+DISCORD_BOT_TOKEN = os.environ.get("OSRS_FLIPPER_DISCORD_BOT_TOKEN")
+DISCORD_CHANNEL_ID = os.environ.get("OSRS_FLIPPER_DISCORD_CHANNEL_ID")
 # Background attention monitor: how often to poll RuneLite for offers that need you
 # (filled → collect, margin gone, stale). Pushes to Discord only on NEW events (de-duped).
 ALERT_POLL_S = int(os.environ.get("OSRS_FLIPPER_ALERT_POLL_S", 60))
