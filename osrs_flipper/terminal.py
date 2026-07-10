@@ -2247,7 +2247,8 @@ class Terminal:
 
     def cmd_progress(self, args: list[str]) -> None:
         """Net-worth progress chart: realized history + live (marked-to-market) equity, projected
-        to 10M/100M at a growth rate re-fit from your own trade history. Saves + opens a PNG.
+        to 10M/100M by a Monte-Carlo simulation whose rate/vol are fit from your ACTIVE trade time
+        (idle gaps excluded, so days away don't dilute the rate). Saves + opens a PNG.
 
         History source: RuneLite's authoritative completed fills, replayed on an avg-cost basis — so it
         works for a pure auto-sync workflow (whose manual `ledger` is empty). Falls back to the typed
@@ -2271,19 +2272,25 @@ class Terminal:
         bids = {p.item_id: lat.get(p.item_id, {}).get("low") for p in self.j.positions()}
         equity_now = self.j.equity(bids) + tied
         initial, times, nw = progress.build_history(rows, self.j.cash() + tied)
-        rate, span_days = progress.fit_daily_rate(rows, initial)
+        wall_days = (rows[-1][0] - rows[0][0]) / 86400
+        rate, vol, active_days = progress.fit_growth(rows, initial)  # per ACTIVE day (idle gaps excluded)
+        paths = progress.simulate_paths(equity_now, rate, vol, config.MC_HORIZON_DAYS) if rate else None
         out = "/tmp/osrs_progress.png"
         if not progress.render(out, initial=initial, times=times, networth=nw, equity_now=equity_now,
-                               daily_rate=rate, span_days=span_days):
+                               span_days=wall_days, active_days=active_days, paths=paths,
+                               daily_rate=rate, daily_vol=vol):
             print("  matplotlib not installed — run `pip install matplotlib`, then `reload`")
             return
-        print(f"  realized +{nw[-1] - initial:,.0f} over {span_days * 24:.1f}h · "
+        print(f"  realized +{nw[-1] - initial:,.0f} over {wall_days * 24:.1f}h ({active_days:.1f}d active) · "
               f"live equity {equity_now:,.0f} (unrealised {equity_now - nw[-1]:+,.0f})")
-        if rate:
+        if paths is not None:
             for tgt, lbl in ((10e6, "10M"), (100e6, "100M")):
-                d = progress.eta_days(equity_now, tgt, rate)
-                if d:
-                    print(f"  {lbl}: ~{d:.0f} days at the fitted {rate:.1%}/day (optimistic — decays at scale)")
+                cs = progress.crossing_stats(paths, tgt)
+                if cs["prob"] > 0:
+                    print(f"  {lbl}: {cs['prob'] * 100:.0f}% reach · median ~{cs['median']:.0f}d active "
+                          f"(10–90%: {cs['p10']:.0f}–{cs['p90']:.0f}d)")
+                else:
+                    print(f"  {lbl}: not reached within {config.MC_HORIZON_DAYS}d active in the simulation")
         print(f"  saved {out}")
         self._open(out)
 

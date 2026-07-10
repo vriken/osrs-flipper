@@ -408,6 +408,20 @@ REPRICE_BIG_MOVE = float(os.environ.get("OSRS_FLIPPER_REPRICE_BIG_MOVE", 0.08)) 
 CUT_ALT_MAX_ETA_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MAX_ETA_H", 1.0))    # "asap" = fills ≤ 1h
 CUT_ALT_MIN_ROI_H = float(os.environ.get("OSRS_FLIPPER_CUT_ALT_MIN_ROI_H", 0.03))   # ≥3% ROI per hour
 
+# --- Progress chart / projection (see progress.py) ---------------------------
+# Idle days must not dilute the compounding rate: inter-trade gaps longer than this are clamped (you
+# weren't trading, nothing was growing), so growth is measured per ACTIVE day, not per wall-clock day.
+PROGRESS_IDLE_GAP_MAX_H = float(os.environ.get("OSRS_FLIPPER_PROGRESS_IDLE_GAP_MAX_H", 24))
+# Monte-Carlo projection: path count, a fixed seed (so the chart is stable between renders), the daily-
+# return volatility used when there's too little history to measure it (as a fraction of the fitted
+# rate), the net-worth pivot where drift starts decaying (the S-curve — liquidity/buy-limits bite at
+# scale), and the forward horizon in active days.
+MC_PATHS = int(os.environ.get("OSRS_FLIPPER_MC_PATHS", 2000))
+MC_SEED = int(os.environ.get("OSRS_FLIPPER_MC_SEED", 7))
+MC_DEFAULT_CV = float(os.environ.get("OSRS_FLIPPER_MC_DEFAULT_CV", 0.6))
+MC_DECAY_PIVOT = int(os.environ.get("OSRS_FLIPPER_MC_DECAY_PIVOT", 20_000_000))
+MC_HORIZON_DAYS = int(os.environ.get("OSRS_FLIPPER_MC_HORIZON_DAYS", 180))
+
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional (one-way, one channel)
 # Bot push (posts AS your bot, can edit a live status message): set both. Preferred over the webhook.
