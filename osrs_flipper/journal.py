@@ -163,6 +163,15 @@ class Journal:
     def _adjust_cash(self, delta: float) -> None:
         self.set_cash(self.cash() + delta)
 
+    def get_meta(self, key: str, default: float | None = None) -> float | None:
+        """Read a scalar from the key/value meta table (e.g. the persisted Sharpe baseline)."""
+        row = self.con.execute("SELECT value FROM meta WHERE key=?", [key]).fetchone()
+        return row[0] if row else default
+
+    def set_meta(self, key: str, value: float) -> None:
+        """Persist a scalar to the meta table (survives REPL restarts)."""
+        self.con.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", [key, float(value)])
+
     # --- positions -----------------------------------------------------------
     def position(self, item_id: int) -> Position | None:
         r = self.con.execute("SELECT item_id,name,qty,avg_cost FROM positions WHERE item_id=?",

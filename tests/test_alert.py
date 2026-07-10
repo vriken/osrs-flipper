@@ -45,3 +45,17 @@ def test_idle_cash_triggers_warning():
 def test_empty_or_no_bankroll_returns_blank():
     assert format_portfolio_summary(pd.DataFrame(), 100_000) == ""
     assert format_portfolio_summary(_df([{"capital_deployed": 1, "exp_gp_cycle_adj": 1}]), 0) == ""
+
+
+# --- buy-ceiling hint: headroom vs thin-flip (regression: ceiling must never render below the buy) ----
+
+def test_ceiling_hint_headroom_thin_and_absent():
+    import types
+
+    from osrs_flipper.alert import _ceiling_hint
+    headroom = types.SimpleNamespace(buy_px=2510, max_buy=2560)
+    thin = types.SimpleNamespace(buy_px=815, max_buy=805)      # recommended buy already above the floor
+    absent = types.SimpleNamespace(buy_px=100, max_buy=0)
+    assert _ceiling_hint(headroom) == " (≤2,560)"
+    assert "≤" not in _ceiling_hint(thin) and "thin" in _ceiling_hint(thin)   # never a below-buy ceiling
+    assert _ceiling_hint(absent) == ""

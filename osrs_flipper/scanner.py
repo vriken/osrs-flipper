@@ -67,15 +67,28 @@ def _composite(gp_cycle: float, fill_eta_h: float | None, time_weight: float,
     return 0.0  # can't estimate fill time and time matters → unrankable
 
 
-def _variance_tilt(p_complete: float) -> float:
+def _variance_tilt(p_complete: float, lam: float | None = None) -> float:
     """Optional variance-aversion multiplier on the ranking score: favour reliable-completion flips (a
     near-certain small gain compounds a bond faster than a high-variance gamble). Returns p_complete^λ,
-    so λ = config.VARIANCE_AVERSION = 0 (default) is a no-op. Overlaps the hung-leg / shrink risk terms
-    on purpose — a blunt global dial on top. Applied to the SCORE only, never to the EV estimate."""
-    lam = config.VARIANCE_AVERSION
+    so λ = 0 is a no-op. λ defaults to config.VARIANCE_AVERSION but is set ADAPTIVELY by the caller
+    (higher as competition rises — see objective.py). Overlaps the hung-leg / shrink risk terms on
+    purpose — a blunt global dial on top. Applied to the SCORE only, never to the EV estimate."""
+    lam = config.VARIANCE_AVERSION if lam is None else lam
     if not lam:
         return 1.0
     return max(0.0, float(p_complete)) ** lam
+
+
+def _crowding_tilt(turnover_1h: float | None) -> float:
+    """Competition tilt on the ranking SCORE (never the EV): reward uncrowded niches, penalise the
+    high-turnover staples every bot races. crowding c = turnover/(turnover+PIVOT) ∈ [0,1); the tilt is
+    1 + CROWDING_TILT·(1−2c), so it's >1 below the pivot (quiet niche), 1 at it, <1 above (crowded).
+    Floored just above 0 so a mega-liquid staple is de-emphasised, never zeroed. Gain 0 = no-op."""
+    g = config.CROWDING_TILT
+    if not g or not turnover_1h or turnover_1h <= 0:
+        return 1.0
+    c = turnover_1h / (turnover_1h + config.CROWDING_PIVOT)
+    return max(0.1, 1.0 + g * (1.0 - 2.0 * c))
 
 
 def _shrink(scores: list[float], reliabilities: list[float]) -> list[float]:
@@ -133,6 +146,7 @@ def scan(
     net_worth: int | None = None,
     cal_eta: dict | None = None,
     impact_cal: dict | None = None,
+    variance_aversion: float | None = None,
 ) -> pd.DataFrame:
     """Return the top ranked flips by the mode-weighted composite score.
 
@@ -192,8 +206,11 @@ def scan(
     roi_weight = _stack_roi_weight(mode, net_worth if net_worth is not None else bankroll)
     df["score"] = [_composite(c, e, time_weight, margin_pct=m, roi_weight=roi_weight)
                    for c, e, m in zip(df[base_col], df["fill_eta_h"], df["margin_pct"], strict=False)]
-    if config.VARIANCE_AVERSION:  # optional risk-averse dial: favour reliable-completion flips
-        df["score"] = [s * _variance_tilt(p) for s, p in zip(df["score"], df["p_complete"], strict=False)]
+    lam = config.VARIANCE_AVERSION if variance_aversion is None else variance_aversion
+    if lam:  # variance-aversion dial (adaptive with competition): favour reliable-completion flips
+        df["score"] = [s * _variance_tilt(p, lam) for s, p in zip(df["score"], df["p_complete"], strict=False)]
+    if config.CROWDING_TILT:  # strategic dial: favour uncrowded niches over bot-raced staples
+        df["score"] = [s * _crowding_tilt(t) for s, t in zip(df["score"], df["turnover_1h"], strict=False)]
     df = df[df["score"] > 0]
     if df.empty:
         return df
@@ -204,7 +221,7 @@ def scan(
         return _buyable_head(df, top)  # snapshot path still skips pumps/knives (deep path does too)
 
     out = _apply_persistence(df, candidates or config.PERSIST_CANDIDATES, mode, fill_cal, edges, roi_weight,
-                             impact_k=impact_k)
+                             impact_k=impact_k, variance_aversion=lam)
     if min_gp and not out.empty:
         out = out[out["exp_gp_cycle_adj"] >= min_gp]  # drop flips too small to be worth a slot
     return out.head(top).reset_index(drop=True)
@@ -212,7 +229,8 @@ def scan(
 
 def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
                        fill_cal: dict | None = None, edges: dict | None = None,
-                       roi_weight: float | None = None, impact_k: float | None = None) -> pd.DataFrame:
+                       roi_weight: float | None = None, impact_k: float | None = None,
+                       variance_aversion: float | None = None) -> pd.DataFrame:
     """Deep-check the top snapshot candidates: re-price each with the quote optimiser (one
     source of truth — price-specific fills), then shrink the scores against the curse.
 
@@ -262,7 +280,8 @@ def _apply_persistence(df: pd.DataFrame, candidates: int, mode: str,
             "hung_mult": hung,
             "reliab_uptime": rel["uptime"] if rel else None,
             "reliab_gone_frac": rel["gone_frac"] if rel else None,
-            "raw_score": q.ev / horizon * mult * _variance_tilt(q.p_round) * _roi_mult(
+            "raw_score": q.ev / horizon * mult * _variance_tilt(q.p_round, variance_aversion)
+            * _crowding_tilt(row.get("turnover_1h")) * _roi_mult(
                 q.net_unit / q.buy_px if q.buy_px else None,
                 _mode_roi_weight(mode) if roi_weight is None else roi_weight),
         })
@@ -360,7 +379,8 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
                     limit_used: dict[int, int] | None = None, net_worth: int | None = None,
                     fill_cal: dict | None = None, edges: dict | None = None,
                     beta: float | None = None, cal_eta: dict | None = None,
-                    impact_cal: dict | None = None) -> tuple[list[dict], float]:
+                    impact_cal: dict | None = None,
+                    variance_aversion: float | None = None) -> tuple[list[dict], float]:
     """Two-tier daytime capital deployment (the night plan lives in `overnight`):
       ACTIVE  — one diversified patient ~2h flip per free slot (balanced horizon), capped by
                 fast-fill liquidity — what you work in your slots right now and cycle.
@@ -378,7 +398,7 @@ def build_portfolio(*, bankroll: int, held_ids=(), free_slots: int, members: boo
     modes = dict.fromkeys([*roles, "balanced"])
     rankings = {m: scan(mode=m, bankroll=bankroll, members=members, top=40, limit_used=limit_used,
                         fill_cal=fill_cal, edges=edges, beta=beta, net_worth=net_worth, cal_eta=cal_eta,
-                        impact_cal=impact_cal)
+                        impact_cal=impact_cal, variance_aversion=variance_aversion)
                 for m in modes}
     # a flip must clear the slot's opportunity cost to be worth committing a slot + the clicks —
     # derived live from net worth and the ROI the market is paying (see slot_worth_floor).

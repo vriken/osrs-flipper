@@ -322,6 +322,43 @@ MAX_ALLOC_FRAC = float(os.environ.get("OSRS_FLIPPER_MAX_ALLOC_FRAC", 0.5))
 # price specific risks; this is a global dial on top for a risk-averse grind. Try ~0.5–1.0 to enable.
 VARIANCE_AVERSION = float(os.environ.get("OSRS_FLIPPER_VARIANCE_AVERSION", 0.0))
 
+# Adaptive objective (see objective.py). The ranking objective is gp/hour while competition is stable,
+# and tilts toward variance-penalised gp/hour as competition ARRIVES — detected from a RISE in our OWN
+# realized Sharpe (per active day) above its slow trailing baseline, NOT its absolute level (a high
+# Sharpe at a small stack just means we're good; a rise vs baseline isolates the regime change). λ stays
+# at the VARIANCE_AVERSION floor until Sharpe climbs above baseline, then ramps to VARIANCE_AVERSION_MAX
+# as the rise reaches OBJ_SHARPE_RISE_FULL. OBJ_BASELINE_ALPHA is the EWMA weight for the baseline (small
+# = slow = a sustained regime becomes the new normal and λ relaxes). HYPOTHESIS: a Sharpe rise signals a
+# more efficient/crowded market — not guaranteed (competition compresses mean AND variance), so it's
+# tunable and fully off when VARIANCE_AVERSION_MAX=0. Fill-rate accuracy is NOT a knob here: it's always
+# applied upstream via the fill calibration on the EV inputs.
+# Tuned from the real ledger (2026-07): cumulative Sharpe naturally swings ~±0.7 with the day-mix, and a
+# calibration cycle is 10 resolved trades (~5h). α=0.05 → baseline half-life ~3 days (a regime stays
+# flagged for days, not absorbed in hours); RISE_FULL=1.5 → only a climb well beyond the ~0.7 noise band
+# reaches full λ, so ordinary Sharpe wobble doesn't false-trigger risk-aversion. Still coarse — no real
+# competition transition has been observed yet to calibrate against.
+OBJ_BASELINE_ALPHA = float(os.environ.get("OSRS_FLIPPER_OBJ_BASELINE_ALPHA", 0.05))
+OBJ_SHARPE_RISE_FULL = float(os.environ.get("OSRS_FLIPPER_OBJ_SHARPE_RISE_FULL", 1.5))
+# The competition signal compares a RECENT-window Sharpe (current) against the slow long-run baseline
+# (EWMA of the all-history Sharpe). A cumulative "current" is too sluggish to spot a regime change; a
+# recent window over OBJ_SHARPE_WINDOW_DAYS active days is responsive. GUARD: a window with fewer than
+# OBJ_SHARPE_MIN_BUCKETS active-day return buckets can't measure volatility — fit_growth then substitutes
+# a synthetic vol (MC_DEFAULT_CV·rate), which pins Sharpe at 1/MC_DEFAULT_CV (~1.67), a meaningless
+# artifact. Below the guard we treat the reading as absent (λ stays at the floor) rather than trust it.
+OBJ_SHARPE_WINDOW_DAYS = float(os.environ.get("OSRS_FLIPPER_OBJ_SHARPE_WINDOW_DAYS", 7))
+OBJ_SHARPE_MIN_BUCKETS = int(os.environ.get("OSRS_FLIPPER_OBJ_SHARPE_MIN_BUCKETS", 3))
+VARIANCE_AVERSION_MAX = float(os.environ.get("OSRS_FLIPPER_VARIANCE_AVERSION_MAX", 1.0))
+
+# Crowding / competition tilt (ON by default, gentle). The durable edge is items nobody else bothers
+# flipping — obscure, modest-volume niches where a real spread persists — NOT the high-turnover staples
+# every bot races (there you're exit liquidity). This multiplies the ranking SCORE (never the EV) by a
+# bounded factor from an item's both-side gp/hour turnover: > 1 for quiet niches below the pivot, < 1
+# for crowded staples above it, and exactly 1 at the pivot. Like the variance dial it deliberately
+# overlaps the fill-time term (throughput is already rewarded) — a blunt strategic tilt toward the
+# uncrowded edge on top. 0 disables. Keep flipping niches as the stack grows (see the edge memo).
+CROWDING_TILT = float(os.environ.get("OSRS_FLIPPER_CROWDING_TILT", 0.25))          # boost/penalty magnitude
+CROWDING_PIVOT = int(os.environ.get("OSRS_FLIPPER_CROWDING_PIVOT", 50_000_000))    # gp/h where crowding = 0.5
+
 # Per-item edge tracker: a rolling, recency-weighted (EWMA) score of each item's REALIZED profit,
 # fed into the ranking as a multiplier — so items that are actually losing you money right now get
 # down-weighted, WITHOUT a permanent blocklist. Regimes shift, so it's adaptive:
@@ -357,6 +394,13 @@ AWAKE_START = int(os.environ.get("OSRS_FLIPPER_AWAKE_START", 9))   # hour you wa
 AWAKE_END = int(os.environ.get("OSRS_FLIPPER_AWAKE_END", 23))     # hour you sleep
 # Overnight buys need a fat margin cushion so a small overnight price drift can't go red.
 OVERNIGHT_MIN_MARGIN = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_MARGIN", 0.04))
+# Overnight SAFETY gate (you're asleep for hours — a flat margin floor isn't enough because a fat-margin
+# item can also be wildly volatile). Only leave a buy overnight if its margin cushion DOMINATES the
+# item's daily swing: margin_pct ≥ OVERNIGHT_SAFETY_K · σ (σ = daily log-return vol, from the same 24h
+# series as the store screen). Also reject items already drifting DOWN (μ below OVERNIGHT_MIN_DRIFT) and
+# anything that fails the long-baseline pump gate. σ unmeasurable → rejected (can't verify safety).
+OVERNIGHT_SAFETY_K = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_SAFETY_K", 2.0))
+OVERNIGHT_MIN_DRIFT = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_MIN_DRIFT", -0.005))  # ≈ −0.5%/day tolerance
 # Target fill time for an overnight buy: you're asleep ~8h and can't cycle a slot, so bid LOW and
 # aim to fill near morning rather than in 1-2h — a slower fill means a better buy price (fatter
 # margin) with the slot working the whole night. The bid is chosen as the lowest that still fills
@@ -367,6 +411,11 @@ OVERNIGHT_FILL_TARGET_H = float(os.environ.get("OSRS_FLIPPER_OVERNIGHT_FILL_TARG
 # (fat-margin holds safe to leave) instead of fast day flips. ~one balanced round-trip (2h) +
 # buffer. With AWAKE_END=23 and 3h, `go` flips to night trades at 20:00.
 NIGHT_SWITCH_H = float(os.environ.get("OSRS_FLIPPER_NIGHT_SWITCH_H", 3))
+# Manual "I'm online now" override (`active` command): force the day/fast-flip regime for this many
+# minutes regardless of the clock, then auto-revert. For when you're flipping outside AWAKE hours and
+# want cyclable flips instead of the overnight/patient plan. Interactive `go` only — the Discord board
+# stays on the clock.
+ACTIVE_OVERRIDE_MIN = float(os.environ.get("OSRS_FLIPPER_ACTIVE_OVERRIDE_MIN", 60))
 
 # --- Recovery hold (see recovery.py) -----------------------------------------
 # For an underwater holding: hold for a bounce (and maybe double down) only if it traded ≥
@@ -421,6 +470,40 @@ MC_SEED = int(os.environ.get("OSRS_FLIPPER_MC_SEED", 7))
 MC_DEFAULT_CV = float(os.environ.get("OSRS_FLIPPER_MC_DEFAULT_CV", 0.6))
 MC_DECAY_PIVOT = int(os.environ.get("OSRS_FLIPPER_MC_DECAY_PIVOT", 20_000_000))
 MC_HORIZON_DAYS = int(os.environ.get("OSRS_FLIPPER_MC_HORIZON_DAYS", 180))
+
+# --- Wealth-cap glide + store-of-value screen (see wealth.py, store.py) -------
+# OSRS caps a coin stack at 2^31-1. Platinum tokens (1 = 1,000 gp) hold the overflow, so the ABSOLUTE
+# "can't hold more liquid value" ceiling is max coins + max platinum ≈ 2.15T. But that's unreachable —
+# measuring the glide against it leaves the feature dormant forever. So MAX_LIQUID_GP defaults to plain
+# max coins (2.147B): a reachable milestone where sitting on a maxed coin stack (rather than juggling
+# platinum) is the natural cue to start banking value in assets. The glide then begins at 70% (~1.5B)
+# and hits full at the cap. To instead treat platinum as usable headroom and pivot only near the true
+# ceiling, set OSRS_FLIPPER_MAX_LIQUID_GP=2149631130647 (= MAX_COINS * 1001).
+MAX_COINS = 2**31 - 1  # 2,147,483,647 — hard coin-stack cap
+MAX_LIQUID_GP = int(os.environ.get("OSRS_FLIPPER_MAX_LIQUID_GP", MAX_COINS))
+# Glide: fraction of the cap at which we START tilting new capital from flips into stores-of-value,
+# ramping linearly to full tilt AT the cap. 0.70 = begin at 70% of MAX_LIQUID_GP.
+CAP_GLIDE_START_FRAC = float(os.environ.get("OSRS_FLIPPER_CAP_GLIDE_START_FRAC", 0.70))
+# How hard a full glide (net worth at the cap) boosts store candidates over flips in the `go` plan.
+# store window-gp is multiplied by (1 + STORE_GLIDE_GAIN * glide); at glide=1 stores dominate.
+STORE_GLIDE_GAIN = float(os.environ.get("OSRS_FLIPPER_STORE_GLIDE_GAIN", 4.0))
+
+# Store-of-value screen: rank stable, deep, appreciating assets to park capital in near the cap. Not
+# spread capture — a quant risk/return view. Universe is bounded (high price + liquid) to cap the
+# per-item timeseries calls; drift μ and vol σ come from log-returns over STORE_LOOKBACK 24h bars.
+STORE_MIN_PRICE = int(os.environ.get("OSRS_FLIPPER_STORE_MIN_PRICE", 100_000))   # park value in few units
+STORE_MIN_TURNOVER = int(os.environ.get("OSRS_FLIPPER_STORE_MIN_TURNOVER", 5_000_000))  # gp/h depth to enter/exit size
+STORE_TIMESTEP = os.environ.get("OSRS_FLIPPER_STORE_TIMESTEP", "24h")            # bar size for the return series
+STORE_LOOKBACK = int(os.environ.get("OSRS_FLIPPER_STORE_LOOKBACK", 60))          # bars of history (~8wk of 24h)
+STORE_CANDIDATES = int(os.environ.get("OSRS_FLIPPER_STORE_CANDIDATES", 40))      # max items to pull timeseries for
+STORE_MAX_VOL = float(os.environ.get("OSRS_FLIPPER_STORE_MAX_VOL", 0.10))        # reject σ (daily) above this
+# Mean-variance risk aversion λ in the utility U = μ − 0.5·λ·σ² (daily). Cash is the baseline (U=0, no
+# risk, no nominal growth); a store must beat it — U>0 — to be worth holding, UNLESS the glide forces
+# conversion because excess cash above the cap simply can't be held. Higher λ = more risk-averse.
+STORE_RISK_AVERSION = float(os.environ.get("OSRS_FLIPPER_STORE_RISK_AVERSION", 8.0))
+# Hold horizon (days) used to turn a store's daily drift μ into an expected-appreciation gp figure the
+# `go` plan can rank against flips. A store's per-slot value ≈ capital · μ · this, then glide-boosted.
+STORE_HOLD_DAYS = int(os.environ.get("OSRS_FLIPPER_STORE_HOLD_DAYS", 30))
 
 # --- Output ------------------------------------------------------------------
 DISCORD_WEBHOOK_URL = os.environ.get("OSRS_FLIPPER_DISCORD_WEBHOOK")  # optional (one-way, one channel)

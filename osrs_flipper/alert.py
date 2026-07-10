@@ -220,6 +220,17 @@ def format_sell_plan(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _ceiling_hint(q) -> str:
+    """The buy-ceiling annotation: '(≤Y)' when there's headroom above the recommended buy (Y = the most
+    you can pay and still clear the margin floor — room for a +1/round-100), or a 'no room' warning when
+    the recommended buy already sits at/above that floor (a thin flip — rounding UP goes red)."""
+    if not q.max_buy:
+        return ""
+    if q.max_buy > q.buy_px:
+        return f" (≤{q.max_buy:,})"
+    return " (⚠ thin — don't round up)"
+
+
 def format_quote(q) -> str:
     """Render an optimal-quote result with per-leg fill probabilities and the frontier."""
     if q is None:
@@ -227,7 +238,8 @@ def format_quote(q) -> str:
     lines = [
         f"=== {q.name} — optimal quote (qty {q.qty:,}, {q.horizon_h:g}h horizon) ===",
         f"market: bid {q.bid:,} / ask {q.ask:,}",
-        f"RECOMMEND  buy {q.buy_px:,}  sell {q.sell_px:,}  →  net {q.net_unit:,}/unit  |  "
+        f"RECOMMEND  buy {q.buy_px:,}{_ceiling_hint(q)}  sell {q.sell_px:,}  "
+        f"→  net {q.net_unit:,}/unit  |  "
         f"fill: buy {q.p_buy:.0%} · sell {q.p_sell:.0%} · round {q.p_round:.0%}  |  EV {q.ev:,.0f} gp",
         "",
         "frontier (thin/fast → fat/slow):",

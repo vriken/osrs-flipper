@@ -54,7 +54,22 @@ class Quote:
     ev: float
     t_buy_h: float
     t_sell_h: float
+    max_buy: int = 0     # highest buy price still clearing the margin floors at sell_px (0 = n/a)
     frontier: list[dict] = field(default_factory=list)
+
+
+def max_buy_for_floor(sell_px: int, item_id: int | None = None, *,
+                      min_pct: float | None = None, min_net: int | None = None) -> int:
+    """Highest buy price that still clears the recommendation floors when selling at `sell_px`:
+    after-tax net ≥ MIN_NET_MARGIN gp AND net/buy ≥ MIN_MARGIN_PCT. Pay above this and the flip
+    drops below the 'worth listing' bar. The gap (this − recommended buy) is your headroom for a
+    queue-priority +1 or rounding — stay under it and the margin survives."""
+    min_pct = config.MIN_MARGIN_PCT if min_pct is None else min_pct
+    min_net = config.MIN_NET_MARGIN if min_net is None else min_net
+    proceeds = post_tax_received(int(sell_px), item_id=item_id)  # after-tax gp per unit sold
+    # abs floor:  proceeds − b ≥ min_net      → b ≤ proceeds − min_net
+    # pct floor:  (proceeds − b)/b ≥ min_pct  → b ≤ proceeds / (1 + min_pct)
+    return int(min(proceeds - min_net, proceeds / (1.0 + min_pct)))
 
 
 def _robust(bars: list[dict], key: str, n: int = 12) -> float | None:
@@ -191,7 +206,8 @@ def optimal_quote(
         item_id=item_id, name=name or str(item_id), qty=qty, bid=buy_lo, ask=ask, horizon_h=horizon_h,
         buy_px=best["buy"], sell_px=best["sell"], net_unit=best["net_unit"],
         p_buy=best["p_buy"], p_sell=best["p_sell"], p_round=best["p_round"], ev=best["ev"],
-        t_buy_h=best["t_buy_h"], t_sell_h=best["t_sell_h"], frontier=_frontier(results),
+        t_buy_h=best["t_buy_h"], t_sell_h=best["t_sell_h"],
+        max_buy=max_buy_for_floor(best["sell"], item_id), frontier=_frontier(results),
     )
 
 

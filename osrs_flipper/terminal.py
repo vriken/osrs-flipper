@@ -9,10 +9,12 @@
 
 Daily
   go                       the one command (above)
+  active [min|off]         force day/fast-flip regime for ~an hour (flipping outside AWAKE hours)
   quote <item> [qty]       solve optimal buy/sell prices for an item
   why <item>               explain a price: live vs recent norm, volume z, falling-knife check
   overnight [item]         plan one big ~8h buy to leave while you sleep
   gear [n]                 big-ticket / low-frequency items at their full spread (patient)
+  store [n]                stores of value to park capital in near the cash cap (risk/return)
 
 Occasional
   scan [n] [online|offline|balanced]   ranked live flips (raw, unallocated)
@@ -41,7 +43,21 @@ import sys
 import threading
 import time
 
-from . import alert, analysis, api, calibration, config, datasource, monitor, runelite, scanner
+from . import (
+    alert,
+    analysis,
+    api,
+    calibration,
+    config,
+    datasource,
+    macro,
+    monitor,
+    objective,
+    runelite,
+    scanner,
+    treasury,
+    wealth,
+)
 from .journal import Journal
 from .quote import optimal_quote
 
@@ -156,14 +172,22 @@ class Terminal:
         self._cal_eta: dict = {}       # live fill-time (ETA) correction by price×volume, auto-applied
         self._cal_edges: dict = {}     # live per-item realized-edge multipliers, auto-applied
         self._cal_impact: dict = {}    # live market-impact slope K (calibrate_impact from fills), auto-applied
+        self._cal_sharpe: float | None = None            # realized per-active-day Sharpe (competition regime signal)
+        self._cal_sharpe_baseline: float | None = None    # slow EWMA baseline; λ tracks the RISE above it
+        self._cal_var_aversion = config.VARIANCE_AVERSION  # adaptive variance-aversion λ from the Sharpe rise
         # auto-push: repost the compact `go` board to Discord on an idle tick (main thread — no DB race).
         # The board is the single message; it reposts at the bottom only when its actionable content changes.
         self._auto_push = False        # enabled flag (`alerts on/off`); auto-on at startup if a channel is set
         self._status_msg_id: str | None = None   # the current board message (deleted + reposted on change)
         self._last_dash = ""           # last board's actionable signature (repost only when it changes)
+        # manual "I'm online now" override (`active` cmd): epoch until which `go` forces the day/fast-flip
+        # regime regardless of the clock. 0 = off. Interactive `go` only — the auto-tick board stays clock-based.
+        self._active_until = 0.0
         # per-`go` caches for the below-cost sell policy (bounce read per item, one opportunity scan)
         self._cut_bounce: dict[int, bool | None] = {}
         self._cut_better: bool | None = None
+        self._store_rows: list | None = None  # per-`go` memo of the store-of-value screen (timeseries is dear)
+        self._ts_cache: dict = {}      # per-`go` memo of api.timeseries by (item,step) — bounds the overnight safety fetches
 
     # --- data helpers --------------------------------------------------------
     def mapping(self) -> dict[str, dict]:
@@ -198,7 +222,7 @@ class Terminal:
         print(f"  scanning ({mode})…")
         df = scanner.scan(top=top, bankroll=bankroll, mode=mode, limit_used=self._limit_used(),
                           fill_cal=self._fill_cal(), edges=self._edges(), beta=self._beta(), cal_eta=self._eta_cal(),
-                          impact_cal=self._impact_cal())
+                          impact_cal=self._impact_cal(), variance_aversion=self._var_aversion())
         print(alert.format_table(df, mode=mode))
         summary = alert.format_portfolio_summary(df, bankroll)
         if summary:
@@ -427,14 +451,77 @@ class Terminal:
         self._cal_eta = calibration.calibrate_eta(rows)  # realized fill-time vs predicted, by price×volume
         self._cal_edges = analysis.item_edges(analysis.collect_fills())  # per-item realized-edge (JSON audit)
         self._cal_impact = calibration.calibrate_impact(rows)  # market-impact slope K from fills (dormant→prior)
+        # adaptive objective: λ from a RISE of the RECENT-window Sharpe (current) above the slow long-run
+        # baseline (EWMA of the all-history Sharpe). Recent-vs-long-run spots a regime change that a
+        # cumulative "current" would smear out. Baseline persists in `meta` (survives restarts); it seeds
+        # at the long-run reading, so being consistently good reads as λ=0 — only a recent CLIMB fires.
+        self._cal_sharpe = self._realized_sharpe(window_days=config.OBJ_SHARPE_WINDOW_DAYS)  # recent
+        long_run = self._realized_sharpe()  # all-history → the baseline tracks this
+        self._cal_sharpe_baseline = objective.update_baseline(
+            long_run, self.j.get_meta("sharpe_baseline"))
+        if self._cal_sharpe_baseline is not None:
+            self.j.set_meta("sharpe_baseline", self._cal_sharpe_baseline)
+        self._cal_var_aversion = objective.variance_aversion(self._cal_sharpe, self._cal_sharpe_baseline)
         if self._cal_at >= 0:  # not the first (silent) computation → announce the refresh
             fg = self._cal_fill.get("global") or 1.0
             eg = self._cal_eta.get("global") or 1.0
             ik = calibration.effective_impact_k(self._cal_impact)
+            sh = f"{self._cal_sharpe:.2f}" if self._cal_sharpe is not None else "—"
+            bl = f"{self._cal_sharpe_baseline:.2f}" if self._cal_sharpe_baseline is not None else "—"
             print(f"  🔧 recalibrated ({n} resolved trades): β {self._cal_beta:.2f}→{new_beta:.2f} · "
-                  f"fill ×{fg:.2f} · eta ×{eg:.2f} · impact K {ik:.2f} (auto-applied)")
+                  f"fill ×{fg:.2f} · eta ×{eg:.2f} · impact K {ik:.2f} · Sharpe {sh} vs base {bl} → "
+                  f"obj λ{self._cal_var_aversion:.2f} (auto-applied)")
         self._cal_beta = new_beta
         self._cal_at = n
+
+    @staticmethod
+    def _recent_active_window(rows: list, window_days: float) -> list:
+        """Trailing rows within `window_days` of ACTIVE time (idle gaps clamped) of the latest trade."""
+        from . import progress
+        if not rows:
+            return rows
+        pos = progress._active_positions([r[0] for r in rows])  # cumulative active days per row
+        cutoff = pos[-1] - window_days
+        return [r for r, p in zip(rows, pos, strict=False) if p >= cutoff]
+
+    def _realized_sharpe(self, window_days: float | None = None) -> float | None:
+        """Per-active-day Sharpe (return ÷ volatility) from the realized ledger — the adaptive objective's
+        competition signal. `window_days` None = all history (the long-run baseline); a value = a recent
+        window (the responsive 'current'). None when there's too little history to form it honestly.
+
+        Sharpe is base-INVARIANT (base scales μ and σ equally, so μ/σ cancels), so any positive base works
+        — we use cash + inventory-at-cost (always ≥ 0, local to the journal, no live prices needed). NB:
+        do NOT route through build_history/j.cash() alone — liquid cash excludes capital tied in stock/
+        offers, giving a negative base that silently zeroes the signal.
+
+        GUARD: require ≥ OBJ_SHARPE_MIN_BUCKETS active-day return buckets. Below that, fit_growth can't
+        measure vol and substitutes MC_DEFAULT_CV·rate, which pins Sharpe at ~1/MC_DEFAULT_CV (a 1.67
+        artifact, not a real reading) — so we return None instead of trusting it."""
+        try:
+            from . import progress
+            rows = self.j.con.execute(
+                "SELECT ts, cash_delta, realized_pnl FROM ledger ORDER BY ts").fetchall()
+            if len(rows) < 3:
+                return None
+            base = self.j.cash() + sum(p.qty * p.avg_cost for p in self.j.positions())
+            if base <= 0:
+                return None
+            if window_days is not None:
+                rows = self._recent_active_window(rows, window_days)
+            pos = progress._active_positions([r[0] for r in rows])
+            buckets = progress._active_day_returns(rows, pos, base)  # per-active-day returns
+            if len(buckets) < config.OBJ_SHARPE_MIN_BUCKETS:  # vol unmeasurable → 1/CV artifact → distrust
+                return None
+            rate, vol, _ = progress.fit_growth(rows, base)
+            return objective.realized_sharpe(rate, vol)
+        except Exception:  # noqa: BLE001 — regime signal is best-effort; fall back to the config floor
+            return None
+
+    def _var_aversion(self) -> float:
+        """Live (cached) adaptive variance-aversion λ — gp/hour while uncrowded, rising as competition
+        (our realized Sharpe) climbs. Auto-applied to the ranking SCORE, never the EV."""
+        self._ensure_calibration()
+        return self._cal_var_aversion
 
     def _eta_cal(self) -> dict:
         """Live (cached) fill-time calibration (realized vs predicted ETA), auto-applied to the ETA model."""
@@ -814,7 +901,34 @@ class Terminal:
             parts.append(alert.color(f"{n} to collect", "yellow"))
         return "  active orders: " + ", ".join(parts) if parts else ""
 
-    def cmd_go(self, args: list[str]) -> None:
+    @staticmethod
+    def _compute_regime(hour: int, now: float, active_until: float,
+                        awake_start: int | None = None, awake_end: int | None = None,
+                        night_switch_h: float | None = None) -> tuple[bool, bool, float, str]:
+        """Decide the `go` regime → (awake, daytime, hours_until_sleep, label).
+
+        A live manual override (`active_until > now`) forces the day/fast-flip regime regardless of the
+        clock, with `hours_until_sleep` = the override's remaining time so flips cycle over that window.
+        Otherwise it's clock-driven: day inside AWAKE hours with runway > NIGHT_SWITCH_H, winding down
+        within that runway, overnight outside AWAKE hours. Pure (config injected) so it's unit-testable."""
+        awake_start = config.AWAKE_START if awake_start is None else awake_start
+        awake_end = config.AWAKE_END if awake_end is None else awake_end
+        night_switch_h = config.NIGHT_SWITCH_H if night_switch_h is None else night_switch_h
+        remaining = active_until - now
+        if remaining > 0:
+            return True, True, remaining / 3600.0, f"⚡ active ({round(remaining / 60)}m left)"
+        awake = awake_start <= hour < awake_end
+        hours_until_sleep = float(awake_end - hour) if awake else 0.0
+        daytime = awake and hours_until_sleep > night_switch_h
+        if daytime:
+            regime = "☀️ day"
+        elif awake:
+            regime = f"\U0001f319 winding down ({hours_until_sleep:.0f}h to sleep)"
+        else:
+            regime = "\U0001f4a4 overnight"
+        return awake, daytime, hours_until_sleep, regime
+
+    def cmd_go(self, args: list[str], interactive: bool = True) -> None:
         """THE one command — everything on one screen so you don't juggle review/port/pos/brief/gear/sets:
         active offers + verdicts, what to sell, and the best use of your free slots, and a single NEXT
         action. The buy plan ranks fast flips + gear + sets on one per-slot currency (best-case gear/set
@@ -823,6 +937,8 @@ class Terminal:
         (switches NIGHT_SWITCH_H before AWAKE_END). Alias: Enter."""
         from datetime import datetime
         self._cut_bounce, self._cut_better = {}, None  # fresh per-invocation cut-policy caches
+        self._store_rows = None  # fresh store screen per `go`
+        self._ts_cache = {}      # fresh timeseries memo per `go`
         hour = datetime.now().hour
         coins, tied = self._sync_cash()  # live coins on hand + gold tied up in open offers
         cash = int(self.j.cash()) or config.BANKROLL
@@ -838,21 +954,27 @@ class Terminal:
         # runway to bed picks the plan: a flip placed now must round-trip (buy + sell) before
         # you sleep to be a "day" flip; within NIGHT_SWITCH_H of bedtime it'd be left overnight,
         # so hand over the overnight plan (fat-margin holds safe to leave) instead.
-        awake = config.AWAKE_START <= hour < config.AWAKE_END
-        hours_until_sleep = config.AWAKE_END - hour if awake else 0
-        daytime = awake and hours_until_sleep > config.NIGHT_SWITCH_H
-        if daytime:
-            regime = "☀️ day"
-        elif awake:
-            regime = f"\U0001f319 winding down ({hours_until_sleep:.0f}h to sleep)"
-        else:
-            regime = "\U0001f4a4 overnight"
+        # override applies to the interactive view only; the background board (interactive=False) stays
+        # clock-based so a manual "active" window never repaints the Discord board.
+        awake, daytime, hours_until_sleep, regime = self._compute_regime(
+            hour, time.time(), self._active_until if interactive else 0.0)
         # cash (liquid) + net worth (everything: cash + held stock marked-to-market, listed-to-sell
         # included, + gold reserved in buy offers). The old "(+X in offers)" only counted buy-reserved
         # gold, so it hid the value of what you're currently selling — net worth doesn't.
         cash_str = f"cash {cash:,} · net worth {net_worth:,}"
+        glide = wealth.glide_factor(net_worth)
+        cap_str = (f" · 🏦 {net_worth / config.MAX_LIQUID_GP:.0%} to cap · accumulating" if glide > 0 else "")
+        lam = self._var_aversion()  # adaptive objective: gp/hour by default, risk-adjusted as competition rises
+        obj_str = ""
+        if lam > config.VARIANCE_AVERSION:  # lifted off the floor → Sharpe rising above baseline (competition)
+            sh = (f" · Sharpe {self._cal_sharpe:.1f}↑{self._cal_sharpe_baseline:.1f}"
+                  if self._cal_sharpe is not None and self._cal_sharpe_baseline is not None else "")
+            obj_str = f" · obj: risk-adj λ{lam:.2f}{sh}"
         print(f"  === {hour:02d}:00 · {cash_str} · {len(held)} held · "
-              f"{free}/{config.GE_SLOTS} slots free{pct} · {regime} ===")
+              f"{free}/{config.GE_SLOTS} slots free{pct} · {regime}{cap_str}{obj_str} ===")
+        bond_line = macro.bond_line()  # bond price as the GP-inflation gauge (regime context)
+        if bond_line:
+            print(f"  {bond_line}")
         if held and offers:  # split holdings into bank (sellable) vs tied up in GE
             sp = runelite.holdings_split(held, offers)
             nb = sum(1 for h in sp.values() if h["bank"] > 0)
@@ -980,6 +1102,13 @@ class Terminal:
                   & (df["turnover_1h"] >= config.TURNOVER_MIN_1H) & df["tradeable"]
                   & (df["hold_units"] > 0) & (df["margin_abs"] > 0) & ~df["suspect"]].copy()
 
+    def _stores(self, mp: list, lat: dict, hr: dict, *, top: int = 15) -> list:
+        """Memoized store-of-value screen for this `go` — treasury.rank_stores pulls a timeseries per
+        candidate, so compute it once and share it between the buy plan and the rebalance nudge."""
+        if self._store_rows is None:
+            self._store_rows = treasury.rank_stores(mp, lat, hr, top=max(top, 15))
+        return self._store_rows[:top]
+
     def _deploy_candidates(self, cash: int, held: list, offers: list, buy_slots: int, net_worth: int,
                            daytime: bool, hours: float, lat: dict, hr: dict, mp: list):
         """Gather every deployable candidate — fast flips + patient gear + GE sets + potion decants — as
@@ -1002,7 +1131,7 @@ class Terminal:
             picks, _idle, _floor = scanner.build_portfolio(
                 bankroll=cash, held_ids=list(exclude_ids), free_slots=buy_slots, limit_used=limit_used,
                 net_worth=net_worth, fill_cal=fcal, edges=self._edges(), beta=self._beta(),
-                impact_cal=self._impact_cal())
+                impact_cal=self._impact_cal(), variance_aversion=self._var_aversion())
             for p in picks:
                 cands.append(planner.Candidate(kind="flip", key=str(p["name"]), slots=1,
                     window_gp=self._flip_window_gp(p, hours), patient=False,
@@ -1032,6 +1161,27 @@ class Terminal:
                     fill_eta_h=r.get("fill_eta_h"), cost=float(bpx * qty),
                     payload={"buy": bpx, "sell": int(r["sell_px"]), "qty": qty,
                              "gp": int(r["margin_abs"]) * qty, "item_id": int(r["item_id"])}))
+
+        # stores of value (patient): only near the cash cap (glide > 0), where parking capital in a
+        # stable, appreciating asset beats growing cash we can't hold. Ranked by risk-adjusted expected
+        # appreciation on one slot's capital, then boosted by how urgently we must convert (the glide).
+        glide = wealth.glide_factor(net_worth)
+        if glide > 0:
+            for r in self._stores(mp, lat, hr, top=buy_slots + 3):
+                bpx = int(r["buy_px"]) or 0
+                qty = int(fair // bpx) if bpx else 0  # one slot's share of capital
+                if qty <= 0:
+                    continue
+                slot_cost = bpx * qty
+                exp_gp = slot_cost * max(0.0, r["mu"]) * config.STORE_HOLD_DAYS  # honest drift-based EV
+                window_gp = exp_gp * (1 + config.STORE_GLIDE_GAIN * glide)
+                if window_gp <= 0:
+                    continue  # flat/bleeding asset earns no slot over a flip — the `store` screen still lists it
+                cands.append(planner.Candidate(kind="store", key=str(r["name"]), slots=1,
+                    window_gp=window_gp, patient=True, item_ids=(int(r["item_id"]),),
+                    cost=float(slot_cost),
+                    payload={"buy": bpx, "sell": int(r["sell_px"]), "qty": qty, "gp": int(exp_gp),
+                             "item_id": int(r["item_id"]), "sharpe": r["sharpe"], "sigma": r["sigma"]}))
 
         # sets (patient, best-case): one-shot total gp; an ASSEMBLE ties up N buy slots at once
         for r in combos.scan_combinations(combinations.load("set"), lat, hr, mp, cash=cash,
@@ -1181,7 +1331,7 @@ class Terminal:
             print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}: nothing cleared the filters "
                   "(no flip/gear/set worth a slot right now)")
             return
-        tags = {"flip": "⚡flip", "gear": "🕰gear", "set": "🧩set", "decant": "🧪decant"}
+        tags = {"flip": "⚡flip", "gear": "🕰gear", "set": "🧩set", "decant": "🧪decant", "store": "🏦store"}
         used = sum(c.slots for c in chosen)
         print(f"  BEST FOR YOUR {buy_slots} FREE SLOT(S) · {regime}  (using {used})")
         print(f"    {'#':<2}{'type':7}{'trade':32}{'~gp':>12}{'slots':>6}  detail")
@@ -1193,8 +1343,14 @@ class Terminal:
                           f"sell {st:,} ({d['out_dose']})@{int(d['out_px']):,}")
             elif c.kind == "set":
                 detail = f"buy {int(d['cost']):,} → {int(d['proceeds']):,} × {d['conv']}"
+            elif c.kind == "store":  # store of value — a risk/return hold, not spread capture
+                detail = (f"park {int(d['qty']):,} @ {int(d['buy']):,} · σ {d['sigma'] * 100:.1f}%/d · "
+                          f"Sharpe {d['sharpe']:.2f}")
             else:
-                detail = f"buy {int(d['buy']):,} → sell {int(d['sell']):,} × {d['qty']:,}"
+                from .quote import max_buy_for_floor
+                mb = max_buy_for_floor(int(d["sell"]), d.get("item_id")) if d.get("sell") else 0
+                cap = f" (≤{mb:,})" if mb and mb > int(d["buy"]) else ""  # rounding/queue-bump headroom
+                detail = f"buy {int(d['buy']):,}{cap} → sell {int(d['sell']):,} × {d['qty']:,}"
                 if d.get("windows", 1) > 1:  # overnight qty spans >1 buy-limit window (fills across resets)
                     detail += f"  · {d['windows']}× buy-limit windows (overnight)"
                 gf = d.get("gone_frac")
@@ -1423,13 +1579,46 @@ class Terminal:
         buf = io.StringIO()
         sink = _Tee(sys.stdout, buf) if echo else buf
         with contextlib.redirect_stdout(sink):
-            self.cmd_go(args or [])
+            self.cmd_go(args or [], interactive=echo)
         return buf.getvalue()
 
     def _go(self, args: list) -> None:
         """Interactive `go`: print the full dashboard locally AND (if pushing is on) repost the compact
-        board to Discord — but only when its actionable content changed (see _status_sig)."""
-        self._maybe_repost(_compact_status(self._render_go(echo=True, args=args)))
+        board to Discord — but only when its actionable content changed (see _status_sig). While a manual
+        `active` override is live the local view forces day flips, but the reposted board is rendered
+        clock-based (interactive=False) so the override never leaks to Discord."""
+        local = self._render_go(echo=True, args=args)
+        board = self._render_go(echo=False) if self._active_until > time.time() else local
+        self._maybe_repost(_compact_status(board))
+
+    def cmd_active(self, args: list[str]) -> None:
+        """Force the day/fast-flip regime for a while regardless of the clock — for flipping outside your
+        AWAKE hours when you want cyclable flips, not the overnight/patient plan. Interactive `go` only
+        (the Discord board stays clock-based); auto-reverts on expiry.
+          active            on for ACTIVE_OVERRIDE_MIN minutes
+          active <minutes>  on for N minutes
+          active off        clear the override"""
+        from datetime import datetime
+        sub = args[0].lower() if args else "on"
+        if sub in ("off", "stop", "0"):
+            self._active_until = 0.0
+            print("  active override OFF — `go` back on the clock")
+            return
+        if sub == "on":
+            mins = config.ACTIVE_OVERRIDE_MIN
+        else:
+            try:
+                mins = float(sub)
+            except ValueError:
+                print(f"  usage: active [minutes|off]  (default {config.ACTIVE_OVERRIDE_MIN:.0f}m)")
+                return
+        if mins <= 0:
+            self._active_until = 0.0
+            print("  active override OFF — `go` back on the clock")
+            return
+        self._active_until = time.time() + mins * 60
+        print(f"  ⚡ active ON for {mins:.0f}m — `go` forces the day/fast-flip regime; auto-reverts at "
+              f"{datetime.fromtimestamp(self._active_until):%H:%M}. `active off` to clear.")
 
     def _bank_partial(self, o) -> tuple[int, int, int] | None:
         """For a partially-filled BUY, the profit of banking the already-filled units at the competitive
@@ -1452,7 +1641,9 @@ class Terminal:
         delete/edit, so it gets no live board."""
         if not (self._auto_push and alert.bot_enabled() and compact):
             return
-        sig = compact.split("\n", 1)[1] if "\n" in compact else compact  # drop the volatile header line
+        # signature = actionable content only: drop the volatile header (line 0) AND the macro line (bond
+        # price ticks constantly), so neither a bare cash tick nor a bond wiggle triggers a repost.
+        sig = "\n".join(ln for ln in compact.split("\n")[1:] if not ln.strip().startswith("macro:"))
         if sig != self._last_dash:
             self._status_msg_id = alert.repost_status(compact, self._status_msg_id)
             self._last_dash = sig
@@ -1536,14 +1727,50 @@ class Terminal:
         print(f"  OVERNIGHT plan — ≥{config.OVERNIGHT_MIN_MARGIN:.0%} cushion, sized to fill over ~8h:")
         print(alert.format_overnight(rows, cash, free))
 
+    def _ts(self, iid: int, step: str = "24h") -> list:
+        """Per-`go` memoized api.timeseries — many overnight-safety / store consumers want the same
+        item's series, so fetch each at most once per dashboard render."""
+        key = (iid, step)
+        if key not in self._ts_cache:
+            try:
+                self._ts_cache[key] = api.timeseries(iid, step)
+            except Exception:  # noqa: BLE001 — a missing series just means "can't verify" downstream
+                self._ts_cache[key] = []
+        return self._ts_cache[key]
+
+    @staticmethod
+    def _cushion_ok(margin_pct: float, sigma: float | None, mu: float | None) -> bool:
+        """Overnight safety predicate: the margin cushion must DOMINATE the item's daily swing
+        (margin ≥ K·σ) and the item must not be drifting down (μ ≥ OVERNIGHT_MIN_DRIFT). σ unknown →
+        unsafe (can't verify). Pure so it's unit-testable."""
+        if sigma is None or mu is None:
+            return False
+        return margin_pct >= config.OVERNIGHT_SAFETY_K * sigma and mu >= config.OVERNIGHT_MIN_DRIFT
+
+    def _overnight_safe(self, iid: int, margin_pct: float, lat: dict, hr: dict) -> bool:
+        """Is this item safe to leave in an unattended overnight buy? Volatility-scaled cushion + no
+        downtrend (μ/σ from the 24h series) AND the long-baseline pump gate (not elevated vs its 3-month
+        level). Stricter than the daytime buy gate because you can't react for hours."""
+        from . import anomaly
+        stats = treasury._returns_stats([treasury._mid(b) for b in self._ts(iid)][-config.STORE_LOOKBACK:])
+        mu, sigma = (stats if stats else (None, None))
+        if not self._cushion_ok(margin_pct, sigma, mu):
+            return False
+        return anomaly.is_buyable(anomaly.assess(iid, lat, hr, self._ts, long=True))
+
     def _overnight_rows(self, cash: int, free: int, exclude: set[int]) -> list[dict]:
         """Compute one big cushioned ~8h buy per free slot (the `overnight` plan's rows). Shared by
-        `overnight` and by `go`'s patient regime, where they become the fast-flip candidates."""
+        `overnight` and by `go`'s patient regime, where they become the fast-flip candidates.
+
+        SAFETY: each pick must clear `_overnight_safe` — a volatility-scaled margin cushion (margin ≥
+        OVERNIGHT_SAFETY_K·σ), no downtrend, and the long-baseline pump gate — because it sits unattended
+        for hours. A flat margin floor alone let fat-but-volatile items through that could gap red."""
         from .quote import optimal_quote
         limit_used = self._limit_used()
         mapping = {r["id"]: r for r in api.mapping()}
         df = scanner.scan(mode="offline", bankroll=cash, top=40, limit_used=limit_used, beta=self._beta())
         exclude = set(exclude)
+        lat, hr = api.latest(), api.one_hour()
         rows, remaining, slots_left = [], float(cash), free
         for _, r in df.iterrows():
             if slots_left <= 0:
@@ -1567,6 +1794,11 @@ class Terminal:
             aqty = min(int(q.qty), int(remaining // q.buy_px))
             if aqty <= 0:
                 continue
+            # SAFETY on the REALIZED overnight margin (q.net_unit/buy_px), not the scan's pre-quote
+            # estimate — the 8h low-bid quote is thinner, so gate on what you'll actually leave unattended.
+            realized_margin = q.net_unit / q.buy_px if q.buy_px else 0.0
+            if not self._overnight_safe(iid, realized_margin, lat, hr):
+                continue  # volatility cushion / downtrend / pump gate — unsafe to leave unattended
             deploy = aqty * q.buy_px
             # expected overnight profit = net/unit × qty × P(fill). Don't floor a single unit's
             # fractional expected fill to 0 — int(1 × 0.73) = 0 made a fat-spread ring show +0.
@@ -1835,6 +2067,28 @@ class Terminal:
             print(f"  ({hidden} pricier items beyond your {cash:,} hidden — `gear all` to see them)")
         print("  qty = affordable × volume-realizable over ~8h; post at the bid/ask and leave it. "
               "Slow to fill — don't expect day-flip turnover.")
+
+    def cmd_store(self, args: list[str]) -> None:
+        """Stores of value — where to PARK capital, not flip it. Near the cash cap you can't grow liquid
+        gold (see the 🏦 header), so wealth has to sit in held assets. This ranks stable, deep,
+        appreciating items on a quant risk/return view (NOT spread capture): daily drift μ, volatility σ,
+        Sharpe (μ/σ), and mean-variance utility U = μ−½·λ·σ². Cash is the baseline (U=0) — a store must
+        beat it to be `worth holding`. `store <n>` shows n rows (default 15)."""
+        n = next((int(a) for a in args if a.isdigit()), 15)
+        rows = treasury.rank_stores(api.mapping(), api.latest(), api.one_hour(), top=n)
+        if not rows:
+            print(f"  no store-of-value candidates cleared the filters (need price ≥ {config.STORE_MIN_PRICE:,}, "
+                  f"≥ {config.STORE_MIN_TURNOVER:,} gp/h depth, σ ≤ {config.STORE_MAX_VOL:.0%}/day)")
+            return
+        print(f"  STORE OF VALUE · risk/return on a {config.STORE_LOOKBACK}-bar {config.STORE_TIMESTEP} "
+              f"lookback · λ={config.STORE_RISK_AVERSION:g} · cash is the U=0 baseline")
+        print(f"  {'item':22}{'price':>13}{'μ/day':>8}{'σ/day':>8}{'Sharpe':>8}{'utility':>9}{'gp/h depth':>13}  hold?")
+        for r in rows:
+            hold = "✓" if r["worth_holding"] else "·"
+            print(f"  {r['name'][:22]:22}{r['price']:>13,}{r['mu'] * 100:>7.2f}%{r['sigma'] * 100:>7.2f}%"
+                  f"{r['sharpe']:>8.2f}{r['utility'] * 100:>8.2f}%{r['turnover_1h']:>13,}  {hold}")
+        print("  μ/σ from log-returns; Sharpe = return per unit risk; utility nets a risk penalty. "
+              "Park passively at the bid and hold — this is capital preservation, not turnover.")
 
     def cmd_sets(self, args: list[str]) -> None:
         """GE set arbitrage: buy the pieces and sell the combined set (ASSEMBLE), or buy the set and sell
@@ -2367,8 +2621,10 @@ class Terminal:
         handlers = {
             # daily
             "go": lambda a: self._go(a),
+            "active": lambda a: self.cmd_active(a),
             "quote": lambda a: self.cmd_quote(a), "why": lambda a: self.cmd_why(a),
             "overnight": lambda a: self.cmd_overnight(a), "gear": lambda a: self.cmd_gear(a),
+            "store": lambda a: self.cmd_store(a),
             # occasional
             "scan": lambda a: self.cmd_scan(a), "port": lambda a: self.cmd_port(a),
             "sets": lambda a: self.cmd_sets(a), "decant": lambda a: self.cmd_decant(a),

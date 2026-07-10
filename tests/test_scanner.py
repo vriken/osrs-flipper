@@ -302,3 +302,26 @@ def test_placement_order_ranks_by_roi_not_just_speed(monkeypatch):
     picks, _, _ = scanner.build_portfolio(bankroll=100_000, free_slots=1)
     assert picks[0]["name"] == "High ROI"
 
+
+
+# --- crowding / competition tilt: favour uncrowded niches over bot-raced staples --------------------
+
+def test_crowding_tilt_boosts_niches_penalises_staples(monkeypatch):
+    monkeypatch.setattr(config, "CROWDING_TILT", 0.25)
+    monkeypatch.setattr(config, "CROWDING_PIVOT", 50_000_000)
+    pivot = scanner._crowding_tilt(50_000_000)
+    niche = scanner._crowding_tilt(1_000_000)      # well below pivot → quiet niche
+    staple = scanner._crowding_tilt(2_000_000_000)  # far above pivot → bot-raced staple
+    assert pivot == 1.0                              # at the pivot: neutral
+    assert 1.0 < niche <= 1.25                       # niche boosted, capped at 1+gain
+    assert staple < 1.0                              # crowded staple penalised
+    assert niche > pivot > staple                    # monotonic in crowding
+
+
+def test_crowding_tilt_disabled_and_edge_cases(monkeypatch):
+    monkeypatch.setattr(config, "CROWDING_TILT", 0.0)
+    assert scanner._crowding_tilt(1_000_000) == 1.0  # gain 0 → no-op
+    monkeypatch.setattr(config, "CROWDING_TILT", 0.25)
+    assert scanner._crowding_tilt(None) == 1.0        # missing turnover → neutral
+    assert scanner._crowding_tilt(0) == 1.0
+    assert scanner._crowding_tilt(10**15) >= 0.1      # floored, never zero/negative

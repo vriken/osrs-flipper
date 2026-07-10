@@ -451,7 +451,7 @@ def test_idle_when_nothing_to_do():
 # --- Discord auto-push: dashboard capture + change-gated status edit ---------------------------------
 
 def test_render_go_captures_text_and_echo_controls_console(capsys):
-    stub = types.SimpleNamespace(cmd_go=lambda a: print("DASHBOARD LINE"))
+    stub = types.SimpleNamespace(cmd_go=lambda a, interactive=True: print("DASHBOARD LINE"))
     silent = Terminal._render_go(stub, echo=False)
     assert silent.strip() == "DASHBOARD LINE"
     assert capsys.readouterr().out == ""                      # echo=False → nothing on the console
@@ -601,3 +601,63 @@ def test_bank_partial_computes_profit_of_banking_now(monkeypatch):
     assert sell_px == 130 and net_now > 0 and gp == net_now * 60
     o0 = Offer(slot=3, item_id=561, is_buy=True, state="BUYING", qty=100, price=100, filled=0)
     assert Terminal._bank_partial(types.SimpleNamespace(j=j), o0) is None    # nothing filled → nothing to bank
+
+
+# --- regime decision: clock-driven with a manual `active` override ----------------------------------
+
+_SCHED = dict(awake_start=9, awake_end=23, night_switch_h=3)  # wake 9, sleep 23, night switch 3h before
+
+
+def test_regime_clock_day():
+    awake, daytime, hrs, label = Terminal._compute_regime(12, 1000.0, 0.0, **_SCHED)
+    assert awake and daytime and hrs == 11.0 and label == "☀️ day"
+
+
+def test_regime_clock_winding_down():
+    # 21:00 → awake but only 2h to sleep (< 3h switch) → not daytime
+    awake, daytime, hrs, label = Terminal._compute_regime(21, 1000.0, 0.0, **_SCHED)
+    assert awake and not daytime and hrs == 2.0 and "winding down" in label
+
+
+def test_regime_clock_overnight():
+    awake, daytime, hrs, label = Terminal._compute_regime(3, 1000.0, 0.0, **_SCHED)
+    assert not awake and not daytime and hrs == 0.0 and label == "\U0001f4a4 overnight"
+
+
+def test_active_override_forces_day_at_night():
+    # 03:00 (would be overnight) but override live 30m out → forced day, hours = remaining window
+    now = 1000.0
+    awake, daytime, hrs, label = Terminal._compute_regime(3, now, now + 1800, **_SCHED)
+    assert awake and daytime and hrs == pytest.approx(0.5) and label == "⚡ active (30m left)"
+
+
+def test_active_override_expired_falls_back_to_clock():
+    now = 1000.0
+    awake, daytime, hrs, label = Terminal._compute_regime(3, now, now - 1, **_SCHED)
+    assert not daytime and label == "\U0001f4a4 overnight"  # expired override == off
+
+
+# --- recent active-time window for the competition-Sharpe signal ------------------------------------
+
+def test_recent_active_window_selects_trailing_active_days():
+    # 10 rows one day apart (each gap < the 24h idle cap) → 1 active day between consecutive rows
+    rows = [(i * 86400, 0.0, 100.0) for i in range(10)]
+    win = Terminal._recent_active_window(rows, 3)   # trailing 3 active days
+    assert [r[0] // 86400 for r in win] == [6, 7, 8, 9]   # last ~3 active days of rows
+    assert Terminal._recent_active_window(rows, 100) == rows   # window wider than history → all rows
+    assert Terminal._recent_active_window([], 3) == []          # empty ledger → empty
+
+
+# --- overnight safety: margin cushion must dominate the item's daily volatility ---------------------
+
+def test_overnight_cushion_predicate(monkeypatch):
+    monkeypatch.setattr(term_mod.config, "OVERNIGHT_SAFETY_K", 2.0)
+    monkeypatch.setattr(term_mod.config, "OVERNIGHT_MIN_DRIFT", -0.005)
+    # 6.5% margin vs 8.2%/day σ (the real Zamorak-chaps case) → cushion < 2σ → UNSAFE
+    assert Terminal._cushion_ok(0.065, 0.082, 0.001) is False
+    # 11.6% margin vs 4.8% σ → 11.6 ≥ 2·4.8=9.6 → SAFE
+    assert Terminal._cushion_ok(0.116, 0.048, 0.0) is True
+    # safe cushion but drifting DOWN faster than tolerance → UNSAFE
+    assert Terminal._cushion_ok(0.20, 0.05, -0.02) is False
+    # σ unknown → can't verify → UNSAFE
+    assert Terminal._cushion_ok(0.20, None, 0.01) is False
