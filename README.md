@@ -1,5 +1,9 @@
 # osrs-flipper
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Linting: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 A flip-finder, portfolio manager, and strategy backtester for the Old School RuneScape
 Grand Exchange. It ranks live flips, plans how to deploy your whole bankroll across your
 GE slots, tracks realised/unrealised P&L, learns from your actual fills, and backtests
