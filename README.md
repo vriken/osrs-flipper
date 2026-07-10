@@ -136,7 +136,7 @@ Each `go` runs, in order:
    overnight → patient gear/sets/decants take priority, since each only fills once while you sleep.
 3. **Header** — cash, net worth (cash + held stock marked-to-market + gp tied in offers), held count,
    free/total GE slots, % to a bond (F2P), the regime tag, a "🏦 % to cap" note as net worth nears the
-   coin cap, and an adaptive-objective note once your realised Sharpe lifts variance-aversion off its floor.
+   coin cap, and an adaptive-objective note once your realised Sharpe rises above its baseline and lifts variance-aversion off its floor.
 4. **Macro line** — a bond-price gold-inflation gauge (`inflating` / `deflating` / `stable`).
 5. **Holdings split** — bank (sellable) vs listed-in-GE vs buying.
 6. **ACTIVE OFFERS** — every live slot with a verdict (`collect` / `margin gone` / `stale` / `slow` /
@@ -174,7 +174,7 @@ adds the maintenance commands.
 | `active [min\|off]` | Force the day/fast-flip regime for a while (default `ACTIVE_OVERRIDE_MIN`), for flipping outside your awake hours |
 | `quote <item> [qty]` | Solve the gp/hour-optimal buy/sell prices for an item; logs the prediction for calibration |
 | `why <item>` | Explain a price: live vs 1d/2wk/3mo/30d norms, volume z-score, slope, falling-knife / pump phase, 5m margin-durability |
-| `overnight [item]` | No arg → diversified ~8h buys across all free slots. With an item → one big cushioned buy sized for ~2 buy-limit windows |
+| `overnight [item]` | No arg → diversified ~8h buys across all free slots. With an item → one big cushioned buy sized for ~2 buy-limit windows. Every pick must clear a **volatility-scaled safety gate** (below), since it sits unattended for hours |
 | `gear [n\|all]` | Big-ticket, low-frequency items at their full spread (patient, best-case). `gear all` ignores cash (aspirational) |
 | `store [n]` | Stores of value to park capital in near the cash cap — risk/return ranked (μ, σ, Sharpe, utility vs holding cash) |
 
@@ -332,10 +332,22 @@ would just sit out of market. In **patient/overnight** mode it doesn't take the 
 *lowest bid that still fills within the window*, letting the bid drop to where sellers have actually dumped:
 bid low, fill by morning, fatter margin.
 
-An **adaptive objective** (`objective.py`) ramps variance aversion from its floor toward `VARIANCE_AVERSION_MAX`
-as your realised per-active-day Sharpe climbs from `OBJ_SHARPE_LOW` (1.0) to `OBJ_SHARPE_HIGH` (3.0) — the
-hypothesis being that a rising Sharpe signals a more crowded/efficient market, so chase steadier flips as easy
-edge dries up. Stated in the code as a hypothesis, not a law, and fully switchable off (`VARIANCE_AVERSION_MAX=0`).
+Because an overnight buy sits **unattended for hours**, a flat margin floor isn't enough — a fat-margin item can
+also be wildly volatile. So overnight picks must additionally clear a **volatility-scaled safety gate**: the margin
+cushion has to *dominate* the item's daily swing (`margin_pct ≥ OVERNIGHT_SAFETY_K·σ`, σ = daily log-return
+volatility from the same 24h series the store screen uses), the item must not already be drifting down
+(`μ ≥ OVERNIGHT_MIN_DRIFT`), and it must pass the long-baseline pump gate. If σ can't be measured, the item is
+rejected — safety can't be verified, so it isn't left overnight.
+
+An **adaptive objective** (`objective.py`) ramps variance aversion from its floor toward `VARIANCE_AVERSION_MAX`,
+but keyed to a *rise* in your realised Sharpe, not its absolute level — a high Sharpe on a small stack just means
+you're good, whereas a rise signals a regime change. It compares a responsive recent-window Sharpe (over
+`OBJ_SHARPE_WINDOW_DAYS`, default 7 active days) against a slow trailing baseline (an EWMA of your all-history
+Sharpe, weight `OBJ_BASELINE_ALPHA` = 0.05 ≈ 3-day half-life); λ stays at the floor until the recent window climbs
+above baseline and reaches full only once the rise hits `OBJ_SHARPE_RISE_FULL` (1.5). A window with fewer than
+`OBJ_SHARPE_MIN_BUCKETS` (3) active-day return buckets can't measure volatility, so its reading is treated as
+absent (λ stays at the floor) rather than trusted. The hypothesis — a Sharpe rise signals a more crowded/efficient
+market — is stated in the code as a hypothesis, not a law, and the whole tilt is switchable off (`VARIANCE_AVERSION_MAX=0`).
 
 ### Portfolio construction
 
@@ -654,7 +666,10 @@ environment variable. `OSRS_FLIPPER_CONTACT` is the only one you must set.
 | `SLOT_WORTH_LAMBDA` | `…_SLOT_WORTH_LAMBDA` | 0.5 | Opportunity-cost multiplier for a GE slot |
 | `MAX_ALLOC_FRAC` | `…_MAX_ALLOC_FRAC` | 0.5 | Cap on capital in one position |
 | `VARIANCE_AVERSION` | `…_VARIANCE_AVERSION` | 0.0 | Ranking penalty for low-completion flips (floor) |
-| `OBJ_SHARPE_LOW` / `_HIGH` | `…_OBJ_SHARPE_LOW`/`_HIGH` | 1.0 / 3.0 | Sharpe range the adaptive objective ramps over |
+| `OBJ_SHARPE_WINDOW_DAYS` | `…_OBJ_SHARPE_WINDOW_DAYS` | 7 | Recent-window (active days) for the current Sharpe reading |
+| `OBJ_BASELINE_ALPHA` | `…_OBJ_BASELINE_ALPHA` | 0.05 | EWMA weight for the slow Sharpe baseline (~3-day half-life) |
+| `OBJ_SHARPE_RISE_FULL` | `…_OBJ_SHARPE_RISE_FULL` | 1.5 | Sharpe rise above baseline at which λ hits `VARIANCE_AVERSION_MAX` |
+| `OBJ_SHARPE_MIN_BUCKETS` | `…_OBJ_SHARPE_MIN_BUCKETS` | 3 | Min active-day buckets to trust the window's Sharpe |
 | `VARIANCE_AVERSION_MAX` | `…_VARIANCE_AVERSION_MAX` | 1.0 | Ceiling for adaptive variance aversion (0 = off) |
 | `CROWDING_TILT` | `…_CROWDING_TILT` | 0.25 | Uncrowded-niche tilt magnitude |
 | `CROWDING_PIVOT` | `…_CROWDING_PIVOT` | 50,000,000 | gp/h where crowding = 0.5 |
@@ -665,7 +680,9 @@ environment variable. `OSRS_FLIPPER_CONTACT` is the only one you must set.
 | `SWAP_MIN_AGE_H` | `…_SWAP_MIN_AGE_H` | 0.5 | Don't cancel a just-placed buy |
 | **Schedule** ||||
 | `AWAKE_START` / `_END` | `…_AWAKE_START`/`_END` | 9 / 23 | Active-hours window |
-| `OVERNIGHT_MIN_MARGIN` | `…_OVERNIGHT_MIN_MARGIN` | 0.04 | Margin cushion required overnight |
+| `OVERNIGHT_MIN_MARGIN` | `…_OVERNIGHT_MIN_MARGIN` | 0.04 | Flat margin floor to consider an overnight buy |
+| `OVERNIGHT_SAFETY_K` | `…_OVERNIGHT_SAFETY_K` | 2.0 | Overnight cushion must be ≥ this × daily σ (σ unmeasurable → reject) |
+| `OVERNIGHT_MIN_DRIFT` | `…_OVERNIGHT_MIN_DRIFT` | −0.005 | Reject overnight buys already drifting down past this (≈ −0.5%/day) |
 | `OVERNIGHT_FILL_TARGET_H` | `…_OVERNIGHT_FILL_TARGET_H` | 8 | Target fill time for overnight bids |
 | `NIGHT_SWITCH_H` | `…_NIGHT_SWITCH_H` | 3 | Hours before bed that `go` switches to overnight |
 | `ACTIVE_OVERRIDE_MIN` | `…_ACTIVE_OVERRIDE_MIN` | 60 | Duration of a manual `active` override |
@@ -767,4 +784,7 @@ a heavier β strictly reduces P&L). Lint with `ruff` (config in `pyproject.toml`
 - **`margin_flip` backtests are not trustworthy on coarse data** — trust its live-scanner EV, and only trust a
   backtest once weeks of self-collected 5m history exist.
 - **The adaptive objective's Sharpe→competition link is a hypothesis**, stated as such in the code, and can be
-  switched off entirely.
+  switched off entirely. It's also uncalibrated — no real competition transition has been observed to tune it against.
+- **Overnight buys are held to a stricter bar than daytime flips.** An unattended buy must clear a
+  volatility-scaled cushion (`margin ≥ K·σ`), show no downtrend, and pass the pump gate — and is rejected outright
+  if its volatility can't be measured. Better to leave a slot empty overnight than to leave it exposed.
